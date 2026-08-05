@@ -34,6 +34,7 @@ import {
   PROVIDER_LABEL,
   RAILS,
   payoutCapability,
+  settlementNote,
 } from '@/lib/rails'
 import { keys, useSellers, useSettings } from '@/lib/queries'
 
@@ -70,6 +71,9 @@ export function RailsPage() {
 
   const providers: Provider[] = ['flutterwave', 'stripe']
   const currencies = settings.data?.currencies ?? []
+  // The first configured currency is the tenant's home currency — everything
+  // else is a foreign balance with its own settlement rules.
+  const homeCurrency = currencies[0] ?? 'RWF'
 
   // The markets that matter to this tenant: everywhere they have a seller,
   // plus international for card-paying visitors.
@@ -114,29 +118,56 @@ export function RailsPage() {
                 </p>
               ) : (
                 <div className="mt-5 space-y-4">
-                  {rows.map((b) => (
-                    <div key={b.currency}>
-                      <p className="mb-2 text-xs font-semibold tracking-[0.06em] text-fg-muted uppercase">
-                        {b.currency}
-                      </p>
-                      <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
-                        <Row label="Held" value={formatMoney(b.held, b.currency)} />
-                        <Row
-                          label="Clearing"
-                          value={formatMoney(b.pending_clearance, b.currency)}
-                        />
-                        <Row
-                          label="Available"
-                          value={formatMoney(b.available, b.currency)}
-                        />
-                        <Row
-                          label="Paid out"
-                          value={formatMoney(b.paid_out, b.currency)}
-                          muted
-                        />
-                      </dl>
-                    </div>
-                  ))}
+                  {rows.map((b) => {
+                    // Each collected currency is its own balance at the
+                    // provider, and getting a foreign one out has conditions
+                    // the home currency does not.
+                    const settlement = settlementNote(b.currency, homeCurrency)
+
+                    return (
+                      <div key={b.currency}>
+                        <p className="mb-2 text-xs font-semibold tracking-[0.06em] text-fg-muted uppercase">
+                          {b.currency} balance
+                        </p>
+                        <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
+                          <Row label="Held" value={formatMoney(b.held, b.currency)} />
+                          <Row
+                            label="Clearing"
+                            value={formatMoney(b.pending_clearance, b.currency)}
+                          />
+                          <Row
+                            label="Available"
+                            value={formatMoney(b.available, b.currency)}
+                          />
+                          <Row
+                            label="Paid out"
+                            value={formatMoney(b.paid_out, b.currency)}
+                            muted
+                          />
+                        </dl>
+
+                        {settlement && (
+                          <p
+                            className={cx(
+                              'mt-2.5 rounded-lg px-3 py-2 text-xs leading-relaxed',
+                              settlement.minimum !== null &&
+                                b.available < settlement.minimum
+                                ? 'bg-pending-soft text-pending'
+                                : 'bg-surface-2 text-fg-muted',
+                            )}
+                          >
+                            {settlement.minimum !== null &&
+                              b.available < settlement.minimum && (
+                                <strong className="font-semibold">
+                                  Below the settlement minimum.{' '}
+                                </strong>
+                              )}
+                            {settlement.detail}
+                          </p>
+                        )}
+                      </div>
+                    )
+                  })}
                 </div>
               )}
             </Card>

@@ -64,7 +64,12 @@ export const RAILS: Rail[] = [
     collect: true,
     payout: false,
     verified: false,
-    note: 'Cards collect only — refunds go back to the card, payouts do not.',
+    note:
+      'Cards collect only — refunds go back to the card, payouts do not. ' +
+      'USD collection is supported and lands in a separate USD balance, but ' +
+      'whether a Rwandan-issued card can be charged in USD is the issuing ' +
+      "bank's decision, not Flutterwave's. Offer USD to international " +
+      'cardholders; expect local cards to decline it.',
   },
   {
     method: 'bank_transfer',
@@ -266,4 +271,53 @@ export function payoutCapability(country: Country): {
 /** True when a market has at least one collection rail we can take money on. */
 export function isMarketSupported(country: Country, currency: Currency): boolean {
   return collectionRails(country, currency).length > 0
+}
+
+// ---------------------------------------------------------------------------
+// Settlement
+// ---------------------------------------------------------------------------
+
+/**
+ * Collecting a currency is not the same as being able to withdraw it.
+ *
+ * Flutterwave holds each collected currency in its own balance. Getting a
+ * foreign-currency balance out to a bank account has conditions the local
+ * currency does not — which is why `available` on the Rails screen can be
+ * non-zero and still not be withdrawable this week.
+ *
+ * Verified against Flutterwave's settlement documentation, August 2026.
+ * Re-check before launch: thresholds change.
+ */
+export interface SettlementNote {
+  currency: Currency
+  /** Minimum balance, in minor units, before a settlement will run. */
+  minimum: number | null
+  detail: string
+}
+
+export function settlementNote(
+  currency: Currency,
+  homeCurrency: Currency,
+): SettlementNote | null {
+  if (currency === homeCurrency) return null
+
+  if (currency === 'USD') {
+    return {
+      currency,
+      minimum: 1000_00,
+      detail:
+        'USD settles to a USD bank account only once the balance reaches ' +
+        '$1,000, and that account must be added to your Flutterwave profile ' +
+        'first. Settling the same balance into your local currency instead ' +
+        'has no such threshold.',
+    }
+  }
+
+  return {
+    currency,
+    minimum: null,
+    detail:
+      `${currency} is held as its own balance and settles separately from ` +
+      'your local currency.',
+  }
 }
