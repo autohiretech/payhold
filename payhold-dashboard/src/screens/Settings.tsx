@@ -12,19 +12,12 @@ import {
   cx,
 } from '@/components/ui'
 import { formatMoney, formatPercent } from '@/lib/format'
+import { SUPPORTED_CURRENCIES } from '@/lib/rails'
 import { useMoneyAction, useSettings } from '@/lib/queries'
 
-// Ordered to match the markets in lib/rails.ts, local currencies first.
-const ALL_CURRENCIES: Currency[] = [
-  'RWF',
-  'KES',
-  'UGX',
-  'TZS',
-  'GHS',
-  'NGN',
-  'USD',
-  'EUR',
-]
+// Derived from the rail table: a currency no rail can collect would only
+// create deals nobody can pay.
+const ALL_CURRENCIES: Currency[] = SUPPORTED_CURRENCIES
 
 export function SettingsPage() {
   const settings = useSettings()

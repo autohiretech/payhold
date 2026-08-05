@@ -17,20 +17,11 @@
 export type Money = number
 
 /**
- * ISO-4217 codes for every market PayHold serves. Kept as a union rather than
- * `string` so a typo in a rail table is a compile error, not a runtime one.
+ * Country and currency come from the world registry, so the rail tables and
+ * the domain types can never disagree about which markets exist.
  */
-export type Currency =
-  // African local currencies
-  | 'AOA' | 'BIF' | 'BWP' | 'CDF' | 'CVE' | 'DJF' | 'DZD' | 'EGP' | 'ERN'
-  | 'ETB' | 'GHS' | 'GMD' | 'GNF' | 'KES' | 'KMF' | 'LRD' | 'LSL' | 'LYD'
-  | 'MAD' | 'MGA' | 'MRU' | 'MUR' | 'MWK' | 'MZN' | 'NAD' | 'NGN' | 'RWF'
-  | 'SCR' | 'SDG' | 'SLE' | 'SOS' | 'SSP' | 'STN' | 'SZL' | 'TND' | 'TZS'
-  | 'UGX' | 'XAF' | 'XOF' | 'ZAR' | 'ZMW' | 'ZWG'
-  // International settlement currencies
-  | 'USD' | 'EUR' | 'GBP'
-  // Zero-decimal codes referenced by the formatter
-  | 'VUV' | 'CLP' | 'JPY' | 'KRW' | 'PYG'
+export type { Country, Currency } from '@/lib/countries'
+import type { Country, Currency } from '@/lib/countries'
 
 /** ISO-8601 timestamp. */
 export type Timestamp = string
@@ -46,26 +37,6 @@ export type Provider = 'flutterwave' | 'stripe' | 'fake'
  */
 export type PaymentMethod = 'card' | 'mobile_money' | 'bank_transfer'
 
-/**
- * ISO-3166 alpha-2 for every country PayHold serves: all 54 African states
- * plus the United States. Drives rail selection — the same method routes to a
- * different provider, or is unavailable, depending on the market.
- */
-export type Country =
-  // North
-  | 'DZ' | 'EG' | 'LY' | 'MA' | 'SD' | 'TN'
-  // West
-  | 'BJ' | 'BF' | 'CV' | 'CI' | 'GM' | 'GH' | 'GN' | 'GW' | 'LR' | 'ML'
-  | 'MR' | 'NE' | 'NG' | 'SN' | 'SL' | 'TG'
-  // Central
-  | 'CM' | 'CF' | 'TD' | 'CG' | 'CD' | 'GQ' | 'GA' | 'ST'
-  // East
-  | 'BI' | 'KM' | 'DJ' | 'ER' | 'ET' | 'KE' | 'MG' | 'MU' | 'RW' | 'SC'
-  | 'SO' | 'SS' | 'TZ' | 'UG'
-  // Southern
-  | 'AO' | 'BW' | 'SZ' | 'LS' | 'MW' | 'MZ' | 'NA' | 'ZA' | 'ZM' | 'ZW'
-  // Americas
-  | 'US'
 
 // ---------------------------------------------------------------------------
 // Deal state machine

@@ -363,7 +363,18 @@ function MarketExplorer() {
         </div>
       </div>
 
-      {!market.hasLocalRails ? (
+      {market.restricted ? (
+        <div className="px-6 py-6">
+          <p className="rounded-xl bg-danger-soft px-4 py-3 text-sm leading-relaxed text-danger">
+            <strong className="font-semibold">
+              {market.name} is under sanctions or embargo.
+            </strong>{' '}
+            No card acquirer will process a payment there, and no payout rail
+            exists. This is a legal question, not a configuration one — do not
+            enable it without advice.
+          </p>
+        </div>
+      ) : !market.hasLocalRails ? (
         <div className="px-6 py-6">
           <p className="rounded-xl bg-pending-soft px-4 py-3 text-sm leading-relaxed text-pending">
             <strong className="font-semibold">

@@ -123,19 +123,22 @@ function buildRails(): Rail[] {
       })
     }
 
-    // The universal floor. Present for every country, including those with a
-    // full local stack — a visitor's foreign card still has to work.
-    rails.push({
-      method: 'card',
-      country: code,
-      currencies: INTERNATIONAL_CURRENCIES,
-      provider: 'stripe',
-      networks: [],
-      collect: true,
-      payout: false,
-      schemes: ['visa', 'mastercard', 'amex'],
-      note: 'International card acquiring. Works from anywhere, but cannot pay anyone.',
-    })
+    // The near-universal floor. Present for every country except the
+    // sanctioned ones, including markets with a full local stack — a
+    // visitor's foreign card still has to work.
+    if (!info.restricted) {
+      rails.push({
+        method: 'card',
+        country: code,
+        currencies: INTERNATIONAL_CURRENCIES,
+        provider: 'stripe',
+        networks: [],
+        collect: true,
+        payout: false,
+        schemes: ['visa', 'mastercard', 'amex'],
+        note: 'International card acquiring. Works from almost anywhere, but cannot pay anyone.',
+      })
+    }
 
     if (info.stripePayout) {
       rails.push({
@@ -154,6 +157,14 @@ function buildRails(): Rail[] {
 }
 
 export const RAILS: Rail[] = buildRails()
+
+/**
+ * Every currency any rail can actually take. This is what a tenant may enable
+ * — offering a currency no rail supports would create uncollectable deals.
+ */
+export const SUPPORTED_CURRENCIES: Currency[] = [
+  ...new Set(RAILS.filter((r) => r.collect).flatMap((r) => r.currencies)),
+].sort()
 
 // ---------------------------------------------------------------------------
 // Labels
@@ -255,8 +266,8 @@ export function currenciesFor(country: Country): Currency[] {
 /**
  * True when a buyer in this market can pay in this currency.
  *
- * Because every country has an international card rail, this is always true
- * for USD and EUR — which is the point. No buyer is ever turned away.
+ * True for USD and EUR everywhere except the sanctioned markets — which is the
+ * point. Almost no buyer is ever turned away.
  */
 export function isMarketSupported(country: Country, currency: Currency): boolean {
   return collectionRails(country, currency).length > 0
@@ -297,6 +308,20 @@ export function payoutRoute(country: Country, currency: Currency): PayoutRoute {
   const local = info.currency
   const rails = payoutRails(country)
   const wantsLocal = currency === local
+
+  if (info.restricted) {
+    return {
+      provider: null,
+      kind: null,
+      currency,
+      blocked: true,
+      verified: false,
+      reason:
+        `${info.name} is under sanctions or embargo. PayHold can neither ` +
+        'collect from nor pay anyone there. This needs legal review before ' +
+        'it is changed.',
+    }
+  }
 
   if (wantsLocal && info.flutterwavePayout) {
     const hasWallet = rails.some((r) => r.method === 'mobile_money')
@@ -350,7 +375,10 @@ export function payoutRoute(country: Country, currency: Currency): PayoutRoute {
     reason:
       `PayHold cannot send money to ${info.name} yet. Neither provider is ` +
       'licensed for that corridor. Buyers there can still pay — collection ' +
-      'works everywhere — but a seller needs an account somewhere we can reach.',
+      'works everywhere — but a seller needs an account somewhere we can reach.' +
+      (info.stripePreview
+        ? ' Stripe lists this market as preview only; contact their sales team to enable it.'
+        : ''),
   }
 }
 
@@ -381,8 +409,10 @@ export interface MarketSummary {
   /** Wallets available here, e.g. ["MTN", "Airtel Money"]. */
   networks: string[]
   payout: ReturnType<typeof payoutCapability>
-  /** True when a buyer here has a local option, not just an foreign card. */
+  /** True when a buyer here has a local option, not just a foreign card. */
   hasLocalRails: boolean
+  /** True when sanctions mean no payment is possible at all. */
+  restricted: boolean
   notes: string[]
 }
 
@@ -406,6 +436,7 @@ export function marketSummary(country: Country): MarketSummary {
     networks: info.momoNetworks,
     payout: payoutCapability(country),
     hasLocalRails: localRails.length > 0,
+    restricted: info.restricted,
     notes: [...new Set(all.map((r) => r.note).filter((n): n is string => !!n))],
   }
 }

@@ -29,22 +29,37 @@ import {
 
 const ALL: Country[] = COUNTRIES.map((c) => c.code)
 
+/** Everywhere a payment is legally possible. */
+const PAYABLE = COUNTRIES.filter((c) => !c.restricted).map((c) => c.code)
+
 describe('every country can pay — the coverage guarantee', () => {
-  it('covers all 54 African countries plus the United States', () => {
-    expect(ALL).toHaveLength(55)
-    expect(ALL).toContain('US')
-    expect(COUNTRIES.filter((c) => c.region !== 'Americas')).toHaveLength(54)
+  it('covers the whole world, all 54 African countries included', () => {
+    expect(ALL.length).toBeGreaterThanOrEqual(190)
+
+    const africanRegions = [
+      'North Africa',
+      'West Africa',
+      'Central Africa',
+      'East Africa',
+      'Southern Africa',
+    ]
+    const african = COUNTRIES.filter((c) => africanRegions.includes(c.region))
+    expect(african).toHaveLength(54)
+
+    for (const code of ['US', 'GB', 'IN', 'CN', 'BR', 'AU', 'JP', 'RW'] as const) {
+      expect(ALL).toContain(code)
+    }
   })
 
-  it('gives every single country at least one way to pay', () => {
-    for (const country of ALL) {
+  it('gives every unsanctioned country at least one way to pay', () => {
+    for (const country of PAYABLE) {
       const rails = collectionRails(country, 'USD')
       expect(rails.length, `${country} has no payment option`).toBeGreaterThan(0)
     }
   })
 
-  it('accepts USD and EUR from anywhere, via international card acquiring', () => {
-    for (const country of ALL) {
+  it('accepts USD and EUR from anywhere it is legal to, via card acquiring', () => {
+    for (const country of PAYABLE) {
       for (const currency of ['USD', 'EUR'] as const) {
         expect(
           isMarketSupported(country, currency),
@@ -55,21 +70,20 @@ describe('every country can pay — the coverage guarantee', () => {
     }
   })
 
-  it('always resolves a provider for a card, in every market', () => {
-    for (const country of ALL) {
+  it('always resolves a provider for a card in every payable market', () => {
+    for (const country of PAYABLE) {
       expect(defaultProviderFor(country, 'USD')).toMatch(/flutterwave|stripe/)
     }
   })
 
-  it('lets every country pay in its own local currency too', () => {
-    for (const country of ALL) {
-      const local = defaultCurrencyFor(country)
-      // Local-currency rails only exist where a provider supports that
-      // currency; elsewhere the buyer pays in USD. Either way they can pay.
-      const localOrIntl =
-        collectionRails(country, local).length > 0 ||
-        collectionRails(country, 'USD').length > 0
-      expect(localOrIntl, `${country} cannot pay at all`).toBe(true)
+  it('takes no payment at all from a sanctioned market', () => {
+    const restricted = COUNTRIES.filter((c) => c.restricted).map((c) => c.code)
+    expect(restricted.length).toBeGreaterThan(0)
+
+    for (const country of restricted) {
+      expect(collectionRails(country, 'USD'), country).toHaveLength(0)
+      expect(payoutRoute(country, 'USD').blocked, country).toBe(true)
+      expect(payoutRoute(country, 'USD').reason).toMatch(/sanctions or embargo/i)
     }
   })
 
@@ -155,13 +169,43 @@ describe('payout routing — where money can actually go', () => {
   it('never routes an African payout through Stripe', () => {
     // Stripe has no payout corridor into any African market — routing there
     // would strand the money rather than deliver it.
-    for (const info of COUNTRIES.filter((c) => c.region !== 'Americas')) {
+    const african = COUNTRIES.filter((c) => c.region.endsWith('Africa'))
+    expect(african).toHaveLength(54)
+
+    for (const info of african) {
       for (const currency of [info.currency, 'USD', 'EUR'] as const) {
         expect(
           payoutRoute(info.code, currency).provider,
           `${info.code}/${currency}`,
         ).not.toBe('stripe')
       }
+    }
+  })
+
+  it('routes payouts through Stripe in exactly its 44 supported countries', () => {
+    const stripeMarkets = COUNTRIES.filter((c) => c.stripePayout)
+    expect(stripeMarkets).toHaveLength(44)
+
+    for (const info of stripeMarkets) {
+      const route = payoutRoute(info.code, info.currency)
+      // Flutterwave wins where it also has a local rail; otherwise Stripe.
+      expect(route.blocked, info.code).toBe(false)
+      if (!info.flutterwavePayout) expect(route.provider, info.code).toBe('stripe')
+    }
+  })
+
+  it('cannot pay most of the world, and says so', () => {
+    const unreachable = COUNTRIES.filter(
+      (c) => !c.flutterwavePayout && !c.stripePayout && !c.restricted,
+    )
+    // The honest headline: collection is universal, payout is not.
+    expect(unreachable.length).toBeGreaterThan(80)
+
+    for (const info of unreachable) {
+      const route = payoutRoute(info.code, info.currency)
+      expect(route.blocked, info.code).toBe(true)
+      // ...but a buyer there can still pay.
+      expect(collectionRails(info.code, 'USD').length, info.code).toBeGreaterThan(0)
     }
   })
 
@@ -177,6 +221,7 @@ describe('payout routing — where money can actually go', () => {
   it('blocks outright where neither provider can reach the seller', () => {
     // Ethiopia has no Flutterwave payout rail and no Stripe presence.
     const route = payoutRoute('ET', 'ETB')
+    expect(route.provider).toBeNull()
 
     expect(route.blocked).toBe(true)
     expect(route.provider).toBeNull()
@@ -189,7 +234,7 @@ describe('payout routing — where money can actually go', () => {
   })
 
   it('never returns a provider when blocked, nor a block when routed', () => {
-    for (const country of ALL) {
+    for (const country of PAYABLE) {
       for (const currency of [defaultCurrencyFor(country), 'USD'] as const) {
         const route = payoutRoute(country, currency)
         expect(
@@ -201,7 +246,7 @@ describe('payout routing — where money can actually go', () => {
   })
 
   it('agrees with payoutCapability for the local currency', () => {
-    for (const country of ALL) {
+    for (const country of PAYABLE) {
       expect(payoutCapability(country).provider).toBe(
         payoutRoute(country, defaultCurrencyFor(country)).provider,
       )
@@ -239,7 +284,7 @@ describe('country is the primary choice', () => {
   })
 
   it('gives every market a summary that does not throw', () => {
-    for (const country of ALL) {
+    for (const country of PAYABLE) {
       const summary = marketSummary(country)
       expect(summary.name).toBeTruthy()
       expect(summary.currencies.length).toBeGreaterThan(0)
@@ -290,7 +335,7 @@ describe('rail table integrity', () => {
   })
 
   it('reports currencies consistently between the two accessors', () => {
-    for (const country of ALL) {
+    for (const country of PAYABLE) {
       const fromRails = new Set(
         collectionRails(country, defaultCurrencyFor(country))
           .concat(collectionRails(country, 'USD'))

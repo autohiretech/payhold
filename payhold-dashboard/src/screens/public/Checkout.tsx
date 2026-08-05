@@ -169,8 +169,9 @@ export function CheckoutPage() {
 
           {rails.length === 0 ? (
             <p className="mt-3 rounded-xl bg-danger-soft px-4 py-3 text-sm leading-relaxed text-danger">
-              We cannot accept {d.currency} from {countryName(payingFrom)} yet.
-              Pick another country, or ask the seller for a different way to pay.
+              {market.restricted
+                ? `We are not able to accept payments from ${countryName(payingFrom)}.`
+                : `We cannot accept ${d.currency} from ${countryName(payingFrom)} yet. Pick another country, or ask the seller for a different way to pay.`}
             </p>
           ) : (
             <div className="mt-3 space-y-2">
