@@ -1,0 +1,13 @@
+# Machine-local Claude Code settings. The shared ones belong in
+# .claude/settings.json; the `.local` variant is per-developer by convention.
+.claude/settings.local.json
+
+# Secrets never enter git. Provider credentials live encrypted in Postgres,
+# and the keys that decrypt them live in Supabase secrets.
+.env
+.env.*
+!.env.example
+
+node_modules/
+dist/
+.DS_Store

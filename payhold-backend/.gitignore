@@ -21,3 +21,7 @@ npm-debug.log*
 !.vscode/extensions.json
 .idea
 .DS_Store
+
+# Deno auto-installs npm deps here
+supabase/functions/node_modules
+supabase/functions/deno.lock
