@@ -34,7 +34,12 @@ import {
   type TenantSettings,
   type WebhookEndpoint,
 } from '../types'
-import { defaultProviderFor, isMarketSupported } from '@/lib/rails'
+import {
+  defaultCurrencyFor,
+  defaultProviderFor,
+  isMarketSupported,
+  payoutRoute,
+} from '@/lib/rails'
 import {
   audit,
   captureDeposit,
@@ -234,11 +239,21 @@ export class MockClient implements PayHoldClient {
       }
       const label = DESTINATION_LABEL[input.payout_provider]
 
+      const payoutCurrency = input.payout_currency ?? defaultCurrencyFor(input.country)
+      const route = payoutRoute(input.country, payoutCurrency)
+
+      // Refuse a destination we could never send money to, rather than
+      // discovering it when the first payout is due.
+      if (route.blocked) {
+        throw new PayHoldError('policy_violation', route.reason)
+      }
+
       const created: Seller = {
         id: nextId('sel'),
         tenant_id: db.current_tenant_id,
         name: input.name,
         country: input.country,
+        payout_currency: payoutCurrency,
         payout_provider: input.payout_provider,
         beneficiary_token: `ben_fw_${nextId('tok')}`,
         masked_destination: `${label} •••• ${tail}`,

@@ -1,7 +1,12 @@
 import { useState } from 'react'
-import { api, type Country, type PayoutProvider } from '@/api'
+import { api, type Country, type Currency, type PayoutProvider } from '@/api'
 import { ProviderChip } from '@/components/rails'
-import { COUNTRY_LABEL, payoutCapability } from '@/lib/rails'
+import {
+  COUNTRY_FLAG,
+  COUNTRY_LABEL,
+  defaultCurrencyFor,
+  payoutRoute,
+} from '@/lib/rails'
 import {
   Button,
   Card,
@@ -17,6 +22,7 @@ import {
   Table,
   Td,
   Th,
+  cx,
 } from '@/components/ui'
 import { formatDate } from '@/lib/format'
 import { useMoneyAction, useSellers } from '@/lib/queries'
@@ -86,13 +92,14 @@ export function SellersPage() {
                 <Th>Market</Th>
                 <Th>Payout method</Th>
                 <Th>Destination</Th>
+                <Th>Paid in</Th>
                 <Th>Paid via</Th>
                 <Th align="right">Added</Th>
               </tr>
             </thead>
             <tbody>
               {sellers.data.map((s) => {
-                const capability = payoutCapability(s.country)
+                const route = payoutRoute(s.country, s.payout_currency)
                 return (
                   <tr key={s.id} className="hover:bg-surface-2">
                     <Td className="font-medium">{s.name}</Td>
@@ -103,13 +110,19 @@ export function SellersPage() {
                     <Td>
                       <Mono>{s.masked_destination}</Mono>
                     </Td>
+                    <Td className="tabular text-fg-muted">{s.payout_currency}</Td>
                     <Td>
-                      {capability.provider ? (
-                        <span title={capability.reason}>
-                          <ProviderChip provider={capability.provider} />
+                      {route.provider ? (
+                        <span title={route.reason}>
+                          <ProviderChip provider={route.provider} />
                         </span>
                       ) : (
-                        <span className="text-xs text-danger">No rail</span>
+                        <span
+                          className="text-xs font-semibold text-danger"
+                          title={route.reason}
+                        >
+                          No rail
+                        </span>
                       )}
                     </Td>
                     <Td align="right" className="text-fg-muted">
@@ -137,7 +150,14 @@ function AddSellerForm({ onClose }: { onClose: () => void }) {
   const [provider, setProvider] = useState<PayoutProvider>('flutterwave_momo')
   const effective = available.includes(provider) ? provider : available[0]
 
-  const capability = payoutCapability(country)
+  // What the seller wants to be paid in. Local keeps them on the local rail;
+  // asking for dollars changes the route entirely, and sometimes removes it.
+  const local = defaultCurrencyFor(country)
+  const [payoutCurrency, setPayoutCurrency] = useState<Currency>(local)
+  const currencyChoices: Currency[] = [...new Set<Currency>([local, 'USD', 'EUR'])]
+  const wanted = currencyChoices.includes(payoutCurrency) ? payoutCurrency : local
+
+  const route = payoutRoute(country, wanted)
 
   const create = useMoneyAction(() => {
     if (!effective) {
@@ -145,7 +165,13 @@ function AddSellerForm({ onClose }: { onClose: () => void }) {
         `No payout rail is configured for ${COUNTRY_LABEL[country]} — a seller there cannot be paid yet.`,
       )
     }
-    return api.createSeller({ name, country, payout_provider: effective, destination })
+    return api.createSeller({
+      name,
+      country,
+      payout_currency: wanted,
+      payout_provider: effective,
+      destination,
+    })
   })
 
   return (
@@ -168,14 +194,32 @@ function AddSellerForm({ onClose }: { onClose: () => void }) {
             />
           </Field>
 
-          <Field label="Market" hint={capability.reason}>
+          <Field label="Market">
             <Select
               value={country}
-              onChange={(e) => setCountry(e.target.value as Country)}
+              onChange={(e) => {
+                const next = e.target.value as Country
+                setCountry(next)
+                setPayoutCurrency(defaultCurrencyFor(next))
+              }}
             >
               {(Object.keys(PAYOUT_BY_COUNTRY) as Country[]).map((c) => (
                 <option key={c} value={c}>
-                  {COUNTRY_LABEL[c]}
+                  {COUNTRY_FLAG[c]}  {COUNTRY_LABEL[c]}
+                </option>
+              ))}
+            </Select>
+          </Field>
+
+          <Field label="Wants to be paid in">
+            <Select
+              value={wanted}
+              onChange={(e) => setPayoutCurrency(e.target.value as Currency)}
+            >
+              {currencyChoices.map((c) => (
+                <option key={c} value={c}>
+                  {c}
+                  {c === local ? ' (local)' : ''}
                 </option>
               ))}
             </Select>
@@ -210,6 +254,27 @@ function AddSellerForm({ onClose }: { onClose: () => void }) {
               placeholder="0788 123 456"
             />
           </Field>
+        </div>
+
+        {/* The resulting route, stated before you save rather than discovered
+            when the first payout is due. */}
+        <div
+          className={cx(
+            'rounded-xl px-4 py-3 text-sm leading-relaxed',
+            route.blocked
+              ? 'bg-danger-soft text-danger'
+              : route.provider === 'stripe'
+                ? 'bg-held-soft text-held'
+                : 'bg-surface-2 text-fg-muted',
+          )}
+        >
+          <span className="flex flex-wrap items-center gap-2">
+            <strong className="font-semibold">
+              {route.blocked ? 'Cannot be paid' : 'Will be paid via'}
+            </strong>
+            {route.provider && <ProviderChip provider={route.provider} />}
+          </span>
+          <span className="mt-1.5 block">{route.reason}</span>
         </div>
 
         {create.isError && <ErrorNote message={create.error.message} />}

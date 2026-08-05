@@ -406,8 +406,115 @@ export function payoutRails(country: Country): Rail[] {
 }
 
 /**
- * Why a payout can or cannot use a given provider. The Rwanda/Stripe case is
- * the one that bites, so it is stated rather than implied.
+ * Countries Stripe can actually pay a business in.
+ *
+ * Checked against stripe.com/global, August 2026. None of PayHold's African
+ * markets are on it. Ghana, Kenya, Nigeria and South Africa appear only under
+ * Stripe's "extended network" — that routes through Paystack, which is a
+ * separate integration, not a Stripe Connect payout.
+ *
+ * This is why "pay them in dollars via Stripe" does not work for an African
+ * seller: Stripe has no way to reach their bank account at all, whatever the
+ * currency.
+ */
+export const STRIPE_PAYOUT_COUNTRIES: Country[] = ['INTL']
+
+export type PayoutKind = 'momo' | 'bank' | 'connect'
+
+export interface PayoutRoute {
+  provider: Provider | null
+  kind: PayoutKind | null
+  currency: Currency
+  /** True when there is no way to send this money at all. */
+  blocked: boolean
+  reason: string
+  /** False where the route is planned but unconfirmed with the provider. */
+  verified: boolean
+}
+
+/**
+ * Where a seller's money goes, given where they are and what currency they
+ * want.
+ *
+ * The rule, in order:
+ *   1. Local currency, in a market we have rails for → Flutterwave, to their
+ *      mobile money wallet or bank account.
+ *   2. Foreign currency, or a market with no local rail → Stripe, but only
+ *      where Stripe can actually reach them.
+ *   3. Neither → blocked, and the dashboard says so instead of queuing a
+ *      payout that will never land.
+ */
+export function payoutRoute(country: Country, currency: Currency): PayoutRoute {
+  const local = defaultCurrencyFor(country)
+  const rails = payoutRails(country)
+  const wantsLocal = currency === local
+
+  // 1. Local currency into a local wallet or bank — the common case, and the
+  //    only one that is straightforwardly true today.
+  if (wantsLocal && rails.length > 0) {
+    const hasWallet = rails.some((r) => r.method !== 'bank_transfer')
+    return {
+      provider: 'flutterwave',
+      kind: hasWallet ? 'momo' : 'bank',
+      currency,
+      blocked: false,
+      verified: false,
+      reason: `Paid in ${currency} via Flutterwave, to a ${
+        hasWallet ? 'mobile money wallet or bank account' : 'bank account'
+      } in ${COUNTRY_LABEL[country]}.`,
+    }
+  }
+
+  // 2. Stripe, where Stripe can reach them.
+  if (STRIPE_PAYOUT_COUNTRIES.includes(country)) {
+    return {
+      provider: 'stripe',
+      kind: 'connect',
+      currency,
+      blocked: false,
+      verified: false,
+      reason: `Paid in ${currency} via Stripe Connect. The seller must hold an account in a Stripe-supported country.`,
+    }
+  }
+
+  // 3. A foreign currency into a market Stripe cannot reach. Flutterwave can
+  //    hold the currency, but paying a third-party beneficiary in it is a
+  //    different capability from settling it to your own account — so this is
+  //    offered as a route to confirm, not a promise.
+  if (!wantsLocal && rails.some((r) => r.method === 'bank_transfer')) {
+    return {
+      provider: 'flutterwave',
+      kind: 'bank',
+      currency,
+      blocked: false,
+      verified: false,
+      reason:
+        `Stripe cannot pay a seller in ${COUNTRY_LABEL[country]} at all, so ` +
+        `${currency} would have to go out on Flutterwave to a ${currency} ` +
+        'bank account. Confirm with Flutterwave that your account can send ' +
+        `${currency} to a third-party beneficiary there before relying on this — ` +
+        `otherwise convert to ${local} and pay locally.`,
+    }
+  }
+
+  return {
+    provider: null,
+    kind: null,
+    currency,
+    blocked: true,
+    verified: false,
+    reason:
+      `There is no way to send ${currency} to a seller in ` +
+      `${COUNTRY_LABEL[country]}. Stripe does not support payouts there, and ` +
+      'no Flutterwave rail is configured. Register the seller in a market we ' +
+      'can reach, or add a rail first.',
+  }
+}
+
+/**
+ * Why a payout can or cannot use a given provider, for the seller's local
+ * currency. The Rwanda/Stripe case is the one that bites, so it is stated
+ * rather than implied.
  */
 export function payoutCapability(country: Country): {
   provider: Provider | null
@@ -417,15 +524,14 @@ export function payoutCapability(country: Country): {
   if (!rails.length) {
     return {
       provider: null,
-      reason: `No payout rail is configured for ${COUNTRY_LABEL[country]} yet.`,
+      reason: STRIPE_PAYOUT_COUNTRIES.includes(country)
+        ? 'Paid via Stripe Connect where the seller is in a supported country.'
+        : `No payout rail is configured for ${COUNTRY_LABEL[country]} yet, and Stripe cannot reach it.`,
     }
   }
   return {
     provider: 'flutterwave',
-    reason:
-      country === 'INTL'
-        ? 'Paid via Stripe Connect where the seller is in a supported country.'
-        : `Paid via Flutterwave — Stripe cannot send funds to ${COUNTRY_LABEL[country]}.`,
+    reason: `Paid via Flutterwave — Stripe cannot send funds to ${COUNTRY_LABEL[country]}.`,
   }
 }
 

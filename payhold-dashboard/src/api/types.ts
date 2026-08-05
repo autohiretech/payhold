@@ -134,6 +134,8 @@ export interface Seller {
   name: string
   /** Where the seller banks. Decides which rail can actually pay them. */
   country: Country
+  /** What they want to be paid in. Local by default; foreign changes the rail. */
+  payout_currency: Currency
   payout_provider: PayoutProvider
   /** Provider-side token. PayHold never stores the real destination. */
   beneficiary_token: string
@@ -330,6 +332,8 @@ export interface CreateDealResult {
 export interface CreateSellerInput {
   name: string
   country: Country
+  /** Defaults to the market's local currency when omitted. */
+  payout_currency?: Currency
   payout_provider: PayoutProvider
   /** Raw destination — tokenized immediately, never stored. */
   destination: string

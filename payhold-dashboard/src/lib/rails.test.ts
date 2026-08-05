@@ -9,6 +9,7 @@ import { describe, expect, it } from 'vitest'
 import {
   MARKETS,
   RAILS,
+  STRIPE_PAYOUT_COUNTRIES,
   collectionRails,
   defaultCurrencyFor,
   defaultProviderFor,
@@ -16,6 +17,7 @@ import {
   marketSummary,
   payoutCapability,
   payoutRails,
+  payoutRoute,
   providerFor,
 } from './rails'
 
@@ -112,6 +114,83 @@ describe('payout routing — the rule that catches people out', () => {
 
   it('never marks a card rail as payable — refunds are not payouts', () => {
     expect(RAILS.filter((r) => r.method === 'card').every((r) => !r.payout)).toBe(true)
+  })
+})
+
+describe('payout routing by seller market and requested currency', () => {
+  it('pays a Rwandan seller in RWF on Flutterwave, to MoMo or bank', () => {
+    const route = payoutRoute('RW', 'RWF')
+
+    expect(route.provider).toBe('flutterwave')
+    expect(route.kind).toBe('momo')
+    expect(route.blocked).toBe(false)
+  })
+
+  it('pays a Kenyan seller in KES on Flutterwave', () => {
+    expect(payoutRoute('KE', 'KES').provider).toBe('flutterwave')
+  })
+
+  it('pays every Flutterwave market in its own currency locally', () => {
+    for (const country of ['RW', 'KE', 'UG', 'TZ', 'GH', 'NG'] as const) {
+      const route = payoutRoute(country, defaultCurrencyFor(country))
+      expect(route.provider, `${country} local payout`).toBe('flutterwave')
+      expect(route.blocked, `${country} local payout`).toBe(false)
+    }
+  })
+
+  it('uses Stripe for an international seller, in any currency', () => {
+    for (const currency of ['USD', 'EUR'] as const) {
+      const route = payoutRoute('INTL', currency)
+      expect(route.provider).toBe('stripe')
+      expect(route.kind).toBe('connect')
+    }
+  })
+
+  it('does NOT send an African seller to Stripe just because they want dollars', () => {
+    // The trap: Stripe cannot reach these markets at all, so routing a USD
+    // payout there would strand the money rather than deliver it.
+    for (const country of ['RW', 'KE', 'UG', 'TZ', 'GH'] as const) {
+      const route = payoutRoute(country, 'USD')
+      expect(route.provider, `${country} USD payout`).not.toBe('stripe')
+    }
+  })
+
+  it('routes a foreign-currency payout in a Flutterwave market to a bank, flagged for confirmation', () => {
+    const route = payoutRoute('RW', 'USD')
+
+    expect(route.provider).toBe('flutterwave')
+    expect(route.kind).toBe('bank')
+    expect(route.verified).toBe(false)
+    expect(route.reason).toMatch(/confirm with flutterwave/i)
+  })
+
+  it('blocks outright where neither rail can reach the seller', () => {
+    const route = payoutRoute('ZA', 'USD')
+
+    expect(route.blocked).toBe(true)
+    expect(route.provider).toBeNull()
+    expect(route.reason).toMatch(/no way to send/i)
+  })
+
+  it('never returns a provider when blocked, nor a block when routed', () => {
+    for (const market of MARKETS) {
+      for (const currency of [defaultCurrencyFor(market.country), 'USD'] as const) {
+        const route = payoutRoute(market.country, currency)
+        expect(route.blocked === (route.provider === null)).toBe(true)
+      }
+    }
+  })
+
+  it('keeps Stripe out of every market Stripe cannot pay', () => {
+    for (const market of MARKETS) {
+      if (STRIPE_PAYOUT_COUNTRIES.includes(market.country)) continue
+      for (const currency of [market.currency, 'USD', 'EUR'] as const) {
+        expect(
+          payoutRoute(market.country, currency).provider,
+          `${market.country}/${currency}`,
+        ).not.toBe('stripe')
+      }
+    }
   })
 })
 
