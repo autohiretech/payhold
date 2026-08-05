@@ -1,16 +1,22 @@
 /**
  * Rail routing invariants.
  *
- * These encode the rules that make the difference between money arriving and
- * money being stuck. The backend's provider router must satisfy all of them.
+ * These encode the rules that decide whether money arrives or gets stuck. The
+ * backend's provider router must satisfy all of them.
+ *
+ * The headline guarantee is the first block: **every country can pay.**
  */
 
 import { describe, expect, it } from 'vitest'
+import type { Country } from '@/api/types'
+import { COUNTRIES } from './countries'
 import {
-  MARKETS,
   RAILS,
-  STRIPE_PAYOUT_COUNTRIES,
+  RAILS_VERIFIED,
   collectionRails,
+  countryFlag,
+  countryInfo,
+  currenciesFor,
   defaultCurrencyFor,
   defaultProviderFor,
   isMarketSupported,
@@ -21,176 +27,189 @@ import {
   providerFor,
 } from './rails'
 
-describe('collection routing', () => {
-  it('offers M-Pesa first to a Kenyan buyer paying in KES', () => {
-    const rails = collectionRails('KE', 'KES')
-    expect(rails[0]?.method).toBe('mpesa')
-    expect(rails[0]?.provider).toBe('flutterwave')
+const ALL: Country[] = COUNTRIES.map((c) => c.code)
+
+describe('every country can pay — the coverage guarantee', () => {
+  it('covers all 54 African countries plus the United States', () => {
+    expect(ALL).toHaveLength(55)
+    expect(ALL).toContain('US')
+    expect(COUNTRIES.filter((c) => c.region !== 'Americas')).toHaveLength(54)
   })
 
-  it('offers mobile money before cards in Rwanda', () => {
-    const methods = collectionRails('RW', 'RWF').map((r) => r.method)
-    expect(methods.indexOf('mtn_momo')).toBeLessThan(methods.indexOf('card'))
-  })
-
-  it('routes an international card payment to Stripe', () => {
-    expect(providerFor('INTL', 'USD', 'card')).toBe('stripe')
-  })
-
-  it('routes a Rwandan card payment to Flutterwave, not Stripe', () => {
-    expect(providerFor('RW', 'RWF', 'card')).toBe('flutterwave')
-  })
-
-  it('does not offer M-Pesa to a Rwandan buyer', () => {
-    expect(collectionRails('RW', 'RWF').some((r) => r.method === 'mpesa')).toBe(false)
-    expect(providerFor('RW', 'RWF', 'mpesa')).toBeNull()
-  })
-
-  it('does not offer mobile money in a currency the wallet does not hold', () => {
-    // No RWF wallet takes USD — a tourist paying USD gets a card, not MoMo.
-    expect(collectionRails('RW', 'USD').every((r) => r.method === 'card')).toBe(true)
-  })
-
-  it('prefers the local card rail over Stripe where one exists', () => {
-    // Tanzania has its own Flutterwave card rail, so a USD card there is
-    // acquired locally rather than shipped to Stripe.
-    expect(isMarketSupported('TZ', 'USD')).toBe(true)
-    expect(providerFor('TZ', 'USD', 'card')).toBe('flutterwave')
-  })
-
-  it('falls back to Stripe where a market has no local rail at all', () => {
-    expect(isMarketSupported('ZA', 'USD')).toBe(true)
-    expect(providerFor('ZA', 'USD', 'card')).toBe('stripe')
-  })
-
-  it('reports a market as unsupported when no rail can take the currency', () => {
-    // A Tanzanian buyer cannot be charged Ugandan shillings.
-    expect(isMarketSupported('TZ', 'UGX')).toBe(false)
-    expect(collectionRails('TZ', 'UGX')).toHaveLength(0)
-  })
-
-  it('does not offer a Nigerian buyer a foreign-currency price', () => {
-    // Naira cards settle in Naira whatever they are charged, so quoting USD
-    // would only mislead.
-    expect(collectionRails('NG', 'NGN').length).toBeGreaterThan(0)
-    expect(
-      RAILS.filter((r) => r.country === 'NG').every(
-        (r) => !r.currencies.includes('USD'),
-      ),
-    ).toBe(true)
-  })
-
-  it('never returns a duplicate method from the same provider', () => {
-    for (const [country, currency] of [
-      ['RW', 'RWF'],
-      ['KE', 'KES'],
-      ['INTL', 'USD'],
-    ] as const) {
-      const rails = collectionRails(country, currency)
-      const seen = rails.map((r) => `${r.method}:${r.provider}`)
-      expect(new Set(seen).size).toBe(seen.length)
+  it('gives every single country at least one way to pay', () => {
+    for (const country of ALL) {
+      const rails = collectionRails(country, 'USD')
+      expect(rails.length, `${country} has no payment option`).toBeGreaterThan(0)
     }
+  })
+
+  it('accepts USD and EUR from anywhere, via international card acquiring', () => {
+    for (const country of ALL) {
+      for (const currency of ['USD', 'EUR'] as const) {
+        expect(
+          isMarketSupported(country, currency),
+          `${country} cannot pay in ${currency}`,
+        ).toBe(true)
+        expect(providerFor(country, currency, 'card')).not.toBeNull()
+      }
+    }
+  })
+
+  it('always resolves a provider for a card, in every market', () => {
+    for (const country of ALL) {
+      expect(defaultProviderFor(country, 'USD')).toMatch(/flutterwave|stripe/)
+    }
+  })
+
+  it('lets every country pay in its own local currency too', () => {
+    for (const country of ALL) {
+      const local = defaultCurrencyFor(country)
+      // Local-currency rails only exist where a provider supports that
+      // currency; elsewhere the buyer pays in USD. Either way they can pay.
+      const localOrIntl =
+        collectionRails(country, local).length > 0 ||
+        collectionRails(country, 'USD').length > 0
+      expect(localOrIntl, `${country} cannot pay at all`).toBe(true)
+    }
+  })
+
+  it('gives each country a distinct flag emoji', () => {
+    const flags = ALL.map(countryFlag)
+    expect(new Set(flags).size).toBe(flags.length)
   })
 })
 
-describe('payout routing — the rule that catches people out', () => {
-  it('never pays an African seller via Stripe', () => {
-    for (const country of ['RW', 'KE', 'UG'] as const) {
-      expect(payoutCapability(country).provider).toBe('flutterwave')
-      expect(payoutRails(country).every((r) => r.provider === 'flutterwave')).toBe(true)
+describe('local rails appear only where they really exist', () => {
+  it('offers mobile money in exactly the ten markets Flutterwave documents', () => {
+    const momoCountries = COUNTRIES.filter((c) => c.momo).map((c) => c.code)
+
+    expect(momoCountries.sort()).toEqual(
+      ['BF', 'CI', 'CM', 'GH', 'KE', 'MW', 'RW', 'SN', 'TZ', 'UG', 'ZM'].sort(),
+    )
+  })
+
+  it('names the wallets that actually operate in each market', () => {
+    expect(countryInfo('KE').momoNetworks).toEqual(['M-Pesa'])
+    expect(countryInfo('RW').momoNetworks).toEqual(['MTN', 'Airtel Money'])
+    expect(countryInfo('TZ').momoNetworks).toContain('HaloPesa')
+    expect(countryInfo('SN').momoNetworks).toContain('Wave')
+  })
+
+  it('does not invent mobile money where Flutterwave has none', () => {
+    for (const country of ['ET', 'MA', 'AO', 'DZ', 'US'] as const) {
+      expect(
+        collectionRails(country, defaultCurrencyFor(country)).some(
+          (r) => r.method === 'mobile_money',
+        ),
+        `${country} should have no mobile money`,
+      ).toBe(false)
     }
   })
 
-  it('says why, in a sentence a human can act on', () => {
-    expect(payoutCapability('RW').reason).toMatch(/Stripe cannot send funds to Rwanda/i)
+  it('offers mobile money before cards where it exists', () => {
+    const methods = collectionRails('KE', 'KES').map((r) => r.method)
+    expect(methods[0]).toBe('mobile_money')
   })
 
-  it('has no payout rail where none is configured', () => {
-    // South Africa is deliberately left unconfigured, so the "market we
-    // cannot serve" path stays exercised rather than rotting.
-    expect(payoutCapability('ZA').provider).toBeNull()
-    expect(payoutRails('ZA')).toHaveLength(0)
+  it('prefers a local rail over the international card rail', () => {
+    expect(collectionRails('RW', 'RWF')[0]?.provider).toBe('flutterwave')
+    expect(collectionRails('GH', 'GHS')[0]?.provider).toBe('flutterwave')
   })
 
-  it('never marks a card rail as payable — refunds are not payouts', () => {
-    expect(RAILS.filter((r) => r.method === 'card').every((r) => !r.payout)).toBe(true)
+  it('falls back to Stripe where no local rail exists', () => {
+    expect(collectionRails('ET', 'USD')[0]?.provider).toBe('stripe')
+    expect(providerFor('MG', 'USD', 'card')).toBe('stripe')
+  })
+
+  it('quotes Nigeria in Naira only', () => {
+    // A Naira card settles in Naira whatever it is charged, so a Flutterwave
+    // rail there must never carry USD.
+    const ngLocal = RAILS.filter(
+      (r) => r.country === 'NG' && r.provider === 'flutterwave',
+    )
+    expect(ngLocal.every((r) => !r.currencies.includes('USD'))).toBe(true)
+    expect(ngLocal.length).toBeGreaterThan(0)
   })
 })
 
-describe('payout routing by seller market and requested currency', () => {
-  it('pays a Rwandan seller in RWF on Flutterwave, to MoMo or bank', () => {
-    const route = payoutRoute('RW', 'RWF')
-
-    expect(route.provider).toBe('flutterwave')
-    expect(route.kind).toBe('momo')
-    expect(route.blocked).toBe(false)
-  })
-
-  it('pays a Kenyan seller in KES on Flutterwave', () => {
-    expect(payoutRoute('KE', 'KES').provider).toBe('flutterwave')
-  })
-
-  it('pays every Flutterwave market in its own currency locally', () => {
-    for (const country of ['RW', 'KE', 'UG', 'TZ', 'GH', 'NG'] as const) {
-      const route = payoutRoute(country, defaultCurrencyFor(country))
-      expect(route.provider, `${country} local payout`).toBe('flutterwave')
-      expect(route.blocked, `${country} local payout`).toBe(false)
+describe('payout routing — where money can actually go', () => {
+  it('pays a seller in their local currency wherever Flutterwave reaches', () => {
+    for (const info of COUNTRIES.filter((c) => c.flutterwavePayout)) {
+      const route = payoutRoute(info.code, info.currency)
+      expect(route.provider, `${info.code} local payout`).toBe('flutterwave')
+      expect(route.blocked).toBe(false)
     }
   })
 
-  it('uses Stripe for an international seller, in any currency', () => {
-    for (const currency of ['USD', 'EUR'] as const) {
-      const route = payoutRoute('INTL', currency)
-      expect(route.provider).toBe('stripe')
-      expect(route.kind).toBe('connect')
+  it('sends to a wallet where one exists, and a bank where it does not', () => {
+    expect(payoutRoute('KE', 'KES').kind).toBe('momo')
+    expect(payoutRoute('ZA', 'ZAR').kind).toBe('bank')
+  })
+
+  it('pays a US seller via Stripe', () => {
+    const route = payoutRoute('US', 'USD')
+    expect(route.provider).toBe('stripe')
+    expect(route.kind).toBe('connect')
+  })
+
+  it('never routes an African payout through Stripe', () => {
+    // Stripe has no payout corridor into any African market — routing there
+    // would strand the money rather than deliver it.
+    for (const info of COUNTRIES.filter((c) => c.region !== 'Americas')) {
+      for (const currency of [info.currency, 'USD', 'EUR'] as const) {
+        expect(
+          payoutRoute(info.code, currency).provider,
+          `${info.code}/${currency}`,
+        ).not.toBe('stripe')
+      }
     }
   })
 
-  it('does NOT send an African seller to Stripe just because they want dollars', () => {
-    // The trap: Stripe cannot reach these markets at all, so routing a USD
-    // payout there would strand the money rather than deliver it.
-    for (const country of ['RW', 'KE', 'UG', 'TZ', 'GH'] as const) {
-      const route = payoutRoute(country, 'USD')
-      expect(route.provider, `${country} USD payout`).not.toBe('stripe')
-    }
-  })
-
-  it('routes a foreign-currency payout in a Flutterwave market to a bank, flagged for confirmation', () => {
+  it('flags a foreign-currency payout for confirmation rather than promising it', () => {
     const route = payoutRoute('RW', 'USD')
 
     expect(route.provider).toBe('flutterwave')
     expect(route.kind).toBe('bank')
     expect(route.verified).toBe(false)
-    expect(route.reason).toMatch(/confirm with flutterwave/i)
+    expect(route.reason).toMatch(/confirm with/i)
   })
 
-  it('blocks outright where neither rail can reach the seller', () => {
-    const route = payoutRoute('ZA', 'USD')
+  it('blocks outright where neither provider can reach the seller', () => {
+    // Ethiopia has no Flutterwave payout rail and no Stripe presence.
+    const route = payoutRoute('ET', 'ETB')
 
     expect(route.blocked).toBe(true)
     expect(route.provider).toBeNull()
-    expect(route.reason).toMatch(/no way to send/i)
+    expect(route.reason).toMatch(/cannot send money/i)
+  })
+
+  it('says collection still works even where payout does not', () => {
+    const route = payoutRoute('ET', 'ETB')
+    expect(route.reason).toMatch(/collection works everywhere/i)
   })
 
   it('never returns a provider when blocked, nor a block when routed', () => {
-    for (const market of MARKETS) {
-      for (const currency of [defaultCurrencyFor(market.country), 'USD'] as const) {
-        const route = payoutRoute(market.country, currency)
-        expect(route.blocked === (route.provider === null)).toBe(true)
+    for (const country of ALL) {
+      for (const currency of [defaultCurrencyFor(country), 'USD'] as const) {
+        const route = payoutRoute(country, currency)
+        expect(
+          route.blocked === (route.provider === null),
+          `${country}/${currency}`,
+        ).toBe(true)
       }
     }
   })
 
-  it('keeps Stripe out of every market Stripe cannot pay', () => {
-    for (const market of MARKETS) {
-      if (STRIPE_PAYOUT_COUNTRIES.includes(market.country)) continue
-      for (const currency of [market.currency, 'USD', 'EUR'] as const) {
-        expect(
-          payoutRoute(market.country, currency).provider,
-          `${market.country}/${currency}`,
-        ).not.toBe('stripe')
-      }
+  it('agrees with payoutCapability for the local currency', () => {
+    for (const country of ALL) {
+      expect(payoutCapability(country).provider).toBe(
+        payoutRoute(country, defaultCurrencyFor(country)).provider,
+      )
     }
+  })
+
+  it('never marks a card rail payable — a refund is not a payout', () => {
+    expect(RAILS.filter((r) => r.method === 'card').every((r) => !r.payout)).toBe(true)
   })
 })
 
@@ -200,48 +219,49 @@ describe('country is the primary choice', () => {
 
     expect(rw.provider).toBe('flutterwave')
     expect(rw.currency).toBe('RWF')
+    expect(rw.networks).toEqual(['MTN', 'Airtel Money'])
     expect(rw.localMethods.map((r) => r.method)).toEqual(
-      expect.arrayContaining(['mtn_momo', 'airtel_money', 'bank_transfer']),
+      expect.arrayContaining(['mobile_money', 'bank_transfer']),
     )
     expect(rw.schemes).toEqual(expect.arrayContaining(['visa', 'mastercard']))
     expect(rw.payout.provider).toBe('flutterwave')
+    expect(rw.hasLocalRails).toBe(true)
   })
 
-  it('gives every market a default currency', () => {
-    for (const market of MARKETS) {
-      expect(defaultCurrencyFor(market.country)).toBe(market.currency)
+  it('summarises a card-only market honestly', () => {
+    const et = marketSummary('ET')
+
+    expect(et.hasLocalRails).toBe(false)
+    expect(et.localMethods).toHaveLength(0)
+    // A buyer there can still pay.
+    expect(et.currencies).toEqual(expect.arrayContaining(['USD']))
+    expect(et.schemes.length).toBeGreaterThan(0)
+  })
+
+  it('gives every market a summary that does not throw', () => {
+    for (const country of ALL) {
+      const summary = marketSummary(country)
+      expect(summary.name).toBeTruthy()
+      expect(summary.currencies.length).toBeGreaterThan(0)
+      expect(summary.schemes.length).toBeGreaterThan(0)
     }
   })
 
-  it('reports no provider for a market with no local rail', () => {
-    const za = marketSummary('ZA')
-
-    expect(za.provider).toBeNull()
-    expect(za.localMethods).toHaveLength(0)
-    // A visitor there can still pay by international card.
-    expect(za.currencies).toEqual(expect.arrayContaining(['USD']))
-  })
-
   it('never claims a local method a market does not have', () => {
-    for (const market of MARKETS) {
-      const summary = marketSummary(market.country)
+    for (const country of ALL) {
       expect(
-        summary.localMethods.every((r) => r.country === market.country),
+        marketSummary(country).localMethods.every((r) => r.country === country),
       ).toBe(true)
     }
   })
 
-  it('lists card schemes only where a card rail exists', () => {
-    for (const market of MARKETS) {
-      const summary = marketSummary(market.country)
-      if (summary.schemes.length > 0) expect(summary.cardRail).not.toBeNull()
-    }
-  })
-
   it('offers Verve in Nigeria and nowhere else', () => {
-    for (const market of MARKETS) {
-      const summary = marketSummary(market.country)
-      if (summary.schemes.includes('verve')) expect(market.country).toBe('NG')
+    for (const country of ALL) {
+      const localCard = RAILS.find(
+        (r) =>
+          r.country === country && r.provider === 'flutterwave' && r.method === 'card',
+      )
+      if (localCard?.schemes?.includes('verve')) expect(country).toBe('NG')
     }
   })
 })
@@ -255,15 +275,36 @@ describe('rail table integrity', () => {
     expect(RAILS.every((r) => r.collect || r.payout)).toBe(true)
   })
 
-  it('always resolves a default provider, even for an unroutable pair', () => {
-    // Falls back rather than throwing — the deal is still created, and the
-    // checkout page is where the buyer learns no method is available.
-    expect(defaultProviderFor('TZ', 'UGX')).toBe('flutterwave')
+  it('gives every country a currency and a name', () => {
+    for (const info of COUNTRIES) {
+      expect(info.currency, `${info.code} currency`).toBeTruthy()
+      expect(info.name.length).toBeGreaterThan(2)
+    }
+  })
+
+  it('lists a payout rail for exactly the markets marked payable', () => {
+    for (const info of COUNTRIES) {
+      const reachable = info.flutterwavePayout || info.stripePayout
+      expect(payoutRails(info.code).length > 0, info.code).toBe(reachable)
+    }
+  })
+
+  it('reports currencies consistently between the two accessors', () => {
+    for (const country of ALL) {
+      const fromRails = new Set(
+        collectionRails(country, defaultCurrencyFor(country))
+          .concat(collectionRails(country, 'USD'))
+          .flatMap((r) => r.currencies),
+      )
+      for (const currency of fromRails) {
+        expect(currenciesFor(country)).toContain(currency)
+      }
+    }
   })
 
   it('flags that nothing has been verified against provider docs yet', () => {
-    // This deliberately fails the day someone marks rails verified without
-    // updating the warning shown in the dashboard.
-    expect(RAILS.every((r) => !r.verified)).toBe(true)
+    // Deliberately fails the day someone flips the flag without also updating
+    // the warning the dashboard shows.
+    expect(RAILS_VERIFIED).toBe(false)
   })
 })

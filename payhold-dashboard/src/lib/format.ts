@@ -1,12 +1,21 @@
 import type { Currency, DealStatus, Money, PayoutStatus } from '@/api'
+import { ZERO_DECIMAL_CURRENCIES } from './countries'
 
-/** Money is stored in minor units everywhere; only this file divides by 100. */
+/**
+ * Money is stored in minor units everywhere; only this file divides by 100.
+ *
+ * Zero-decimal currencies — RWF, UGX, the CFA francs — have no minor unit at
+ * all. PayHold still stores them x100 for uniformity, so they divide the same
+ * way but must never render a decimal point.
+ */
 export function formatMoney(amount: Money, currency: Currency): string {
-  return new Intl.NumberFormat('en-RW', {
+  const zeroDecimal = ZERO_DECIMAL_CURRENCIES.includes(currency)
+  return new Intl.NumberFormat('en-GB', {
     style: 'currency',
     currency,
     currencyDisplay: 'code',
-    maximumFractionDigits: currency === 'RWF' || currency === 'UGX' ? 0 : 2,
+    minimumFractionDigits: zeroDecimal ? 0 : 2,
+    maximumFractionDigits: zeroDecimal ? 0 : 2,
   }).format(amount / 100)
 }
 

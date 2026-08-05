@@ -21,7 +21,9 @@ import type {
   WebhookEndpoint,
 } from '../types'
 
-export const SCHEMA_VERSION = 1
+// 2: countries widened to all of Africa + US, payment_method simplified to
+//    card/mobile_money/bank_transfer, deals gained payment_network.
+export const SCHEMA_VERSION = 2
 const STORAGE_KEY = 'payhold.mock.v1'
 
 export interface MockDb {

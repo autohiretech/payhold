@@ -381,24 +381,28 @@ describe('balances are derived from the ledger', () => {
 describe('rails', () => {
   it('books the money to the rail the buyer actually paid on', () => {
     const id = newDeal()
-    const deal = fundDeal(db, id, 'mtn_momo')
+    const deal = fundDeal(db, id, 'mobile_money')
 
     expect(deal.provider).toBe('flutterwave')
-    expect(deal.payment_method).toBe('mtn_momo')
+    expect(deal.payment_method).toBe('mobile_money')
+    expect(deal.payment_network).toBe('MTN')
     expect(db.ledger.filter((e) => e.deal_id === id).every((e) => e.provider === 'flutterwave')).toBe(true)
   })
 
   it('moves a deal onto Stripe when the buyer pays by international card', () => {
     const usd = db.deals.find(
-      (d) => d.currency === 'USD' && d.buyer_country === 'INTL',
+      (d) => d.currency === 'USD' && d.buyer_country === 'US',
     )
     expect(usd?.provider).toBe('stripe')
     expect(usd?.provider_ref).toMatch(/^pi-/)
   })
 
   it('refuses a method that market cannot use', () => {
-    const id = newDeal() // an RWF deal from Rwanda
-    expect(() => fundDeal(db, id, 'mpesa')).toThrow(/not available/i)
+    // Rwanda has no bank-transfer collection rail in USD.
+    const id = newDeal()
+    const deal = requireDeal(db, id)
+    deal.currency = 'USD'
+    expect(() => fundDeal(db, id, 'bank_transfer')).toThrow(/not available/i)
   })
 
   it('keeps the Flutterwave and Stripe balances as separate pots', () => {

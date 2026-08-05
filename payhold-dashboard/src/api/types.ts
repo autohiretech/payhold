@@ -16,35 +16,56 @@
 /** Integer minor units. 1000 = 10.00 USD. */
 export type Money = number
 
+/**
+ * ISO-4217 codes for every market PayHold serves. Kept as a union rather than
+ * `string` so a typo in a rail table is a compile error, not a runtime one.
+ */
 export type Currency =
-  | 'RWF'
-  | 'KES'
-  | 'UGX'
-  | 'TZS'
-  | 'GHS'
-  | 'NGN'
-  | 'USD'
-  | 'EUR'
+  // African local currencies
+  | 'AOA' | 'BIF' | 'BWP' | 'CDF' | 'CVE' | 'DJF' | 'DZD' | 'EGP' | 'ERN'
+  | 'ETB' | 'GHS' | 'GMD' | 'GNF' | 'KES' | 'KMF' | 'LRD' | 'LSL' | 'LYD'
+  | 'MAD' | 'MGA' | 'MRU' | 'MUR' | 'MWK' | 'MZN' | 'NAD' | 'NGN' | 'RWF'
+  | 'SCR' | 'SDG' | 'SLE' | 'SOS' | 'SSP' | 'STN' | 'SZL' | 'TND' | 'TZS'
+  | 'UGX' | 'XAF' | 'XOF' | 'ZAR' | 'ZMW' | 'ZWG'
+  // International settlement currencies
+  | 'USD' | 'EUR' | 'GBP'
+  // Zero-decimal codes referenced by the formatter
+  | 'VUV' | 'CLP' | 'JPY' | 'KRW' | 'PYG'
 
 /** ISO-8601 timestamp. */
 export type Timestamp = string
 
 export type Provider = 'flutterwave' | 'stripe' | 'fake'
 
-/** How the buyer actually pays. Determines which rail the charge routes to. */
-export type PaymentMethod =
-  | 'card'
-  | 'mtn_momo'
-  | 'airtel_money'
-  | 'mpesa'
-  | 'bank_transfer'
+/**
+ * How the buyer pays, at the level the rail cares about.
+ *
+ * The specific wallet — MTN, M-Pesa, Wave — is a `payment_network`, not a
+ * method: there are a dozen of them across ten countries and they all behave
+ * identically to the engine.
+ */
+export type PaymentMethod = 'card' | 'mobile_money' | 'bank_transfer'
 
 /**
- * Where the buyer or seller is. Drives rail selection: the same method routes
- * to a different provider — or is unavailable — depending on the market.
- * `INTL` covers everywhere PayHold does not have a local rail.
+ * ISO-3166 alpha-2 for every country PayHold serves: all 54 African states
+ * plus the United States. Drives rail selection — the same method routes to a
+ * different provider, or is unavailable, depending on the market.
  */
-export type Country = 'RW' | 'KE' | 'UG' | 'TZ' | 'GH' | 'NG' | 'ZA' | 'INTL'
+export type Country =
+  // North
+  | 'DZ' | 'EG' | 'LY' | 'MA' | 'SD' | 'TN'
+  // West
+  | 'BJ' | 'BF' | 'CV' | 'CI' | 'GM' | 'GH' | 'GN' | 'GW' | 'LR' | 'ML'
+  | 'MR' | 'NE' | 'NG' | 'SN' | 'SL' | 'TG'
+  // Central
+  | 'CM' | 'CF' | 'TD' | 'CG' | 'CD' | 'GQ' | 'GA' | 'ST'
+  // East
+  | 'BI' | 'KM' | 'DJ' | 'ER' | 'ET' | 'KE' | 'MG' | 'MU' | 'RW' | 'SC'
+  | 'SO' | 'SS' | 'TZ' | 'UG'
+  // Southern
+  | 'AO' | 'BW' | 'SZ' | 'LS' | 'MW' | 'MZ' | 'NA' | 'ZA' | 'ZM' | 'ZW'
+  // Americas
+  | 'US'
 
 // ---------------------------------------------------------------------------
 // Deal state machine
@@ -103,6 +124,8 @@ export interface Deal {
   provider: Provider
   /** Null until the buyer actually pays — we don't know how they will. */
   payment_method: PaymentMethod | null
+  /** The specific wallet or scheme used, e.g. "M-Pesa", "Visa". */
+  payment_network: string | null
   provider_ref: string | null
   status: DealStatus
   expected_complete_at: Timestamp | null
@@ -124,7 +147,6 @@ export interface Deal {
 
 export type PayoutProvider =
   | 'flutterwave_momo'
-  | 'flutterwave_mpesa'
   | 'flutterwave_bank'
   | 'stripe_connect'
 

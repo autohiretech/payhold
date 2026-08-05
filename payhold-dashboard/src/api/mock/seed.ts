@@ -135,7 +135,7 @@ export function seedDb(): MockDb {
       name: 'Nairobi Car Hire Ltd',
       country: 'KE',
       payout_currency: 'KES',
-      payout_provider: 'flutterwave_mpesa',
+      payout_provider: 'flutterwave_momo',
       beneficiary_token: 'ben_fw_4ke82',
       masked_destination: 'M-Pesa •••• 5540',
       created_at: ago(52),
@@ -170,6 +170,8 @@ export function seedDb(): MockDb {
     country?: Country
     /** Defaults to the first rail available in that market. */
     method?: PaymentMethod
+    /** The specific wallet or scheme, e.g. "M-Pesa". */
+    network?: string
     deposit_amount?: number
     status: DealStatus
     /** Days ago the deal was created. */
@@ -231,7 +233,7 @@ export function seedDb(): MockDb {
       description: 'Nissan X-Trail — 7 days, Akagera self-drive',
       amount: 315_00,
       currency: 'USD',
-      country: 'INTL',
+      country: 'US',
       method: 'card',
       status: 'funded_held',
       created: 4,
@@ -244,7 +246,7 @@ export function seedDb(): MockDb {
       description: 'Toyota Axio — 4 days, Nairobi',
       amount: 24_000_00,
       currency: 'KES',
-      method: 'mpesa',
+      method: 'mobile_money',
       status: 'funded_held',
       created: 2,
     },
@@ -255,7 +257,7 @@ export function seedDb(): MockDb {
       description: 'Nissan Note — 3 days, Mombasa road trip',
       amount: 15_500_00,
       currency: 'KES',
-      method: 'mpesa',
+      method: 'mobile_money',
       status: 'paid_out',
       created: 38,
       confirmed: ['buyer', 'seller'],
@@ -268,7 +270,7 @@ export function seedDb(): MockDb {
       buyer_ref: 'bk_9c55',
       description: 'Toyota Sienta — 2 days, Kigali',
       amount: 8_600_00,
-      method: 'airtel_money',
+      method: 'mobile_money',
       status: 'funded_held',
       created: 1,
     },
@@ -426,7 +428,7 @@ export function seedDb(): MockDb {
     const cfg = settings.find((s) => s.tenant_id === spec.tenant_id)!
     const currency: Currency = spec.currency ?? 'RWF'
     const country: Country =
-      spec.country ?? (currency === 'KES' ? 'KE' : currency === 'USD' ? 'INTL' : 'RW')
+      spec.country ?? (currency === 'KES' ? 'KE' : currency === 'USD' ? 'US' : 'RW')
     const method: PaymentMethod =
       spec.method ?? collectionRails(country, currency)[0]?.method ?? 'card'
     // Unpaid deals only have a provisional rail — the buyer has not chosen yet.
@@ -457,6 +459,13 @@ export function seedDb(): MockDb {
       buyer_country: country,
       provider,
       payment_method: spec.status === 'created' ? null : method,
+      payment_network:
+        spec.status === 'created'
+          ? null
+          : (spec.network ??
+            collectionRails(country, currency).find((r) => r.method === method)
+              ?.networks[0] ??
+            (method === 'card' ? 'Visa' : null)),
       provider_ref:
         spec.status === 'created'
           ? null

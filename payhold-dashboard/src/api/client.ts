@@ -114,7 +114,11 @@ export interface SimulationApi {
    * Simulate a verified provider webhook landing: created → funded_held.
    * The method fixes which rail the deal ends up on.
    */
-  simulateFunding(dealId: string, method?: PaymentMethod): Promise<Deal>
+  simulateFunding(
+    dealId: string,
+    method?: PaymentMethod,
+    network?: string,
+  ): Promise<Deal>
   /** Move the world's clock forward, firing any timers that come due. */
   advanceTime(hours: number): Promise<void>
   /** Run the cron pass now: auto-release, clearance, payout dispatch. */

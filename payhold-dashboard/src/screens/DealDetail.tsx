@@ -190,10 +190,20 @@ export function DealDetailPage() {
               <Row label="Payout to" value={seller?.masked_destination ?? '—'} muted />
               <Row
                 label="Paid with"
-                value={d.payment_method ? METHOD_LABEL[d.payment_method] : 'not paid yet'}
+                value={
+                  d.payment_method
+                    ? [d.payment_network, METHOD_LABEL[d.payment_method]]
+                        .filter(Boolean)
+                        .join(' · ')
+                    : 'not paid yet'
+                }
                 muted
               />
-              <Row label="Buyer market" value={COUNTRY_LABEL[d.buyer_country]} muted />
+              <Row
+                label="Buyer market"
+                value={COUNTRY_LABEL[d.buyer_country] ?? d.buyer_country}
+                muted
+              />
               <Row label="Rail" value={PROVIDER_LABEL[d.provider]} muted />
               <Row label="Provider ref" value={d.provider_ref ?? '—'} muted />
               <Row

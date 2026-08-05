@@ -1,25 +1,39 @@
 /**
- * Payment rails: which provider handles which payment method, in which market,
- * for collection and for payout.
+ * Payment rails, derived from the country registry.
+ *
+ * Rails are generated from `COUNTRIES` rather than hand-listed, so adding a
+ * market is one row in one table and no rail can be silently forgotten.
  *
  * ─────────────────────────────────────────────────────────────────────────────
- * IMPORTANT — this table is a routing *policy*, not a verified capability list.
- * The entries below encode the plan from the build spec. Before any rail goes
- * live, confirm each row against the provider's own country/method
- * documentation and your signed account agreement, and mark it `verified`.
- * A wrong row here means a charge that cannot be collected, or worse, money
- * collected that cannot be paid out.
+ * The guarantee: **every country can pay.** Card acquiring is global, so each
+ * of the 55 markets gets at least an international card rail, in USD or EUR,
+ * even where neither provider has any local presence.
+ *
+ * The limit: **not every country can be paid.** Sending money is licensed
+ * per-corridor. Most African markets can be collected from and cannot be paid
+ * into, and `payoutRoute()` says so plainly rather than queuing a transfer
+ * that will never land.
  * ─────────────────────────────────────────────────────────────────────────────
  *
- * The one rule that is structural rather than configurable: Stripe cannot pay
- * out to Rwandan recipients, so African payouts always ride Flutterwave. That
- * is why collection and payout are separate flags — a rail can be able to take
- * money and unable to send it.
+ * Nothing here is verified against a signed provider agreement. See
+ * `RAILS_VERIFIED`.
  */
 
 // Imported from the types module directly, not the `@/api` barrel: the mock
 // engine imports this file, and the barrel imports the mock.
 import type { Country, Currency, PaymentMethod, Provider } from '@/api/types'
+import { COUNTRIES, countryInfo } from './countries'
+
+export { COUNTRIES, countryInfo, countryName, countriesByRegion } from './countries'
+export type { CountryInfo } from './countries'
+
+/**
+ * Flips to true only when every row has been checked against provider
+ * documentation and the account agreement. The dashboard shows a warning
+ * while it is false, and a test asserts it stays false until deliberately
+ * changed.
+ */
+export const RAILS_VERIFIED = false
 
 /** Card networks. Which are accepted is market-dependent, not universal. */
 export type CardScheme = 'visa' | 'mastercard' | 'amex' | 'verve'
@@ -36,255 +50,110 @@ export interface Rail {
   country: Country
   currencies: Currency[]
   provider: Provider
-  /** Can take money in on this rail. */
+  /** Wallets or schemes behind this rail, e.g. ["MTN", "Airtel Money"]. */
+  networks: string[]
   collect: boolean
-  /** Can send money out on this rail. */
   payout: boolean
-  /** Card networks accepted. Only meaningful when `method` is `card`. */
   schemes?: CardScheme[]
-  /** Set true only once checked against provider docs for that market. */
-  verified: boolean
-  /** Shown in the dashboard where the distinction matters. */
   note?: string
 }
 
-/**
- * Every market a buyer can select, and the currency people there actually pay
- * in. The country is the primary choice — it decides the rail, the currency
- * and the methods, in that order.
- *
- * `ZA` is present deliberately with no rails configured: it exercises the
- * "market we cannot serve yet" path rather than pretending everywhere works.
- */
-export const MARKETS: { country: Country; currency: Currency }[] = [
-  { country: 'RW', currency: 'RWF' },
-  { country: 'KE', currency: 'KES' },
-  { country: 'UG', currency: 'UGX' },
-  { country: 'TZ', currency: 'TZS' },
-  { country: 'GH', currency: 'GHS' },
-  { country: 'NG', currency: 'NGN' },
-  { country: 'ZA', currency: 'USD' },
-  { country: 'INTL', currency: 'USD' },
-]
+/** Currencies an international card rail can be charged in. */
+const INTERNATIONAL_CURRENCIES: Currency[] = ['USD', 'EUR']
 
-/** What a buyer in this market pays in by default. */
-export function defaultCurrencyFor(country: Country): Currency {
-  return MARKETS.find((m) => m.country === country)?.currency ?? 'USD'
+/**
+ * Build the rail list from the registry.
+ *
+ * Per country, in the order a buyer should see them:
+ *   1. Mobile money, where a real wallet exists — cheapest and most used.
+ *   2. Local-currency card, where Flutterwave supports the currency.
+ *   3. Bank transfer, where Flutterwave supports the currency.
+ *   4. International card via Stripe — the universal floor, always present.
+ */
+function buildRails(): Rail[] {
+  const rails: Rail[] = []
+
+  for (const info of COUNTRIES) {
+    const { code, currency } = info
+
+    if (info.momo) {
+      rails.push({
+        method: 'mobile_money',
+        country: code,
+        currencies: [currency],
+        provider: 'flutterwave',
+        networks: info.momoNetworks,
+        collect: true,
+        payout: info.flutterwavePayout,
+        note: info.momoNetworks.length
+          ? undefined
+          : 'Flutterwave lists mobile money here but does not name the networks — confirm which wallets work before launch.',
+      })
+    }
+
+    if (info.flutterwaveLocal) {
+      rails.push({
+        method: 'card',
+        country: code,
+        // Nigeria is quoted in Naira only: a Naira card settles in Naira
+        // whatever currency it is charged, so a foreign price only misleads.
+        currencies: code === 'NG' ? [currency] : [currency, 'USD'],
+        provider: 'flutterwave',
+        networks: [],
+        collect: true,
+        payout: false,
+        schemes:
+          code === 'NG'
+            ? ['visa', 'mastercard', 'verve']
+            : ['visa', 'mastercard'],
+        note:
+          code === 'NG'
+            ? 'A Naira card always settles in Naira regardless of the currency charged.'
+            : 'Cards collect only — a refund returns to the card, but a payout never does.',
+      })
+
+      rails.push({
+        method: 'bank_transfer',
+        country: code,
+        currencies: [currency],
+        provider: 'flutterwave',
+        networks: [],
+        collect: true,
+        payout: info.flutterwavePayout,
+      })
+    }
+
+    // The universal floor. Present for every country, including those with a
+    // full local stack — a visitor's foreign card still has to work.
+    rails.push({
+      method: 'card',
+      country: code,
+      currencies: INTERNATIONAL_CURRENCIES,
+      provider: 'stripe',
+      networks: [],
+      collect: true,
+      payout: false,
+      schemes: ['visa', 'mastercard', 'amex'],
+      note: 'International card acquiring. Works from anywhere, but cannot pay anyone.',
+    })
+
+    if (info.stripePayout) {
+      rails.push({
+        method: 'bank_transfer',
+        country: code,
+        currencies: [currency],
+        provider: 'stripe',
+        networks: [],
+        collect: false,
+        payout: true,
+      })
+    }
+  }
+
+  return rails
 }
 
-export const RAILS: Rail[] = [
-  // --- Rwanda — the launch market -------------------------------------------
-  {
-    method: 'mtn_momo',
-    country: 'RW',
-    currencies: ['RWF'],
-    provider: 'flutterwave',
-    collect: true,
-    payout: true,
-    verified: false,
-  },
-  {
-    method: 'airtel_money',
-    country: 'RW',
-    currencies: ['RWF'],
-    provider: 'flutterwave',
-    collect: true,
-    payout: true,
-    verified: false,
-  },
-  {
-    method: 'card',
-    country: 'RW',
-    currencies: ['RWF', 'USD'],
-    provider: 'flutterwave',
-    collect: true,
-    payout: false,
-    schemes: ['visa', 'mastercard'],
-    verified: false,
-    note:
-      'Cards collect only — refunds go back to the card, payouts do not. ' +
-      'USD collection is supported and lands in a separate USD balance, but ' +
-      'whether a Rwandan-issued card can be charged in USD is the issuing ' +
-      "bank's decision, not Flutterwave's. Offer USD to international " +
-      'cardholders; expect local cards to decline it.',
-  },
-  {
-    method: 'bank_transfer',
-    country: 'RW',
-    currencies: ['RWF'],
-    provider: 'flutterwave',
-    collect: true,
-    payout: true,
-    verified: false,
-  },
-
-  // --- Kenya ----------------------------------------------------------------
-  {
-    method: 'mpesa',
-    country: 'KE',
-    currencies: ['KES'],
-    provider: 'flutterwave',
-    collect: true,
-    payout: true,
-    verified: false,
-    note: 'The dominant method in Kenya — offer it first, not the card.',
-  },
-  {
-    method: 'airtel_money',
-    country: 'KE',
-    currencies: ['KES'],
-    provider: 'flutterwave',
-    collect: true,
-    payout: true,
-    verified: false,
-  },
-  {
-    method: 'card',
-    country: 'KE',
-    currencies: ['KES', 'USD'],
-    provider: 'flutterwave',
-    collect: true,
-    payout: false,
-    schemes: ['visa', 'mastercard'],
-    verified: false,
-  },
-  {
-    method: 'bank_transfer',
-    country: 'KE',
-    currencies: ['KES'],
-    provider: 'flutterwave',
-    collect: true,
-    payout: true,
-    verified: false,
-  },
-
-  // --- Uganda ---------------------------------------------------------------
-  {
-    method: 'mtn_momo',
-    country: 'UG',
-    currencies: ['UGX'],
-    provider: 'flutterwave',
-    collect: true,
-    payout: true,
-    verified: false,
-  },
-  {
-    method: 'airtel_money',
-    country: 'UG',
-    currencies: ['UGX'],
-    provider: 'flutterwave',
-    collect: true,
-    payout: true,
-    verified: false,
-  },
-  {
-    method: 'card',
-    country: 'UG',
-    currencies: ['UGX', 'USD'],
-    provider: 'flutterwave',
-    collect: true,
-    payout: false,
-    schemes: ['visa', 'mastercard'],
-    verified: false,
-  },
-
-  // --- Tanzania -------------------------------------------------------------
-  {
-    method: 'mpesa',
-    country: 'TZ',
-    currencies: ['TZS'],
-    provider: 'flutterwave',
-    collect: true,
-    payout: true,
-    verified: false,
-  },
-  {
-    method: 'airtel_money',
-    country: 'TZ',
-    currencies: ['TZS'],
-    provider: 'flutterwave',
-    collect: true,
-    payout: true,
-    verified: false,
-  },
-  {
-    method: 'card',
-    country: 'TZ',
-    currencies: ['TZS', 'USD'],
-    provider: 'flutterwave',
-    collect: true,
-    payout: false,
-    schemes: ['visa', 'mastercard'],
-    verified: false,
-  },
-
-  // --- Ghana ----------------------------------------------------------------
-  {
-    method: 'mtn_momo',
-    country: 'GH',
-    currencies: ['GHS'],
-    provider: 'flutterwave',
-    collect: true,
-    payout: true,
-    verified: false,
-  },
-  {
-    method: 'card',
-    country: 'GH',
-    currencies: ['GHS', 'USD'],
-    provider: 'flutterwave',
-    collect: true,
-    payout: false,
-    schemes: ['visa', 'mastercard'],
-    verified: false,
-  },
-  {
-    method: 'bank_transfer',
-    country: 'GH',
-    currencies: ['GHS'],
-    provider: 'flutterwave',
-    collect: true,
-    payout: true,
-    verified: false,
-  },
-
-  // --- Nigeria --------------------------------------------------------------
-  {
-    method: 'card',
-    country: 'NG',
-    currencies: ['NGN'],
-    provider: 'flutterwave',
-    collect: true,
-    payout: false,
-    schemes: ['visa', 'mastercard', 'verve'],
-    verified: false,
-    note:
-      'A Naira card always settles in Naira regardless of the currency ' +
-      'charged, so do not offer a Nigerian buyer a foreign-currency price.',
-  },
-  {
-    method: 'bank_transfer',
-    country: 'NG',
-    currencies: ['NGN'],
-    provider: 'flutterwave',
-    collect: true,
-    payout: true,
-    verified: false,
-  },
-
-  // --- International cards --------------------------------------------------
-  {
-    method: 'card',
-    country: 'INTL',
-    currencies: ['USD', 'EUR'],
-    provider: 'stripe',
-    collect: true,
-    payout: false,
-    schemes: ['visa', 'mastercard', 'amex'],
-    verified: false,
-    note: 'Stripe collects internationally but cannot pay African sellers — those payouts ride Flutterwave.',
-  },
-]
+export const RAILS: Rail[] = buildRails()
 
 // ---------------------------------------------------------------------------
 // Labels
@@ -292,40 +161,25 @@ export const RAILS: Rail[] = [
 
 export const METHOD_LABEL: Record<PaymentMethod, string> = {
   card: 'Card',
-  mtn_momo: 'MTN Mobile Money',
-  airtel_money: 'Airtel Money',
-  mpesa: 'M-Pesa',
+  mobile_money: 'Mobile money',
   bank_transfer: 'Bank transfer',
 }
 
 export const METHOD_BLURB: Record<PaymentMethod, string> = {
-  card: 'Visa, Mastercard. 3D Secure is requested on every charge.',
-  mtn_momo: 'Pay from your MTN wallet. You will get a prompt on your phone.',
-  airtel_money: 'Pay from your Airtel wallet. You will get a prompt on your phone.',
-  mpesa: 'Pay with M-Pesa. You will get an STK prompt on your phone.',
-  bank_transfer: 'Transfer from your bank account.',
+  card: 'Visa or Mastercard. Verified with 3D Secure.',
+  mobile_money: 'Pay from your wallet. You will get a prompt on your phone.',
+  bank_transfer: 'Transfer directly from your bank account.',
 }
 
-export const COUNTRY_LABEL: Record<Country, string> = {
-  RW: 'Rwanda',
-  KE: 'Kenya',
-  UG: 'Uganda',
-  TZ: 'Tanzania',
-  GH: 'Ghana',
-  NG: 'Nigeria',
-  ZA: 'South Africa',
-  INTL: 'Somewhere else',
-}
+export const COUNTRY_LABEL: Record<string, string> = Object.fromEntries(
+  COUNTRIES.map((info) => [info.code, info.name]),
+)
 
-export const COUNTRY_FLAG: Record<Country, string> = {
-  RW: '🇷🇼',
-  KE: '🇰🇪',
-  UG: '🇺🇬',
-  TZ: '🇹🇿',
-  GH: '🇬🇭',
-  NG: '🇳🇬',
-  ZA: '🇿🇦',
-  INTL: '🌍',
+/** Regional-indicator flag emoji, derived from the ISO code. */
+export function countryFlag(code: Country): string {
+  return String.fromCodePoint(
+    ...[...code].map((ch) => 0x1f1e6 + ch.charCodeAt(0) - 65),
+  )
 }
 
 export const PROVIDER_LABEL: Record<Provider, string> = {
@@ -336,52 +190,36 @@ export const PROVIDER_LABEL: Record<Provider, string> = {
 
 export const PROVIDER_BLURB: Record<Provider, string> = {
   flutterwave:
-    'The launch rail. Cards and mobile money across East and West Africa, and the only rail that can pay African sellers.',
+    'Local rails across Africa — mobile money, local-currency cards and bank transfers, and the only way to pay an African seller.',
   stripe:
-    'International cards. Activates when keys are configured. Collects worldwide but cannot pay out to Rwanda or Kenya.',
+    'International card acquiring. Charges a card issued anywhere in the world, but can only pay out in the countries Stripe operates in.',
   fake: 'No provider keys configured. Payments are simulated end to end so the product works without a live account.',
 }
 
 // ---------------------------------------------------------------------------
-// Queries
+// Collection
 // ---------------------------------------------------------------------------
 
+const METHOD_ORDER: PaymentMethod[] = ['mobile_money', 'card', 'bank_transfer']
+
 /**
- * Methods a buyer in this market can actually pay with, in the order to show
- * them.
+ * What a buyer in this market can pay with, in the order to show them.
  *
- * Local rails come first and win on ties: where a market has its own card
- * rail, a card is acquired locally rather than shipped to Stripe. Stripe is
- * the fallback for markets with no local rail at all.
+ * Mobile money leads where it exists: it is what most buyers in these markets
+ * actually use, and it costs the tenant less than a card. Local rails come
+ * before the international card rail.
  */
 export function collectionRails(country: Country, currency: Currency): Rail[] {
-  const local = RAILS.filter(
-    (r) =>
-      r.collect && r.country === country && r.currencies.includes(currency),
+  const matching = RAILS.filter(
+    (r) => r.collect && r.country === country && r.currencies.includes(currency),
   )
 
-  // Anyone can pay by international card if the currency supports it, even
-  // where we have no local rail at all.
-  const intl = RAILS.filter(
-    (r) =>
-      r.collect &&
-      r.country === 'INTL' &&
-      r.currencies.includes(currency) &&
-      !local.some((l) => l.method === r.method && l.provider === r.provider),
-  )
-
-  // Mobile money before cards: it is what most buyers in these markets use,
-  // and it costs the tenant less.
-  const order: PaymentMethod[] = [
-    'mpesa',
-    'mtn_momo',
-    'airtel_money',
-    'card',
-    'bank_transfer',
-  ]
-  return [...local, ...intl].sort(
-    (a, b) => order.indexOf(a.method) - order.indexOf(b.method),
-  )
+  return matching.sort((a, b) => {
+    // Local provider first, then by method preference.
+    const localness = Number(b.provider === 'flutterwave') - Number(a.provider === 'flutterwave')
+    if (localness !== 0) return localness
+    return METHOD_ORDER.indexOf(a.method) - METHOD_ORDER.indexOf(b.method)
+  })
 }
 
 /** Which provider a given charge routes to, or null if we cannot take it. */
@@ -390,34 +228,48 @@ export function providerFor(
   currency: Currency,
   method: PaymentMethod,
 ): Provider | null {
-  const rail = collectionRails(country, currency).find((r) => r.method === method)
-  return rail?.provider ?? null
+  return collectionRails(country, currency).find((r) => r.method === method)?.provider ?? null
 }
 
-/** The rail a deal will provisionally use before the buyer chooses a method. */
+/** The rail a deal provisionally uses before the buyer chooses a method. */
 export function defaultProviderFor(country: Country, currency: Currency): Provider {
-  const first = collectionRails(country, currency)[0]
-  return first?.provider ?? 'flutterwave'
+  return collectionRails(country, currency)[0]?.provider ?? 'stripe'
 }
 
-/** Rails that can actually send money to a seller in this market. */
-export function payoutRails(country: Country): Rail[] {
-  return RAILS.filter((r) => r.payout && r.country === country)
+/** What a buyer in this market pays in by default. */
+export function defaultCurrencyFor(country: Country): Currency {
+  return countryInfo(country).currency
+}
+
+/** Every currency a buyer in this market can be charged. */
+export function currenciesFor(country: Country): Currency[] {
+  return [
+    ...new Set(
+      RAILS.filter((r) => r.collect && r.country === country).flatMap(
+        (r) => r.currencies,
+      ),
+    ),
+  ]
 }
 
 /**
- * Countries Stripe can actually pay a business in.
+ * True when a buyer in this market can pay in this currency.
  *
- * Checked against stripe.com/global, August 2026. None of PayHold's African
- * markets are on it. Ghana, Kenya, Nigeria and South Africa appear only under
- * Stripe's "extended network" — that routes through Paystack, which is a
- * separate integration, not a Stripe Connect payout.
- *
- * This is why "pay them in dollars via Stripe" does not work for an African
- * seller: Stripe has no way to reach their bank account at all, whatever the
- * currency.
+ * Because every country has an international card rail, this is always true
+ * for USD and EUR — which is the point. No buyer is ever turned away.
  */
-export const STRIPE_PAYOUT_COUNTRIES: Country[] = ['INTL']
+export function isMarketSupported(country: Country, currency: Currency): boolean {
+  return collectionRails(country, currency).length > 0
+}
+
+// ---------------------------------------------------------------------------
+// Payout
+// ---------------------------------------------------------------------------
+
+/** Rails that can actually send money to someone in this market. */
+export function payoutRails(country: Country): Rail[] {
+  return RAILS.filter((r) => r.payout && r.country === country)
+}
 
 export type PayoutKind = 'momo' | 'bank' | 'connect'
 
@@ -428,60 +280,53 @@ export interface PayoutRoute {
   /** True when there is no way to send this money at all. */
   blocked: boolean
   reason: string
-  /** False where the route is planned but unconfirmed with the provider. */
   verified: boolean
 }
 
 /**
- * Where a seller's money goes, given where they are and what currency they
- * want.
+ * Where a seller's money goes, given where they are and what they want paid in.
  *
- * The rule, in order:
- *   1. Local currency, in a market we have rails for → Flutterwave, to their
- *      mobile money wallet or bank account.
- *   2. Foreign currency, or a market with no local rail → Stripe, but only
- *      where Stripe can actually reach them.
- *   3. Neither → blocked, and the dashboard says so instead of queuing a
- *      payout that will never land.
+ *   1. Local currency, in a market Flutterwave can reach → mobile money or bank.
+ *   2. A market Stripe can reach → Stripe, in any currency.
+ *   3. Foreign currency in a Flutterwave market → foreign-currency bank
+ *      account, flagged for confirmation.
+ *   4. Otherwise blocked, and the dashboard says so.
  */
 export function payoutRoute(country: Country, currency: Currency): PayoutRoute {
-  const local = defaultCurrencyFor(country)
+  const info = countryInfo(country)
+  const local = info.currency
   const rails = payoutRails(country)
   const wantsLocal = currency === local
 
-  // 1. Local currency into a local wallet or bank — the common case, and the
-  //    only one that is straightforwardly true today.
-  if (wantsLocal && rails.length > 0) {
-    const hasWallet = rails.some((r) => r.method !== 'bank_transfer')
+  if (wantsLocal && info.flutterwavePayout) {
+    const hasWallet = rails.some((r) => r.method === 'mobile_money')
     return {
       provider: 'flutterwave',
       kind: hasWallet ? 'momo' : 'bank',
       currency,
       blocked: false,
-      verified: false,
+      verified: RAILS_VERIFIED,
       reason: `Paid in ${currency} via Flutterwave, to a ${
         hasWallet ? 'mobile money wallet or bank account' : 'bank account'
-      } in ${COUNTRY_LABEL[country]}.`,
+      } in ${info.name}.`,
     }
   }
 
-  // 2. Stripe, where Stripe can reach them.
-  if (STRIPE_PAYOUT_COUNTRIES.includes(country)) {
+  if (info.stripePayout) {
     return {
       provider: 'stripe',
       kind: 'connect',
       currency,
       blocked: false,
-      verified: false,
-      reason: `Paid in ${currency} via Stripe Connect. The seller must hold an account in a Stripe-supported country.`,
+      verified: RAILS_VERIFIED,
+      reason: `Paid in ${currency} via Stripe, to a bank account in ${info.name}.`,
     }
   }
 
-  // 3. A foreign currency into a market Stripe cannot reach. Flutterwave can
-  //    hold the currency, but paying a third-party beneficiary in it is a
-  //    different capability from settling it to your own account — so this is
-  //    offered as a route to confirm, not a promise.
-  if (!wantsLocal && rails.some((r) => r.method === 'bank_transfer')) {
+  // Flutterwave can hold a foreign currency, but paying a third-party
+  // beneficiary in it is a different capability from settling it to your own
+  // account — offered as a route to confirm, not a promise.
+  if (!wantsLocal && info.flutterwavePayout) {
     return {
       provider: 'flutterwave',
       kind: 'bank',
@@ -489,11 +334,10 @@ export function payoutRoute(country: Country, currency: Currency): PayoutRoute {
       blocked: false,
       verified: false,
       reason:
-        `Stripe cannot pay a seller in ${COUNTRY_LABEL[country]} at all, so ` +
-        `${currency} would have to go out on Flutterwave to a ${currency} ` +
-        'bank account. Confirm with Flutterwave that your account can send ' +
-        `${currency} to a third-party beneficiary there before relying on this — ` +
-        `otherwise convert to ${local} and pay locally.`,
+        `Stripe cannot pay anyone in ${info.name}, so ${currency} would have ` +
+        `to go out on Flutterwave to a ${currency} bank account. Confirm with ` +
+        'Flutterwave that your account can send it to a third-party ' +
+        `beneficiary there — otherwise convert to ${local} and pay locally.`,
     }
   }
 
@@ -504,96 +348,65 @@ export function payoutRoute(country: Country, currency: Currency): PayoutRoute {
     blocked: true,
     verified: false,
     reason:
-      `There is no way to send ${currency} to a seller in ` +
-      `${COUNTRY_LABEL[country]}. Stripe does not support payouts there, and ` +
-      'no Flutterwave rail is configured. Register the seller in a market we ' +
-      'can reach, or add a rail first.',
+      `PayHold cannot send money to ${info.name} yet. Neither provider is ` +
+      'licensed for that corridor. Buyers there can still pay — collection ' +
+      'works everywhere — but a seller needs an account somewhere we can reach.',
   }
 }
 
-/**
- * Why a payout can or cannot use a given provider, for the seller's local
- * currency. The Rwanda/Stripe case is the one that bites, so it is stated
- * rather than implied.
- */
+/** Summary of payout capability in a market, for the seller's local currency. */
 export function payoutCapability(country: Country): {
   provider: Provider | null
   reason: string
 } {
-  const rails = payoutRails(country)
-  if (!rails.length) {
-    return {
-      provider: null,
-      reason: STRIPE_PAYOUT_COUNTRIES.includes(country)
-        ? 'Paid via Stripe Connect where the seller is in a supported country.'
-        : `No payout rail is configured for ${COUNTRY_LABEL[country]} yet, and Stripe cannot reach it.`,
-    }
-  }
-  return {
-    provider: 'flutterwave',
-    reason: `Paid via Flutterwave — Stripe cannot send funds to ${COUNTRY_LABEL[country]}.`,
-  }
+  const route = payoutRoute(country, defaultCurrencyFor(country))
+  return { provider: route.provider, reason: route.reason }
 }
 
-/** True when a market has at least one collection rail we can take money on. */
-export function isMarketSupported(country: Country, currency: Currency): boolean {
-  return collectionRails(country, currency).length > 0
-}
+// ---------------------------------------------------------------------------
+// Market summary — everything that follows from picking a country
+// ---------------------------------------------------------------------------
 
-/**
- * Everything that follows from picking a country, in one object.
- *
- * The country is the primary choice throughout the product — it decides the
- * provider, then the currencies, then the methods. This is what the checkout,
- * the deal form and the Rails screen all read, so all three answer "I chose
- * Rwanda, what now?" identically.
- */
 export interface MarketSummary {
   country: Country
-  /** The rail serving collection here, or null if we cannot serve this market. */
+  name: string
+  /** The rail serving local collection, or null where only cards work. */
   provider: Provider | null
-  /** What a buyer here pays in by default. */
   currency: Currency
-  /** Every currency a buyer here can be charged. */
   currencies: Currency[]
   /** Local wallets and bank transfer — everything that is not a card. */
   localMethods: Rail[]
-  /** The card rail, if this market has one. */
   cardRail: Rail | null
-  /** Card networks accepted here. Empty when there is no card rail. */
   schemes: CardScheme[]
+  /** Wallets available here, e.g. ["MTN", "Airtel Money"]. */
+  networks: string[]
   payout: ReturnType<typeof payoutCapability>
-  /** Notes worth showing, deduplicated. */
+  /** True when a buyer here has a local option, not just an foreign card. */
+  hasLocalRails: boolean
   notes: string[]
 }
 
 export function marketSummary(country: Country): MarketSummary {
-  const rails = RAILS.filter((r) => r.collect && r.country === country)
-
-  // Every market can also take an international card, provided we have a rail
-  // for the currency — that is how a visitor pays where we have no local rail.
-  const intl = RAILS.filter((r) => r.collect && r.country === 'INTL')
-  const all = country === 'INTL' ? intl : [...rails, ...intl]
-
-  const cardRail = rails.find((r) => r.method === 'card') ?? intl[0] ?? null
-  const localMethods = rails.filter((r) => r.method !== 'card')
-
-  const currencies = [...new Set(all.flatMap((r) => r.currencies))]
-  const notes = [...new Set(all.map((r) => r.note).filter((n): n is string => !!n))]
+  const info = countryInfo(country)
+  const localRails = RAILS.filter(
+    (r) => r.collect && r.country === country && r.provider === 'flutterwave',
+  )
+  const all = RAILS.filter((r) => r.collect && r.country === country)
+  const cardRail = localRails.find((r) => r.method === 'card') ?? null
 
   return {
     country,
-    // Local rails define the market. Falling back to the international card
-    // rail would claim we serve a market when all we can do is take a foreign
-    // card from someone standing in it.
-    provider: rails[0]?.provider ?? null,
-    currency: defaultCurrencyFor(country),
-    currencies,
-    localMethods,
-    cardRail: cardRail ?? null,
-    schemes: cardRail?.schemes ?? [],
+    name: info.name,
+    provider: localRails[0]?.provider ?? null,
+    currency: info.currency,
+    currencies: currenciesFor(country),
+    localMethods: localRails.filter((r) => r.method !== 'card'),
+    cardRail,
+    schemes: cardRail?.schemes ?? ['visa', 'mastercard', 'amex'],
+    networks: info.momoNetworks,
     payout: payoutCapability(country),
-    notes,
+    hasLocalRails: localRails.length > 0,
+    notes: [...new Set(all.map((r) => r.note).filter((n): n is string => !!n))],
   }
 }
 
@@ -601,17 +414,6 @@ export function marketSummary(country: Country): MarketSummary {
 // Settlement
 // ---------------------------------------------------------------------------
 
-/**
- * Collecting a currency is not the same as being able to withdraw it.
- *
- * Flutterwave holds each collected currency in its own balance. Getting a
- * foreign-currency balance out to a bank account has conditions the local
- * currency does not — which is why `available` on the Rails screen can be
- * non-zero and still not be withdrawable this week.
- *
- * Verified against Flutterwave's settlement documentation, August 2026.
- * Re-check before launch: thresholds change.
- */
 export interface SettlementNote {
   currency: Currency
   /** Minimum balance, in minor units, before a settlement will run. */
@@ -619,6 +421,10 @@ export interface SettlementNote {
   detail: string
 }
 
+/**
+ * Collecting a currency is not the same as being able to withdraw it.
+ * Verified against Flutterwave's settlement documentation, August 2026.
+ */
 export function settlementNote(
   currency: Currency,
   homeCurrency: Currency,
@@ -640,8 +446,6 @@ export function settlementNote(
   return {
     currency,
     minimum: null,
-    detail:
-      `${currency} is held as its own balance and settles separately from ` +
-      'your local currency.',
+    detail: `${currency} is held as its own balance and settles separately from your local currency.`,
   }
 }

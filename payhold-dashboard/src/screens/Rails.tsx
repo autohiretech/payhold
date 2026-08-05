@@ -21,6 +21,7 @@ import {
   CardHeader,
   EmptyState,
   PageHeader,
+  Select,
   Skeleton,
   Table,
   Td,
@@ -29,14 +30,16 @@ import {
 } from '@/components/ui'
 import { formatMoney, type StatusMeta } from '@/lib/format'
 import {
-  COUNTRY_FLAG,
-  COUNTRY_LABEL,
-  MARKETS,
+  COUNTRIES,
   METHOD_LABEL,
   PROVIDER_BLURB,
   PROVIDER_LABEL,
   RAILS,
+  RAILS_VERIFIED,
   SCHEME_LABEL,
+  countriesByRegion,
+  countryFlag,
+  countryName,
   marketSummary,
   payoutCapability,
   settlementNote,
@@ -82,8 +85,7 @@ export function RailsPage() {
 
   // The markets that matter to this tenant: everywhere they have a seller,
   // plus international for card-paying visitors.
-  const sellerCountries = [...new Set(sellers.data?.map((s) => s.country) ?? [])]
-  const markets: Country[] = [...new Set<Country>([...sellerCountries, 'INTL'])]
+  const markets: Country[] = [...new Set(sellers.data?.map((s) => s.country) ?? [])]
 
   return (
     <>
@@ -216,7 +218,9 @@ export function RailsPage() {
                   key={`${rail.country}-${rail.method}-${rail.provider}`}
                   className="hover:bg-surface-2"
                 >
-                  <Td className="font-medium">{COUNTRY_LABEL[rail.country]}</Td>
+                  <Td className="font-medium">
+                    {countryFlag(rail.country)} {countryName(rail.country)}
+                  </Td>
                   <Td>
                     <span className="inline-flex items-center gap-2 text-fg">
                       <span className="text-fg-muted">
@@ -242,10 +246,10 @@ export function RailsPage() {
                     <span
                       className={cx(
                         'text-xs font-semibold',
-                        rail.verified ? 'text-released' : 'text-pending',
+                        RAILS_VERIFIED ? 'text-released' : 'text-pending',
                       )}
                     >
-                      {rail.verified ? 'Verified' : 'Unverified'}
+                      {RAILS_VERIFIED ? 'Verified' : 'Unverified'}
                     </span>
                   </Td>
                 </tr>
@@ -286,7 +290,9 @@ export function RailsPage() {
 
               return (
                 <tr key={country} className="hover:bg-surface-2">
-                  <Td className="font-medium">{COUNTRY_LABEL[country]}</Td>
+                  <Td className="font-medium">
+                    {countryFlag(country)} {countryName(country)}
+                  </Td>
                   <Td className="text-fg-muted">
                     {count === 0 ? '—' : `${count} registered`}
                   </Td>
@@ -329,34 +335,43 @@ function MarketExplorer() {
       />
 
       <div className="border-b border-line px-6 py-4">
-        <div className="flex flex-wrap gap-2">
-          {MARKETS.map((m) => (
-            <button
-              key={m.country}
-              onClick={() => setCountry(m.country)}
-              className={cx(
-                'rounded-full px-3.5 py-1.5 text-sm font-semibold transition',
-                m.country === country
-                  ? 'bg-brand text-brand-fg shadow-[var(--shadow-card)]'
-                  : 'bg-surface text-fg-muted ring-1 ring-line ring-inset hover:bg-surface-2 hover:text-fg',
-              )}
+        <div className="flex flex-wrap items-end gap-4">
+          <label className="block w-full sm:w-72">
+            <span className="mb-2 block text-sm font-semibold text-fg">Country</span>
+            <Select
+              value={country}
+              onChange={(e) => setCountry(e.target.value as Country)}
             >
-              <span className="mr-1.5">{COUNTRY_FLAG[m.country]}</span>
-              {COUNTRY_LABEL[m.country]}
-            </button>
-          ))}
+              {countriesByRegion().map((group) => (
+                <optgroup key={group.region} label={group.region}>
+                  {group.countries.map((info) => (
+                    <option key={info.code} value={info.code}>
+                      {countryFlag(info.code)}  {info.name}
+                    </option>
+                  ))}
+                </optgroup>
+              ))}
+            </Select>
+          </label>
+
+          <p className="text-sm text-fg-muted">
+            {COUNTRIES.length} markets configured ·{' '}
+            {COUNTRIES.filter((c) => c.momo).length} with mobile money ·{' '}
+            {COUNTRIES.filter((c) => c.flutterwavePayout || c.stripePayout).length}{' '}
+            we can pay into
+          </p>
         </div>
       </div>
 
-      {market.provider === null ? (
+      {!market.hasLocalRails ? (
         <div className="px-6 py-6">
-          <p className="rounded-xl bg-danger-soft px-4 py-3 text-sm leading-relaxed text-danger">
+          <p className="rounded-xl bg-pending-soft px-4 py-3 text-sm leading-relaxed text-pending">
             <strong className="font-semibold">
-              No local rail for {COUNTRY_LABEL[market.country]}.
+              No local rail in {market.name} — cards only.
             </strong>{' '}
-            A buyer there can still pay by international card in{' '}
-            {market.currencies.join(' or ')}, but there is no local wallet or
-            bank rail, and no way to pay a seller based there.
+            A buyer there can still pay, by international card in{' '}
+            {market.currencies.join(' or ')}. There is no local wallet or bank
+            rail, and {market.payout.provider ? 'payouts go via Stripe' : 'no way to pay a seller based there'}.
           </p>
         </div>
       ) : (
@@ -366,7 +381,7 @@ function MarketExplorer() {
               Collected by
             </p>
             <div className="mt-2">
-              <ProviderChip provider={market.provider} />
+              <ProviderChip provider={market.provider ?? 'stripe'} />
             </div>
 
             <p className="mt-5 text-xs font-semibold tracking-[0.06em] text-fg-muted uppercase">
@@ -382,13 +397,20 @@ function MarketExplorer() {
               )}
             </p>
 
+            {market.networks.length > 0 && (
+              <>
+                <p className="mt-5 text-xs font-semibold tracking-[0.06em] text-fg-muted uppercase">
+                  Wallets
+                </p>
+                <p className="mt-2 text-sm text-fg">{market.networks.join(', ')}</p>
+              </>
+            )}
+
             <p className="mt-5 text-xs font-semibold tracking-[0.06em] text-fg-muted uppercase">
               Cards accepted
             </p>
             <p className="mt-2 text-sm text-fg">
-              {market.schemes.length
-                ? market.schemes.map((s) => SCHEME_LABEL[s]).join(', ')
-                : 'No card rail in this market'}
+              {market.schemes.map((s) => SCHEME_LABEL[s]).join(', ')}
             </p>
 
             <p className="mt-5 text-xs font-semibold tracking-[0.06em] text-fg-muted uppercase">

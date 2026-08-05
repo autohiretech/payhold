@@ -15,13 +15,13 @@ import { Button, Card, Dot, Select, Skeleton, cx } from '@/components/ui'
 import { MethodIcon, ProviderChip } from '@/components/rails'
 import { formatDate, formatMoney } from '@/lib/format'
 import {
-  COUNTRY_FLAG,
-  COUNTRY_LABEL,
-  MARKETS,
   METHOD_BLURB,
   METHOD_LABEL,
   SCHEME_LABEL,
   collectionRails,
+  countriesByRegion,
+  countryFlag,
+  countryName,
   marketSummary,
 } from '@/lib/rails'
 import { useMoneyAction } from '@/lib/queries'
@@ -141,10 +141,14 @@ export function CheckoutPage() {
                 setMethod(null)
               }}
             >
-              {MARKETS.map((m) => (
-                <option key={m.country} value={m.country}>
-                  {COUNTRY_FLAG[m.country]}  {COUNTRY_LABEL[m.country]}
-                </option>
+              {countriesByRegion().map((group) => (
+                <optgroup key={group.region} label={group.region}>
+                  {group.countries.map((info) => (
+                    <option key={info.code} value={info.code}>
+                      {countryFlag(info.code)}  {info.name}
+                    </option>
+                  ))}
+                </optgroup>
               ))}
             </Select>
           </label>
@@ -165,7 +169,7 @@ export function CheckoutPage() {
 
           {rails.length === 0 ? (
             <p className="mt-3 rounded-xl bg-danger-soft px-4 py-3 text-sm leading-relaxed text-danger">
-              We cannot accept {d.currency} from {COUNTRY_LABEL[payingFrom]} yet.
+              We cannot accept {d.currency} from {countryName(payingFrom)} yet.
               Pick another country, or ask the seller for a different way to pay.
             </p>
           ) : (

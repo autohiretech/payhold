@@ -21,11 +21,11 @@ import {
 import { MethodChip, ProviderChip } from '@/components/rails'
 import { DEAL_STATUS_META, formatMoney, formatRelative } from '@/lib/format'
 import {
-  COUNTRY_FLAG,
   COUNTRY_LABEL,
-  MARKETS,
   SCHEME_LABEL,
   collectionRails,
+  countriesByRegion,
+  countryFlag,
   marketSummary,
 } from '@/lib/rails'
 import { simNow, useDeals, useMoneyAction, useSellers, useSettings } from '@/lib/queries'
@@ -368,10 +368,14 @@ function CreateDealForm({ onClose }: { onClose: () => void }) {
               value={country}
               onChange={(e) => setCountry(e.target.value as Country)}
             >
-              {MARKETS.map((m) => (
-                <option key={m.country} value={m.country}>
-                  {COUNTRY_FLAG[m.country]}  {COUNTRY_LABEL[m.country]}
-                </option>
+              {countriesByRegion().map((group) => (
+                <optgroup key={group.region} label={group.region}>
+                  {group.countries.map((info) => (
+                    <option key={info.code} value={info.code}>
+                      {countryFlag(info.code)}  {info.name}
+                    </option>
+                  ))}
+                </optgroup>
               ))}
             </Select>
           </Field>

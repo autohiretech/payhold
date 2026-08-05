@@ -107,7 +107,12 @@ function touch(deal: Deal): void {
  * international card, and the ledger entries follow the rail that actually
  * holds the money.
  */
-export function fundDeal(db: MockDb, dealId: string, method?: PaymentMethod): Deal {
+export function fundDeal(
+  db: MockDb,
+  dealId: string,
+  method?: PaymentMethod,
+  network?: string,
+): Deal {
   const deal = requireDeal(db, dealId)
   if (deal.status !== 'created') {
     throw new PayHoldError(
@@ -116,9 +121,10 @@ export function fundDeal(db: MockDb, dealId: string, method?: PaymentMethod): De
     )
   }
 
-  const chosen =
-    method ?? collectionRails(deal.buyer_country, deal.currency)[0]?.method ?? 'card'
+  const rails = collectionRails(deal.buyer_country, deal.currency)
+  const chosen = method ?? rails[0]?.method ?? 'card'
   const provider = providerFor(deal.buyer_country, deal.currency, chosen)
+  const rail = rails.find((r) => r.method === chosen)
 
   if (!provider) {
     throw new PayHoldError(
@@ -130,6 +136,10 @@ export function fundDeal(db: MockDb, dealId: string, method?: PaymentMethod): De
   const cfg = settingsFor(db, deal.tenant_id)
   deal.status = 'funded_held'
   deal.payment_method = chosen
+  // Record the specific wallet or scheme, so "paid with M-Pesa" survives even
+  // though the engine only cares that it was mobile money.
+  deal.payment_network =
+    network ?? rail?.networks[0] ?? (chosen === 'card' ? 'Visa' : null)
   deal.provider = provider
   deal.provider_ref = `${provider === 'stripe' ? 'pi' : 'FLW'}-${nextId('ref')}`
   deal.auto_release_at = addDays(

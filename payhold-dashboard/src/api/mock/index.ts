@@ -110,12 +110,10 @@ export class MockClient implements PayHoldClient {
         throw new PayHoldError('not_found', `Seller ${input.seller_id} not found`)
       }
 
-      // Default the buyer to the seller's market — most deals are local — and
-      // fall back to international for foreign currencies.
-      const buyerCountry: Country =
-        input.buyer_country ?? (input.currency === 'USD' || input.currency === 'EUR'
-          ? 'INTL'
-          : seller.country)
+      // Default the buyer to the seller's market — most deals are local. A
+      // foreign-currency deal still defaults there: the buyer picks their own
+      // country at checkout, and every country can pay by card.
+      const buyerCountry: Country = input.buyer_country ?? seller.country
 
       if (!isMarketSupported(buyerCountry, input.currency)) {
         throw new PayHoldError(
@@ -137,6 +135,7 @@ export class MockClient implements PayHoldClient {
         buyer_country: buyerCountry,
         provider: defaultProviderFor(buyerCountry, input.currency),
         payment_method: null,
+        payment_network: null,
         provider_ref: null,
         status: 'created',
         expected_complete_at: input.expected_complete_at ?? addDays(createdAt, 3),
@@ -232,8 +231,7 @@ export class MockClient implements PayHoldClient {
       // real system never stores it, and neither does the mock.
       const tail = input.destination.replace(/\D/g, '').slice(-4) || '0000'
       const DESTINATION_LABEL: Record<PayoutProvider, string> = {
-        flutterwave_momo: 'MoMo',
-        flutterwave_mpesa: 'M-Pesa',
+        flutterwave_momo: 'Mobile money',
         flutterwave_bank: 'Bank',
         stripe_connect: 'Stripe',
       }
@@ -512,8 +510,12 @@ export class MockClient implements PayHoldClient {
   // -- Simulation ----------------------------------------------------------
 
   sim: SimulationApi = {
-    async simulateFunding(dealId: string, method?: PaymentMethod): Promise<Deal> {
-      return delay(clone(mutate((db) => fundDeal(db, dealId, method))))
+    async simulateFunding(
+      dealId: string,
+      method?: PaymentMethod,
+      network?: string,
+    ): Promise<Deal> {
+      return delay(clone(mutate((db) => fundDeal(db, dealId, method, network))))
     },
 
     async advanceTime(hours: number): Promise<void> {

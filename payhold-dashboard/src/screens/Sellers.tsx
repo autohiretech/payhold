@@ -2,8 +2,10 @@ import { useState } from 'react'
 import { api, type Country, type Currency, type PayoutProvider } from '@/api'
 import { ProviderChip } from '@/components/rails'
 import {
-  COUNTRY_FLAG,
-  COUNTRY_LABEL,
+  COUNTRIES,
+  countriesByRegion,
+  countryFlag,
+  countryName,
   defaultCurrencyFor,
   payoutRoute,
 } from '@/lib/rails'
@@ -28,26 +30,25 @@ import { formatDate } from '@/lib/format'
 import { useMoneyAction, useSellers } from '@/lib/queries'
 
 const PAYOUT_LABEL: Record<PayoutProvider, string> = {
-  flutterwave_momo: 'Mobile money (MTN / Airtel)',
-  flutterwave_mpesa: 'M-Pesa',
+  flutterwave_momo: 'Mobile money',
   flutterwave_bank: 'Bank transfer',
   stripe_connect: 'Stripe Connect',
 }
 
 /**
- * Which payout methods make sense in each market. A market with an empty list
- * has no way to receive money yet — the form says so rather than offering a
- * destination that would never pay.
+ * Payout destinations available in a market, derived from the registry rather
+ * than hand-listed — a market with an empty list has no way to receive money,
+ * and the form says so instead of offering something that would never pay.
  */
-const PAYOUT_BY_COUNTRY: Record<Country, PayoutProvider[]> = {
-  RW: ['flutterwave_momo', 'flutterwave_bank'],
-  KE: ['flutterwave_mpesa', 'flutterwave_bank'],
-  UG: ['flutterwave_momo', 'flutterwave_bank'],
-  TZ: ['flutterwave_mpesa', 'flutterwave_bank'],
-  GH: ['flutterwave_momo', 'flutterwave_bank'],
-  NG: ['flutterwave_bank'],
-  ZA: [],
-  INTL: ['stripe_connect'],
+function payoutOptionsFor(country: Country): PayoutProvider[] {
+  const info = COUNTRIES.find((c) => c.code === country)
+  if (!info) return []
+
+  const options: PayoutProvider[] = []
+  if (info.momo && info.flutterwavePayout) options.push('flutterwave_momo')
+  if (info.flutterwavePayout) options.push('flutterwave_bank')
+  if (info.stripePayout) options.push('stripe_connect')
+  return options
 }
 
 export function SellersPage() {
@@ -103,7 +104,9 @@ export function SellersPage() {
                 return (
                   <tr key={s.id} className="hover:bg-surface-2">
                     <Td className="font-medium">{s.name}</Td>
-                    <Td className="text-fg-muted">{COUNTRY_LABEL[s.country]}</Td>
+                    <Td className="text-fg-muted">
+                      {countryFlag(s.country)} {countryName(s.country)}
+                    </Td>
                     <Td className="text-fg-muted">
                       {PAYOUT_LABEL[s.payout_provider]}
                     </Td>
@@ -146,7 +149,7 @@ function AddSellerForm({ onClose }: { onClose: () => void }) {
 
   // The market decides which payout methods are even possible, so it drives
   // the method list rather than sitting beside it.
-  const available = PAYOUT_BY_COUNTRY[country]
+  const available = payoutOptionsFor(country)
   const [provider, setProvider] = useState<PayoutProvider>('flutterwave_momo')
   const effective = available.includes(provider) ? provider : available[0]
 
@@ -162,7 +165,7 @@ function AddSellerForm({ onClose }: { onClose: () => void }) {
   const create = useMoneyAction(() => {
     if (!effective) {
       throw new Error(
-        `No payout rail is configured for ${COUNTRY_LABEL[country]} — a seller there cannot be paid yet.`,
+        `PayHold cannot send money to ${countryName(country)} yet — a seller there cannot be paid.`,
       )
     }
     return api.createSeller({
@@ -203,10 +206,14 @@ function AddSellerForm({ onClose }: { onClose: () => void }) {
                 setPayoutCurrency(defaultCurrencyFor(next))
               }}
             >
-              {(Object.keys(PAYOUT_BY_COUNTRY) as Country[]).map((c) => (
-                <option key={c} value={c}>
-                  {COUNTRY_FLAG[c]}  {COUNTRY_LABEL[c]}
-                </option>
+              {countriesByRegion().map((group) => (
+                <optgroup key={group.region} label={group.region}>
+                  {group.countries.map((info) => (
+                    <option key={info.code} value={info.code}>
+                      {countryFlag(info.code)}  {info.name}
+                    </option>
+                  ))}
+                </optgroup>
               ))}
             </Select>
           </Field>
