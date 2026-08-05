@@ -14,6 +14,7 @@ import type {
   Dispute,
   LedgerEntry,
   Payout,
+  ProviderAccount,
   ReconciliationAlert,
   Seller,
   Tenant,
@@ -24,7 +25,8 @@ import type {
 // 2: countries widened to all of Africa + US, payment_method simplified to
 //    card/mobile_money/bank_transfer, deals gained payment_network.
 // 3: deals split settlement from presentment currency for cross-border pricing.
-export const SCHEMA_VERSION = 3
+// 4: tenants gained connected provider accounts (bring-your-own-keys).
+export const SCHEMA_VERSION = 4
 const STORAGE_KEY = 'payhold.mock.v1'
 
 export interface MockDb {
@@ -41,6 +43,12 @@ export interface MockDb {
   payouts: Payout[]
   disputes: Dispute[]
   api_keys: ApiKey[]
+  /**
+   * Connected payment rails, per tenant. Credentials are deliberately absent —
+   * the real backend encrypts them and never returns them, so storing them
+   * here would let a screen depend on something that will never exist.
+   */
+  provider_accounts: (ProviderAccount & { tenant_id: string })[]
   webhook_endpoints: WebhookEndpoint[]
   audit: AuditLogEntry[]
   alerts: ReconciliationAlert[]

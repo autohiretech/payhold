@@ -24,6 +24,7 @@ import type {
   PaymentMethod,
   Payout,
   Provider,
+  ProviderAccount,
   ReconciliationAlert,
   Seller,
   Tenant,
@@ -678,6 +679,14 @@ export function seedDb(): MockDb {
     },
   ]
 
+  /**
+   * No rails connected. A fresh demo runs entirely on the fake provider, which
+   * is exactly what §12 requires — a full lifecycle before any real credentials
+   * exist. Seeding a connected account would hide the one screen a new company
+   * has to visit first.
+   */
+  const provider_accounts: (ProviderAccount & { tenant_id: string })[] = []
+
   const alerts: ReconciliationAlert[] = [
     {
       id: id('rec'),
@@ -703,6 +712,7 @@ export function seedDb(): MockDb {
     payouts,
     disputes,
     api_keys,
+    provider_accounts,
     webhook_endpoints,
     audit,
     alerts,

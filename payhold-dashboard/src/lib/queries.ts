@@ -17,6 +17,8 @@ export const keys = {
   sellers: ['sellers'] as const,
   settings: ['settings'] as const,
   apiKeys: ['api-keys'] as const,
+  railStatus: ['rail-status'] as const,
+  providerRequirements: ['provider-requirements'] as const,
   webhooks: ['webhook-endpoints'] as const,
   audit: (dealId?: string) => ['audit', dealId ?? 'all'] as const,
   tenants: ['admin', 'tenants'] as const,
@@ -46,6 +48,21 @@ export const useDisputes = () =>
 
 export const useSettings = () =>
   useQuery({ queryKey: keys.settings, queryFn: () => api.getSettings() })
+
+/** Which payment rails this company has actually connected. */
+export const useRailStatus = () =>
+  useQuery({ queryKey: keys.railStatus, queryFn: () => api.listRailStatus() })
+
+/**
+ * What each rail needs before it can be connected. Cached indefinitely — this
+ * describes the providers, not the tenant, so it cannot go stale mid-session.
+ */
+export const useProviderRequirements = () =>
+  useQuery({
+    queryKey: keys.providerRequirements,
+    queryFn: () => api.listProviderRequirements(),
+    staleTime: Infinity,
+  })
 
 export const useLedger = (dealId?: string) =>
   useQuery({ queryKey: keys.ledger(dealId), queryFn: () => api.listLedger(dealId) })

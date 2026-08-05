@@ -265,6 +265,47 @@ export interface TenantSettings {
   currencies: Currency[]
 }
 
+/**
+ * A payment provider account a company has connected.
+ *
+ * Bring-your-own-keys: the buyer's money lands in *this company's* Flutterwave
+ * or Stripe balance, not a PayHold-owned one. PayHold orchestrates and never
+ * custodies.
+ *
+ * There is deliberately no `credentials` field, in any shape. Credentials go
+ * to the backend once and are never returned to any caller — so a screen
+ * cannot render them, a query cache cannot hold them, and a bug report
+ * screenshot cannot leak them.
+ */
+export interface ProviderAccount {
+  provider: Provider
+  /** `test` moves no real money. `live` does. */
+  mode: 'test' | 'live'
+  connected_at: Timestamp
+}
+
+/** What a rail needs before it can be connected, and where to find it. */
+export interface ProviderRequirement {
+  provider: Provider
+  /** Credential field names, in the order the form should show them. */
+  fields: string[]
+  /** Plain-language directions to the provider's own dashboard. */
+  where: string
+}
+
+export interface ConnectProviderInput {
+  provider: Provider
+  mode: 'test' | 'live'
+  credentials: Record<string, string>
+}
+
+/** The live status of one rail, as the Rails screen shows it. */
+export interface RailStatus {
+  provider: Provider
+  connected: boolean
+  mode: 'test' | 'live'
+}
+
 export interface ApiKey {
   id: string
   tenant_id: string

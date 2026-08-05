@@ -13,8 +13,9 @@
 
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { api, type Country, type Provider } from '@/api'
+import { api, type Country, type Provider, type RailStatus } from '@/api'
 import { ProviderChip, MethodIcon } from '@/components/rails'
+import { ConnectProvider } from '@/components/ConnectProvider'
 import {
   Badge,
   Card,
@@ -44,29 +45,56 @@ import {
   payoutCapability,
   settlementNote,
 } from '@/lib/rails'
-import { keys, useSellers, useSettings } from '@/lib/queries'
+import {
+  keys,
+  useProviderRequirements,
+  useRailStatus,
+  useSellers,
+  useSettings,
+} from '@/lib/queries'
 
 /**
- * Which providers are actually configured. Hardcoded while the backend does
- * not exist — once it does, this comes from `tenant_provider_accounts` and the
- * demo rail disappears the moment real keys are present.
+ * How a rail's real connection state reads on screen.
+ *
+ * This is derived from `tenant_provider_accounts` via `listRailStatus()`, not
+ * hardcoded: a company that has connected nothing is genuinely running on the
+ * demo rail, and saying otherwise would be a lie about where their money is.
  */
-const PROVIDER_STATE: Record<Provider, StatusMeta> = {
-  flutterwave: {
-    label: 'Sandbox keys',
-    tone: 'pending',
-    hint: 'Test credentials only. No real money moves.',
-  },
-  stripe: {
-    label: 'Not configured',
-    tone: 'neutral',
-    hint: 'Add Stripe keys to activate international card collection.',
-  },
-  fake: {
-    label: 'Active',
-    tone: 'released',
-    hint: 'Demo mode — payments are simulated end to end.',
-  },
+function providerState(status: RailStatus | undefined): StatusMeta {
+  if (!status?.connected) {
+    return {
+      label: 'Not connected',
+      tone: 'neutral',
+      hint: 'Add your own keys to collect real payments on this rail.',
+    }
+  }
+
+  return status.mode === 'live'
+    ? {
+        label: 'Live',
+        tone: 'released',
+        hint: 'Real money moves on this rail.',
+      }
+    : {
+        label: 'Test keys',
+        tone: 'pending',
+        hint: 'Connected in test mode. No real money moves.',
+      }
+}
+
+/** Demo mode is only "active" while no real rail is connected. */
+function demoState(anyConnected: boolean): StatusMeta {
+  return anyConnected
+    ? {
+        label: 'Off',
+        tone: 'neutral',
+        hint: 'A real rail is connected, so demo payments are no longer used.',
+      }
+    : {
+        label: 'Active',
+        tone: 'released',
+        hint: 'Demo mode — payments are simulated end to end, with every guard still applied.',
+      }
 }
 
 export function RailsPage() {
@@ -76,8 +104,12 @@ export function RailsPage() {
   })
   const sellers = useSellers()
   const settings = useSettings()
+  const railStatus = useRailStatus()
+  const requirements = useProviderRequirements()
 
   const providers: Provider[] = ['flutterwave', 'stripe']
+  const statusFor = (p: Provider) => railStatus.data?.find((r) => r.provider === p)
+  const anyConnected = railStatus.data?.some((r) => r.connected && r.provider !== 'fake')
   const currencies = settings.data?.currencies ?? []
   // The first configured currency is the tenant's home currency — everything
   // else is a foreign balance with its own settlement rules.
@@ -99,7 +131,9 @@ export function RailsPage() {
         {providers.map((provider) => {
           const rows =
             railBalances.data?.filter((b) => b.provider === provider) ?? []
-          const state = PROVIDER_STATE[provider]
+          const status = statusFor(provider)
+          const state = providerState(status)
+          const requirement = requirements.data?.find((r) => r.provider === provider)
 
           return (
             <Card key={provider} className="p-6">
@@ -177,10 +211,35 @@ export function RailsPage() {
                   })}
                 </div>
               )}
+
+              {requirement && (
+                <ConnectProvider
+                  provider={provider}
+                  requirement={requirement}
+                  connected={Boolean(status?.connected)}
+                  mode={status?.mode ?? 'test'}
+                />
+              )}
             </Card>
           )
         })}
       </div>
+
+      {/* --- Demo rail ---------------------------------------------------- */}
+      <Card className="mb-6 p-6">
+        <div className="flex flex-wrap items-center gap-2">
+          <h2 className="text-base font-semibold text-fg">
+            {PROVIDER_LABEL.fake}
+          </h2>
+          <Badge meta={demoState(Boolean(anyConnected))} />
+        </div>
+        <p className="mt-1.5 max-w-2xl text-sm leading-relaxed text-fg-muted">
+          {anyConnected
+            ? 'Your real rail handles payments now. Demo payments are no longer used.'
+            : 'Until you connect a provider, deals run end to end on simulated payments — ' +
+              'every confirmation, timer and payout guard still applies. Nothing here moves real money.'}
+        </p>
+      </Card>
 
       <p className="mb-6 text-sm leading-relaxed text-fg-muted">
         These are separate pots. Reconciliation compares each one against that

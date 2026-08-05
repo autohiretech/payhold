@@ -12,6 +12,7 @@
 
 import type { AdminApi, DealListFilter, PayHoldClient, SimulationApi } from '../client'
 import {
+  HOLDING_STATUSES,
   PayHoldError,
   type ApiKey,
   type AuditLogEntry,
@@ -25,9 +26,14 @@ import {
   type Deal,
   type Dispute,
   type LedgerEntry,
+  type ConnectProviderInput,
   type PaymentMethod,
   type Payout,
   type PayoutProvider,
+  type Provider,
+  type ProviderAccount,
+  type ProviderRequirement,
+  type RailStatus,
   type RailBalance,
   type ReconciliationAlert,
   type Seller,
@@ -76,6 +82,28 @@ import {
 
 /** Network feel, so loading and error states get exercised in development. */
 const LATENCY_MS = 180
+
+/**
+ * What each rail needs before it can be connected.
+ *
+ * Mirrors `REQUIRED_FIELDS` in the backend's `provider-accounts` function. The
+ * field names are the contract — a rename on either side breaks connecting,
+ * loudly, at the point of connection rather than at the first charge.
+ */
+const PROVIDER_REQUIREMENTS: ProviderRequirement[] = [
+  {
+    provider: 'flutterwave',
+    fields: ['secret_key', 'public_key', 'encryption_key', 'webhook_hash'],
+    where:
+      'Flutterwave dashboard → Settings → API Keys (webhook_hash is the secret hash on Settings → Webhooks)',
+  },
+  {
+    provider: 'stripe',
+    fields: ['secret_key', 'webhook_secret'],
+    where:
+      'Stripe dashboard → Developers → API keys, and Developers → Webhooks for the signing secret',
+  },
+]
 
 function delay<T>(value: T): Promise<T> {
   return new Promise((resolve) => setTimeout(() => resolve(value), LATENCY_MS))
@@ -404,6 +432,144 @@ export class MockClient implements PayHoldClient {
       return clone(cfg)
     })
     return delay(updated)
+  }
+
+  // -- Payment provider accounts -------------------------------------------
+
+  async listRailStatus(): Promise<RailStatus[]> {
+    const db = getDb()
+    const accounts = db.provider_accounts.filter(
+      (a) => a.tenant_id === db.current_tenant_id,
+    )
+
+    const rails: RailStatus[] = (['flutterwave', 'stripe'] as Provider[]).map((p) => {
+      const account = accounts.find((a) => a.provider === p)
+      return {
+        provider: p,
+        connected: Boolean(account),
+        mode: account?.mode ?? 'test',
+      }
+    })
+
+    // Demo mode is "active" precisely when no real rail is connected. It
+    // disappears the moment real keys arrive, rather than lingering as a
+    // second way money might be moving.
+    rails.push({
+      provider: 'fake',
+      connected: accounts.length === 0,
+      mode: 'test',
+    })
+
+    return delay(rails.sort((a, b) => a.provider.localeCompare(b.provider)))
+  }
+
+  async listProviderAccounts(): Promise<ProviderAccount[]> {
+    const db = getDb()
+    // `credentials` is not stored on the mock either. Keeping the mock honest
+    // about that means no screen can accidentally come to depend on reading
+    // them back, which the real backend will never allow.
+    const accounts = db.provider_accounts
+      .filter((a) => a.tenant_id === db.current_tenant_id)
+      .map(({ provider, mode, connected_at }) => ({ provider, mode, connected_at }))
+    return delay(clone(accounts))
+  }
+
+  async listProviderRequirements(): Promise<ProviderRequirement[]> {
+    return delay(clone(PROVIDER_REQUIREMENTS))
+  }
+
+  async connectProvider(input: ConnectProviderInput): Promise<ProviderAccount> {
+    const spec = PROVIDER_REQUIREMENTS.find((r) => r.provider === input.provider)
+    if (!spec) {
+      throw new PayHoldError(
+        'policy_violation',
+        `${input.provider} cannot be connected`,
+      )
+    }
+
+    const missing = spec.fields.filter((f) => !input.credentials[f]?.trim())
+    if (missing.length > 0) {
+      throw new PayHoldError(
+        'policy_violation',
+        `Missing ${missing.join(', ')}. Find them at ${spec.where}.`,
+      )
+    }
+
+    // The same test/live guard the backend applies. A live secret key
+    // connected as "test" would move real money during a sandbox walkthrough,
+    // so the mock refuses it too — otherwise the dashboard would look like it
+    // accepted something the real API rejects.
+    if (input.provider === 'flutterwave') {
+      const isTestKey = (input.credentials.secret_key ?? '').includes('_TEST-')
+      if (isTestKey !== (input.mode === 'test')) {
+        throw new PayHoldError(
+          'policy_violation',
+          isTestKey
+            ? 'That is a test secret key, but you selected live mode.'
+            : 'That is a live secret key, but you selected test mode. Live keys move real money.',
+        )
+      }
+    }
+
+    const account = mutate((db) => {
+      const existing = db.provider_accounts.find(
+        (a) => a.tenant_id === db.current_tenant_id && a.provider === input.provider,
+      )
+      const connected_at = nowIso()
+
+      if (existing) {
+        existing.mode = input.mode
+        existing.connected_at = connected_at
+      } else {
+        db.provider_accounts.push({
+          tenant_id: db.current_tenant_id,
+          provider: input.provider,
+          mode: input.mode,
+          connected_at,
+        })
+      }
+
+      // Audited without the credentials — only that a connection happened.
+      audit(db, db.current_tenant_id, null, 'dashboard', 'provider.connected', {
+        provider: input.provider,
+        mode: input.mode,
+      })
+
+      return { provider: input.provider, mode: input.mode, connected_at }
+    })
+
+    return delay(account)
+  }
+
+  async disconnectProvider(provider: Provider): Promise<void> {
+    mutate((db) => {
+      // Money in flight on this rail would be unreachable without its
+      // credentials: no payout could be sent, no refund issued.
+      const holding = db.deals.filter(
+        (d) =>
+          d.tenant_id === db.current_tenant_id &&
+          d.provider === provider &&
+          (HOLDING_STATUSES.includes(d.status) || d.status === 'released'),
+      ).length
+
+      if (holding > 0) {
+        throw new PayHoldError(
+          'policy_violation',
+          `${holding} deal${holding === 1 ? ' still holds' : 's still hold'} money on ` +
+            `${provider}. Settle or refund ${holding === 1 ? 'it' : 'them'} before disconnecting.`,
+        )
+      }
+
+      db.provider_accounts = db.provider_accounts.filter(
+        (a) => !(a.tenant_id === db.current_tenant_id && a.provider === provider),
+      )
+
+      audit(db, db.current_tenant_id, null, 'dashboard', 'provider.disconnected', {
+        provider,
+      })
+    })
+
+    return delay(undefined)
   }
 
   async listApiKeys(): Promise<ApiKey[]> {

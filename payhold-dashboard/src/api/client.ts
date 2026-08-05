@@ -18,6 +18,7 @@ import type {
   AuditLogEntry,
   Balance,
   ConfirmSide,
+  ConnectProviderInput,
   CreateDealInput,
   CreateDealResult,
   CreateSellerInput,
@@ -27,7 +28,11 @@ import type {
   LedgerEntry,
   Payout,
   PaymentMethod,
+  Provider,
+  ProviderAccount,
+  ProviderRequirement,
   RailBalance,
+  RailStatus,
   ReconciliationAlert,
   Seller,
   Tenant,
@@ -76,6 +81,20 @@ export interface PayHoldClient {
     resolution: 'release' | 'refund',
     note: string,
   ): Promise<Dispute>
+
+  // -- Payment provider accounts (bring-your-own-keys) ----------------------
+  /** Which rails this company has connected, and which are still demo. */
+  listRailStatus(): Promise<RailStatus[]>
+  listProviderAccounts(): Promise<ProviderAccount[]>
+  /** What each rail needs before it can be connected. */
+  listProviderRequirements(): Promise<ProviderRequirement[]>
+  /**
+   * Store a company's provider credentials. They are validated against the
+   * provider before being accepted, and never readable afterwards.
+   */
+  connectProvider(input: ConnectProviderInput): Promise<ProviderAccount>
+  /** Blocked while deals still hold money on that rail. */
+  disconnectProvider(provider: Provider): Promise<void>
 
   // -- Settings and access -------------------------------------------------
   getSettings(): Promise<TenantSettings>
