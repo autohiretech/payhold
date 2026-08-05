@@ -1,0 +1,23 @@
+node_modules
+
+# Secrets — provider credentials and service-role keys never enter git
+.env
+.env.*
+!.env.example
+
+# Supabase CLI local state
+.branches
+.temp
+supabase/.branches
+supabase/.temp
+
+# Logs
+logs
+*.log
+npm-debug.log*
+
+# Editor / OS
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
