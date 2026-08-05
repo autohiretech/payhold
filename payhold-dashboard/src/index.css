@@ -1,0 +1,108 @@
+@import 'tailwindcss';
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* Semantic tokens — one place to retune the whole product's look.
+   Screens use these, never raw palette colors. */
+@theme inline {
+  --color-canvas: var(--canvas);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
+
+  --color-fg: var(--fg);
+  --color-fg-muted: var(--fg-muted);
+  --color-fg-subtle: var(--fg-subtle);
+
+  --color-brand: var(--brand);
+  --color-brand-fg: var(--brand-fg);
+  --color-brand-soft: var(--brand-soft);
+
+  /* Deal-status accents, named for states not colors, so the state
+     machine and the UI can't drift apart. */
+  --color-held: var(--held);
+  --color-held-soft: var(--held-soft);
+  --color-confirmed: var(--confirmed);
+  --color-confirmed-soft: var(--confirmed-soft);
+  --color-released: var(--released);
+  --color-released-soft: var(--released-soft);
+  --color-pending: var(--pending);
+  --color-pending-soft: var(--pending-soft);
+  --color-danger: var(--danger);
+  --color-danger-soft: var(--danger-soft);
+
+  --font-sans:
+    ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --font-mono: ui-monospace, 'SFMono-Regular', 'JetBrains Mono', monospace;
+}
+
+:root {
+  --canvas: oklch(0.985 0.003 250);
+  --surface: oklch(1 0 0);
+  --surface-2: oklch(0.968 0.004 250);
+  --line: oklch(0.918 0.006 250);
+  --line-strong: oklch(0.86 0.008 250);
+
+  --fg: oklch(0.23 0.017 255);
+  --fg-muted: oklch(0.5 0.014 255);
+  --fg-subtle: oklch(0.63 0.012 255);
+
+  --brand: oklch(0.52 0.13 195);
+  --brand-fg: oklch(0.99 0 0);
+  --brand-soft: oklch(0.95 0.03 195);
+
+  --held: oklch(0.52 0.15 258);
+  --held-soft: oklch(0.95 0.03 258);
+  --confirmed: oklch(0.55 0.11 195);
+  --confirmed-soft: oklch(0.95 0.03 195);
+  --released: oklch(0.55 0.14 155);
+  --released-soft: oklch(0.95 0.04 155);
+  --pending: oklch(0.62 0.13 75);
+  --pending-soft: oklch(0.95 0.05 85);
+  --danger: oklch(0.55 0.19 25);
+  --danger-soft: oklch(0.95 0.03 25);
+}
+
+.dark {
+  --canvas: oklch(0.19 0.012 255);
+  --surface: oklch(0.235 0.014 255);
+  --surface-2: oklch(0.275 0.015 255);
+  --line: oklch(0.32 0.014 255);
+  --line-strong: oklch(0.4 0.016 255);
+
+  --fg: oklch(0.95 0.006 255);
+  --fg-muted: oklch(0.72 0.012 255);
+  --fg-subtle: oklch(0.58 0.012 255);
+
+  --brand: oklch(0.72 0.12 195);
+  --brand-fg: oklch(0.17 0.02 220);
+  --brand-soft: oklch(0.32 0.05 195);
+
+  --held: oklch(0.72 0.12 258);
+  --held-soft: oklch(0.31 0.06 258);
+  --confirmed: oklch(0.74 0.1 195);
+  --confirmed-soft: oklch(0.31 0.05 195);
+  --released: oklch(0.75 0.13 155);
+  --released-soft: oklch(0.31 0.06 155);
+  --pending: oklch(0.78 0.12 80);
+  --pending-soft: oklch(0.33 0.06 75);
+  --danger: oklch(0.7 0.16 25);
+  --danger-soft: oklch(0.33 0.08 25);
+}
+
+html {
+  color-scheme: light;
+}
+html.dark {
+  color-scheme: dark;
+}
+
+body {
+  @apply bg-canvas text-fg font-sans antialiased;
+}
+
+/* Money figures must never jitter as they update. */
+.tabular {
+  font-variant-numeric: tabular-nums;
+}
