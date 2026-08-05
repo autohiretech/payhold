@@ -14,7 +14,17 @@ import {
 import { formatMoney, formatPercent } from '@/lib/format'
 import { useMoneyAction, useSettings } from '@/lib/queries'
 
-const ALL_CURRENCIES: Currency[] = ['RWF', 'USD', 'EUR', 'KES', 'UGX']
+// Ordered to match the markets in lib/rails.ts, local currencies first.
+const ALL_CURRENCIES: Currency[] = [
+  'RWF',
+  'KES',
+  'UGX',
+  'TZS',
+  'GHS',
+  'NGN',
+  'USD',
+  'EUR',
+]
 
 export function SettingsPage() {
   const settings = useSettings()

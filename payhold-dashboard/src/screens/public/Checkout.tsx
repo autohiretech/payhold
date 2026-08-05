@@ -10,21 +10,30 @@
 import { useState } from 'react'
 import { useParams } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
-import { api, isSimulated, type PaymentMethod } from '@/api'
-import { Button, Card, Dot, Skeleton, cx } from '@/components/ui'
+import { api, isSimulated, type Country, type PaymentMethod } from '@/api'
+import { Button, Card, Dot, Select, Skeleton, cx } from '@/components/ui'
 import { MethodIcon, ProviderChip } from '@/components/rails'
 import { formatDate, formatMoney } from '@/lib/format'
 import {
+  COUNTRY_FLAG,
   COUNTRY_LABEL,
+  MARKETS,
   METHOD_BLURB,
   METHOD_LABEL,
+  SCHEME_LABEL,
   collectionRails,
+  marketSummary,
 } from '@/lib/rails'
 import { useMoneyAction } from '@/lib/queries'
 
 export function CheckoutPage() {
   const { id = '' } = useParams()
   const deal = useQuery({ queryKey: ['public-deal', id], queryFn: () => api.getDeal(id) })
+
+  // Country first, method second. The seller sets a default when creating the
+  // deal, but the buyer may well be somewhere else — a Kenyan paying for a
+  // Rwandan car needs M-Pesa, not MTN.
+  const [country, setCountry] = useState<Country | null>(null)
   const [method, setMethod] = useState<PaymentMethod | null>(null)
 
   const pay = useMoneyAction(async () => {
@@ -57,7 +66,9 @@ export function CheckoutPage() {
 
   const d = deal.data
   const total = d.amount + (d.deposit_amount ?? 0)
-  const rails = collectionRails(d.buyer_country, d.currency)
+  const payingFrom = country ?? d.buyer_country
+  const rails = collectionRails(payingFrom, d.currency)
+  const market = marketSummary(payingFrom)
 
   if (d.status !== 'created') {
     return (
@@ -115,16 +126,47 @@ export function CheckoutPage() {
           </div>
         </dl>
 
+        {/* Country first — it decides the rail, and therefore the methods. */}
+        <div className="border-t border-line px-6 py-5">
+          <label className="block">
+            <span className="text-sm font-semibold text-fg">
+              Where are you paying from?
+            </span>
+            <Select
+              className="mt-2"
+              value={payingFrom}
+              onChange={(e) => {
+                setCountry(e.target.value as Country)
+                // The old choice may not exist in the new market.
+                setMethod(null)
+              }}
+            >
+              {MARKETS.map((m) => (
+                <option key={m.country} value={m.country}>
+                  {COUNTRY_FLAG[m.country]}  {COUNTRY_LABEL[m.country]}
+                </option>
+              ))}
+            </Select>
+          </label>
+        </div>
+
         {/* Method choice. Only rails that can actually take this currency from
             this market are offered — an option the buyer cannot complete is
             worse than no option. */}
         <div className="border-t border-line px-6 py-5">
-          <p className="text-sm font-semibold text-fg">How would you like to pay?</p>
+          <div className="flex flex-wrap items-baseline justify-between gap-2">
+            <p className="text-sm font-semibold text-fg">How would you like to pay?</p>
+            {market.schemes.length > 0 && (
+              <p className="text-xs text-fg-muted">
+                {market.schemes.map((s) => SCHEME_LABEL[s]).join(', ')} accepted
+              </p>
+            )}
+          </div>
 
           {rails.length === 0 ? (
-            <p className="mt-3 text-sm text-danger">
-              We cannot accept {d.currency} payments from {COUNTRY_LABEL[d.buyer_country]}{' '}
-              yet. Contact the seller for another way to pay.
+            <p className="mt-3 rounded-xl bg-danger-soft px-4 py-3 text-sm leading-relaxed text-danger">
+              We cannot accept {d.currency} from {COUNTRY_LABEL[payingFrom]} yet.
+              Pick another country, or ask the seller for a different way to pay.
             </p>
           ) : (
             <div className="mt-3 space-y-2">

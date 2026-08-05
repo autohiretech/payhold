@@ -11,6 +11,7 @@
  * Flutterwave regardless of how the money came in.
  */
 
+import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { api, type Country, type Provider } from '@/api'
 import { ProviderChip, MethodIcon } from '@/components/rails'
@@ -28,11 +29,15 @@ import {
 } from '@/components/ui'
 import { formatMoney, type StatusMeta } from '@/lib/format'
 import {
+  COUNTRY_FLAG,
   COUNTRY_LABEL,
+  MARKETS,
   METHOD_LABEL,
   PROVIDER_BLURB,
   PROVIDER_LABEL,
   RAILS,
+  SCHEME_LABEL,
+  marketSummary,
   payoutCapability,
   settlementNote,
 } from '@/lib/rails'
@@ -181,11 +186,14 @@ export function RailsPage() {
         nothing about Stripe, and vice versa.
       </p>
 
+      {/* --- Country-first explorer --------------------------------------- */}
+      <MarketExplorer />
+
       {/* --- Collection coverage ----------------------------------------- */}
       <Card className="mb-6">
         <CardHeader
-          title="What buyers can pay with"
-          subtitle="Only methods enabled for a currency you accept are offered at checkout."
+          title="Full coverage table"
+          subtitle="Every configured rail, filtered to the currencies you accept."
         />
         {!currencies.length ? (
           <EmptyState title="No currencies enabled" body="Enable one in Settings." />
@@ -301,6 +309,150 @@ export function RailsPage() {
         </Table>
       </Card>
     </>
+  )
+}
+
+/**
+ * Pick a country, see exactly what a buyer there gets. This is the view people
+ * actually reach for — "if someone chooses Rwanda, what happens?" — so it
+ * leads with the answer rather than making you read a table.
+ */
+function MarketExplorer() {
+  const [country, setCountry] = useState<Country>('RW')
+  const market = marketSummary(country)
+
+  return (
+    <Card className="mb-6">
+      <CardHeader
+        title="What happens in each market"
+        subtitle="Pick a country to see the rail, the currencies, and every method a buyer there can use."
+      />
+
+      <div className="border-b border-line px-6 py-4">
+        <div className="flex flex-wrap gap-2">
+          {MARKETS.map((m) => (
+            <button
+              key={m.country}
+              onClick={() => setCountry(m.country)}
+              className={cx(
+                'rounded-full px-3.5 py-1.5 text-sm font-semibold transition',
+                m.country === country
+                  ? 'bg-brand text-brand-fg shadow-[var(--shadow-card)]'
+                  : 'bg-surface text-fg-muted ring-1 ring-line ring-inset hover:bg-surface-2 hover:text-fg',
+              )}
+            >
+              <span className="mr-1.5">{COUNTRY_FLAG[m.country]}</span>
+              {COUNTRY_LABEL[m.country]}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {market.provider === null ? (
+        <div className="px-6 py-6">
+          <p className="rounded-xl bg-danger-soft px-4 py-3 text-sm leading-relaxed text-danger">
+            <strong className="font-semibold">
+              No local rail for {COUNTRY_LABEL[market.country]}.
+            </strong>{' '}
+            A buyer there can still pay by international card in{' '}
+            {market.currencies.join(' or ')}, but there is no local wallet or
+            bank rail, and no way to pay a seller based there.
+          </p>
+        </div>
+      ) : (
+        <div className="grid gap-6 px-6 py-6 md:grid-cols-2">
+          <div>
+            <p className="text-xs font-semibold tracking-[0.06em] text-fg-muted uppercase">
+              Collected by
+            </p>
+            <div className="mt-2">
+              <ProviderChip provider={market.provider} />
+            </div>
+
+            <p className="mt-5 text-xs font-semibold tracking-[0.06em] text-fg-muted uppercase">
+              Buyers pay in
+            </p>
+            <p className="mt-2 text-sm text-fg">
+              <span className="font-semibold">{market.currency}</span>
+              {market.currencies.length > 1 && (
+                <span className="text-fg-muted">
+                  {' '}
+                  · also {market.currencies.filter((c) => c !== market.currency).join(', ')}
+                </span>
+              )}
+            </p>
+
+            <p className="mt-5 text-xs font-semibold tracking-[0.06em] text-fg-muted uppercase">
+              Cards accepted
+            </p>
+            <p className="mt-2 text-sm text-fg">
+              {market.schemes.length
+                ? market.schemes.map((s) => SCHEME_LABEL[s]).join(', ')
+                : 'No card rail in this market'}
+            </p>
+
+            <p className="mt-5 text-xs font-semibold tracking-[0.06em] text-fg-muted uppercase">
+              Sellers paid via
+            </p>
+            <div className="mt-2">
+              {market.payout.provider ? (
+                <ProviderChip provider={market.payout.provider} />
+              ) : (
+                <span className="text-sm font-semibold text-danger">
+                  Cannot pay sellers here
+                </span>
+              )}
+            </div>
+            <p className="mt-2 text-sm leading-relaxed text-fg-muted">
+              {market.payout.reason}
+            </p>
+          </div>
+
+          <div>
+            <p className="text-xs font-semibold tracking-[0.06em] text-fg-muted uppercase">
+              Local methods
+            </p>
+            {market.localMethods.length === 0 ? (
+              <p className="mt-2 text-sm text-fg-muted">
+                None — cards only in this market.
+              </p>
+            ) : (
+              <ul className="mt-2 space-y-2">
+                {market.localMethods.map((rail) => (
+                  <li
+                    key={rail.method}
+                    className="flex items-center justify-between gap-3 rounded-xl bg-surface-2 px-3.5 py-2.5"
+                  >
+                    <span className="flex items-center gap-2.5 text-sm font-medium text-fg">
+                      <span className="text-fg-muted">
+                        <MethodIcon method={rail.method} />
+                      </span>
+                      {METHOD_LABEL[rail.method]}
+                    </span>
+                    <span className="text-xs font-semibold text-fg-muted">
+                      {rail.payout ? 'in + out' : 'in only'}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            )}
+
+            {market.notes.length > 0 && (
+              <ul className="mt-4 space-y-2">
+                {market.notes.map((note) => (
+                  <li
+                    key={note}
+                    className="rounded-xl bg-pending-soft px-3.5 py-2.5 text-xs leading-relaxed text-pending"
+                  >
+                    {note}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        </div>
+      )}
+    </Card>
   )
 }
 

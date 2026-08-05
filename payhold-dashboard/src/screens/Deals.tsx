@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { DEAL_STATUSES, type Country, type Currency, type DealStatus } from '@/api'
 import {
@@ -20,7 +20,14 @@ import {
 } from '@/components/ui'
 import { MethodChip, ProviderChip } from '@/components/rails'
 import { DEAL_STATUS_META, formatMoney, formatRelative } from '@/lib/format'
-import { COUNTRY_LABEL, collectionRails } from '@/lib/rails'
+import {
+  COUNTRY_FLAG,
+  COUNTRY_LABEL,
+  MARKETS,
+  SCHEME_LABEL,
+  collectionRails,
+  marketSummary,
+} from '@/lib/rails'
 import { simNow, useDeals, useMoneyAction, useSellers, useSettings } from '@/lib/queries'
 import { api } from '@/api'
 
@@ -185,9 +192,26 @@ function CreateDealForm({ onClose }: { onClose: () => void }) {
   const [deposit, setDeposit] = useState('')
   const [link, setLink] = useState<string | null>(null)
 
-  // What the buyer will actually be offered at checkout, shown here so a deal
-  // is never created into a market we cannot collect from.
+  // Country first: it decides which currencies are payable, which in turn
+  // decides the methods. Shown here so a deal is never created into a market
+  // we cannot collect from.
+  const market = marketSummary(country)
+  const enabledForMarket = (settings.data?.currencies ?? []).filter((c) =>
+    market.currencies.includes(c),
+  )
   const rails = collectionRails(country, currency)
+
+  // Keep the currency valid when the market changes — an RWF deal makes no
+  // sense once you switch the buyer to Kenya.
+  useEffect(() => {
+    if (enabledForMarket.length && !enabledForMarket.includes(currency)) {
+      setCurrency(
+        enabledForMarket.includes(market.currency)
+          ? market.currency
+          : enabledForMarket[0]!,
+      )
+    }
+  }, [country, enabledForMarket, currency, market.currency])
 
   const create = useMoneyAction(() =>
     api.createDeal({
@@ -301,12 +325,21 @@ function CreateDealForm({ onClose }: { onClose: () => void }) {
             />
           </Field>
 
-          <Field label="Currency">
+          <Field
+            label="Currency"
+            hint={
+              enabledForMarket.length === 0
+                ? 'None of your enabled currencies work in this market.'
+                : undefined
+            }
+          >
             <Select
               value={currency}
               onChange={(e) => setCurrency(e.target.value as Currency)}
             >
-              {settings.data?.currencies.map((c) => (
+              {/* Only currencies this tenant accepts AND this market can pay
+                  in — the intersection, not either list on its own. */}
+              {enabledForMarket.map((c) => (
                 <option key={c} value={c}>
                   {c}
                 </option>
@@ -335,9 +368,9 @@ function CreateDealForm({ onClose }: { onClose: () => void }) {
               value={country}
               onChange={(e) => setCountry(e.target.value as Country)}
             >
-              {(['RW', 'KE', 'UG', 'INTL'] as Country[]).map((c) => (
-                <option key={c} value={c}>
-                  {COUNTRY_LABEL[c]}
+              {MARKETS.map((m) => (
+                <option key={m.country} value={m.country}>
+                  {COUNTRY_FLAG[m.country]}  {COUNTRY_LABEL[m.country]}
                 </option>
               ))}
             </Select>
@@ -353,17 +386,24 @@ function CreateDealForm({ onClose }: { onClose: () => void }) {
                 {COUNTRY_LABEL[country]}.
               </p>
             ) : (
-              <ul className="mt-2 space-y-1.5">
-                {rails.map((rail) => (
-                  <li
-                    key={`${rail.method}-${rail.provider}`}
-                    className="flex items-center justify-between gap-2 text-sm"
-                  >
-                    <MethodChip method={rail.method} />
-                    <ProviderChip provider={rail.provider} />
-                  </li>
-                ))}
-              </ul>
+              <>
+                <ul className="mt-2 space-y-1.5">
+                  {rails.map((rail) => (
+                    <li
+                      key={`${rail.method}-${rail.provider}`}
+                      className="flex items-center justify-between gap-2 text-sm"
+                    >
+                      <MethodChip method={rail.method} />
+                      <ProviderChip provider={rail.provider} />
+                    </li>
+                  ))}
+                </ul>
+                {market.schemes.length > 0 && (
+                  <p className="mt-2 text-xs text-fg-muted">
+                    Cards: {market.schemes.map((s) => SCHEME_LABEL[s]).join(', ')}
+                  </p>
+                )}
+              </>
             )}
           </div>
         </div>

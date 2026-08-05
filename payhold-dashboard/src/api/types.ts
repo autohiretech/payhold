@@ -16,7 +16,15 @@
 /** Integer minor units. 1000 = 10.00 USD. */
 export type Money = number
 
-export type Currency = 'RWF' | 'USD' | 'EUR' | 'KES' | 'UGX'
+export type Currency =
+  | 'RWF'
+  | 'KES'
+  | 'UGX'
+  | 'TZS'
+  | 'GHS'
+  | 'NGN'
+  | 'USD'
+  | 'EUR'
 
 /** ISO-8601 timestamp. */
 export type Timestamp = string
@@ -36,7 +44,7 @@ export type PaymentMethod =
  * to a different provider — or is unavailable — depending on the market.
  * `INTL` covers everywhere PayHold does not have a local rail.
  */
-export type Country = 'RW' | 'KE' | 'UG' | 'TZ' | 'GH' | 'NG' | 'INTL'
+export type Country = 'RW' | 'KE' | 'UG' | 'TZ' | 'GH' | 'NG' | 'ZA' | 'INTL'
 
 // ---------------------------------------------------------------------------
 // Deal state machine

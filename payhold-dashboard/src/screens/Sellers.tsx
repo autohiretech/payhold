@@ -28,7 +28,11 @@ const PAYOUT_LABEL: Record<PayoutProvider, string> = {
   stripe_connect: 'Stripe Connect',
 }
 
-/** Which payout methods make sense in each market. */
+/**
+ * Which payout methods make sense in each market. A market with an empty list
+ * has no way to receive money yet — the form says so rather than offering a
+ * destination that would never pay.
+ */
 const PAYOUT_BY_COUNTRY: Record<Country, PayoutProvider[]> = {
   RW: ['flutterwave_momo', 'flutterwave_bank'],
   KE: ['flutterwave_mpesa', 'flutterwave_bank'],
@@ -36,6 +40,7 @@ const PAYOUT_BY_COUNTRY: Record<Country, PayoutProvider[]> = {
   TZ: ['flutterwave_mpesa', 'flutterwave_bank'],
   GH: ['flutterwave_momo', 'flutterwave_bank'],
   NG: ['flutterwave_bank'],
+  ZA: [],
   INTL: ['stripe_connect'],
 }
 
@@ -130,13 +135,18 @@ function AddSellerForm({ onClose }: { onClose: () => void }) {
   // the method list rather than sitting beside it.
   const available = PAYOUT_BY_COUNTRY[country]
   const [provider, setProvider] = useState<PayoutProvider>('flutterwave_momo')
-  const effective = available.includes(provider) ? provider : available[0]!
+  const effective = available.includes(provider) ? provider : available[0]
 
   const capability = payoutCapability(country)
 
-  const create = useMoneyAction(() =>
-    api.createSeller({ name, country, payout_provider: effective, destination }),
-  )
+  const create = useMoneyAction(() => {
+    if (!effective) {
+      throw new Error(
+        `No payout rail is configured for ${COUNTRY_LABEL[country]} — a seller there cannot be paid yet.`,
+      )
+    }
+    return api.createSeller({ name, country, payout_provider: effective, destination })
+  })
 
   return (
     <Card className="mb-5 p-6">
@@ -173,14 +183,19 @@ function AddSellerForm({ onClose }: { onClose: () => void }) {
 
           <Field label="Payout method">
             <Select
-              value={effective}
+              value={effective ?? ''}
+              disabled={available.length === 0}
               onChange={(e) => setProvider(e.target.value as PayoutProvider)}
             >
-              {available.map((p) => (
-                <option key={p} value={p}>
-                  {PAYOUT_LABEL[p]}
-                </option>
-              ))}
+              {available.length === 0 ? (
+                <option value="">No rail available</option>
+              ) : (
+                available.map((p) => (
+                  <option key={p} value={p}>
+                    {PAYOUT_LABEL[p]}
+                  </option>
+                ))
+              )}
             </Select>
           </Field>
 
@@ -200,7 +215,11 @@ function AddSellerForm({ onClose }: { onClose: () => void }) {
         {create.isError && <ErrorNote message={create.error.message} />}
 
         <div className="flex gap-2">
-          <Button type="submit" variant="primary" disabled={create.isPending}>
+          <Button
+            type="submit"
+            variant="primary"
+            disabled={create.isPending || available.length === 0}
+          >
             {create.isPending ? 'Registering…' : 'Register seller'}
           </Button>
           <Button type="button" variant="ghost" onClick={onClose}>
