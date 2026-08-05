@@ -54,7 +54,7 @@ export function ApiKeysPage() {
       <Card className="mb-5">
         <CardHeader title="Keys" />
         {apiKeys.isPending ? (
-          <div className="space-y-2 p-5">
+          <div className="space-y-2 p-6">
             {[0, 1].map((i) => (
               <Skeleton key={i} className="h-9" />
             ))}
@@ -106,7 +106,7 @@ export function ApiKeysPage() {
           </Table>
         )}
 
-        <div className="border-t border-line px-5 py-4">
+        <div className="border-t border-line px-6 py-5">
           <form
             className="flex flex-wrap items-end gap-3"
             onSubmit={async (e) => {
@@ -153,7 +153,7 @@ export function ApiKeysPage() {
           subtitle="Where we notify you on every status change. Each delivery is HMAC-signed."
         />
         {endpoints.isPending ? (
-          <div className="p-5">
+          <div className="p-6">
             <Skeleton className="h-9" />
           </div>
         ) : !endpoints.data?.length ? (
@@ -188,7 +188,7 @@ export function ApiKeysPage() {
           </Table>
         )}
 
-        <div className="border-t border-line px-5 py-4">
+        <div className="border-t border-line px-6 py-5">
           <form
             className="flex flex-wrap items-end gap-3"
             onSubmit={async (e) => {
@@ -233,7 +233,7 @@ function RevealBox({
   const [copied, setCopied] = useState(false)
 
   return (
-    <Card className="mb-5 border-brand/30 bg-brand-soft p-5">
+    <Card className="mb-5 border-brand/30 bg-brand-soft p-6">
       <h2 className="text-sm font-semibold text-fg">{title}</h2>
       <p className="mt-1 text-sm text-fg-muted">{body}</p>
       <div className="mt-3 overflow-x-auto rounded-lg bg-surface px-3 py-2">

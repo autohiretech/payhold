@@ -47,7 +47,7 @@ export function AuditPage() {
       <Card>
         <CardHeader title={`${entries.length} entries`} />
         {audit.isPending ? (
-          <div className="space-y-2 p-5">
+          <div className="space-y-2 p-6">
             {[0, 1, 2, 3, 4].map((i) => (
               <Skeleton key={i} className="h-8" />
             ))}

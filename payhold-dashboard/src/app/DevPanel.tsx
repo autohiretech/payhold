@@ -169,8 +169,10 @@ export function DevPanel() {
       <button
         onClick={() => setOpen((v) => !v)}
         className={cx(
-          'rounded-full px-4 py-2 text-xs font-semibold shadow-lg transition',
-          open ? 'bg-fg text-canvas' : 'bg-brand text-brand-fg',
+          'rounded-full px-4 py-2.5 text-xs font-semibold shadow-[var(--shadow-pop)] transition',
+          open
+            ? 'bg-surface text-fg ring-1 ring-line-strong ring-inset hover:bg-surface-2'
+            : 'bg-brand text-brand-fg hover:bg-brand-deep',
         )}
       >
         {open ? 'Close' : 'Simulate'}

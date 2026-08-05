@@ -60,7 +60,7 @@ export function AdminPage() {
           subtitle="The cron job compares each account's ledger to the provider's real balance. Any drift freezes payouts."
         />
         {alerts.isPending ? (
-          <div className="p-5">
+          <div className="p-6">
             <Skeleton className="h-9" />
           </div>
         ) : !openAlerts.length ? (
@@ -109,7 +109,7 @@ export function AdminPage() {
       <Card>
         <CardHeader title="Accounts" subtitle="Every tenant on the platform." />
         {tenants.isPending ? (
-          <div className="space-y-2 p-5">
+          <div className="space-y-2 p-6">
             {[0, 1].map((i) => (
               <Skeleton key={i} className="h-9" />
             ))}

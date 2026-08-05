@@ -150,10 +150,10 @@ export const PAYOUT_STATUS_META: Record<PayoutStatus, StatusMeta> = {
 }
 
 export const TONE_CLASS: Record<Tone, string> = {
-  neutral: 'bg-surface-2 text-fg-muted ring-line',
-  held: 'bg-held-soft text-held ring-held/25',
-  confirmed: 'bg-confirmed-soft text-confirmed ring-confirmed/25',
-  released: 'bg-released-soft text-released ring-released/25',
+  neutral: 'bg-surface-2 text-fg-muted ring-line-strong/70',
+  held: 'bg-held-soft text-held ring-held/20',
+  confirmed: 'bg-confirmed-soft text-confirmed ring-confirmed/20',
+  released: 'bg-released-soft text-released ring-released/20',
   pending: 'bg-pending-soft text-pending ring-pending/25',
-  danger: 'bg-danger-soft text-danger ring-danger/25',
+  danger: 'bg-danger-soft text-danger ring-danger/20',
 }

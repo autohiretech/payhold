@@ -49,7 +49,7 @@ export function SellersPage() {
           subtitle="Destinations are tokenized by the provider. PayHold never stores the real number."
         />
         {sellers.isPending ? (
-          <div className="space-y-2 p-5">
+          <div className="space-y-2 p-6">
             {[0, 1, 2].map((i) => (
               <Skeleton key={i} className="h-9" />
             ))}
@@ -106,7 +106,7 @@ function AddSellerForm({ onClose }: { onClose: () => void }) {
   )
 
   return (
-    <Card className="mb-5 p-5">
+    <Card className="mb-5 p-6">
       <form
         className="space-y-4"
         onSubmit={async (e) => {

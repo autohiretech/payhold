@@ -1,9 +1,17 @@
 @import 'tailwindcss';
 
-@custom-variant dark (&:where(.dark, .dark *));
+/* Light only. This product is read in daylight offices and on phones outdoors,
+   so it commits to one high-contrast light theme rather than doing two themes
+   adequately.
 
-/* Semantic tokens — one place to retune the whole product's look.
-   Screens use these, never raw palette colors. */
+   Every token below was checked, not eyeballed. Worst measured cases:
+     text on any surface (white / canvas / surface-2)   5.16:1
+     status badge text on its own soft background       5.29:1
+     white on solid brand and danger buttons            6.45:1
+     control borders against white (3:1 non-text min)   3.17:1
+   If you retune a value, re-check it — a lighter brand looked better and
+   silently failed `text-brand` on `brand-soft`. */
+
 @theme inline {
   --color-canvas: var(--canvas);
   --color-surface: var(--surface);
@@ -18,9 +26,10 @@
   --color-brand: var(--brand);
   --color-brand-fg: var(--brand-fg);
   --color-brand-soft: var(--brand-soft);
+  --color-brand-deep: var(--brand-deep);
 
-  /* Deal-status accents, named for states not colors, so the state
-     machine and the UI can't drift apart. */
+  /* Deal-status accents, named for states not colors, so the state machine
+     and the UI can't drift apart. */
   --color-held: var(--held);
   --color-held-soft: var(--held-soft);
   --color-confirmed: var(--confirmed);
@@ -33,76 +42,109 @@
   --color-danger-soft: var(--danger-soft);
 
   --font-sans:
-    ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
-  --font-mono: ui-monospace, 'SFMono-Regular', 'JetBrains Mono', monospace;
+    ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue',
+    sans-serif;
+  --font-mono:
+    ui-monospace, 'SFMono-Regular', 'JetBrains Mono', 'Menlo', monospace;
+
+  /* Soft, layered elevation — cards lift off the canvas without a hard edge. */
+  --shadow-card: 0 1px 2px oklch(0.4 0.03 260 / 0.05), 0 8px 24px -16px oklch(0.4 0.03 260 / 0.28);
+  --shadow-lift:
+    0 2px 4px oklch(0.4 0.03 260 / 0.06), 0 16px 32px -20px oklch(0.4 0.03 260 / 0.35);
+  --shadow-pop:
+    0 4px 8px oklch(0.4 0.03 260 / 0.08), 0 24px 48px -24px oklch(0.4 0.03 260 / 0.4);
 }
 
 :root {
-  --canvas: oklch(0.985 0.003 250);
+  /* Canvas reads as white but sits a hair below the cards, so white surfaces
+     stay visible without needing heavy borders. */
+  --canvas: oklch(0.981 0.004 250);
   --surface: oklch(1 0 0);
-  --surface-2: oklch(0.968 0.004 250);
-  --line: oklch(0.918 0.006 250);
-  --line-strong: oklch(0.86 0.008 250);
+  --surface-2: oklch(0.966 0.005 250);
+  /* Dividers are decorative. Input and control borders use --line-strong,
+     which is tuned to clear the 3:1 non-text minimum against white. */
+  --line: oklch(0.888 0.007 255);
+  --line-strong: oklch(0.655 0.012 255);
 
-  --fg: oklch(0.23 0.017 255);
-  --fg-muted: oklch(0.5 0.014 255);
-  --fg-subtle: oklch(0.63 0.012 255);
+  --fg: oklch(0.235 0.021 260);
+  --fg-muted: oklch(0.468 0.021 258);
+  --fg-subtle: oklch(0.512 0.018 258);
 
-  --brand: oklch(0.52 0.13 195);
-  --brand-fg: oklch(0.99 0 0);
-  --brand-soft: oklch(0.95 0.03 195);
+  /* Brand sits at L 0.46 so `text-brand` on `brand-soft` — the active nav item
+     and every selected chip — clears 4.5:1, and white on solid brand clears it
+     too. Lighter teals looked better and failed both. */
+  --brand: oklch(0.46 0.125 218);
+  --brand-deep: oklch(0.375 0.115 222);
+  --brand-fg: oklch(1 0 0);
+  --brand-soft: oklch(0.955 0.028 218);
 
-  --held: oklch(0.52 0.15 258);
-  --held-soft: oklch(0.95 0.03 258);
-  --confirmed: oklch(0.55 0.11 195);
-  --confirmed-soft: oklch(0.95 0.03 195);
-  --released: oklch(0.55 0.14 155);
-  --released-soft: oklch(0.95 0.04 155);
-  --pending: oklch(0.62 0.13 75);
-  --pending-soft: oklch(0.95 0.05 85);
-  --danger: oklch(0.55 0.19 25);
-  --danger-soft: oklch(0.95 0.03 25);
-}
-
-.dark {
-  --canvas: oklch(0.19 0.012 255);
-  --surface: oklch(0.235 0.014 255);
-  --surface-2: oklch(0.275 0.015 255);
-  --line: oklch(0.32 0.014 255);
-  --line-strong: oklch(0.4 0.016 255);
-
-  --fg: oklch(0.95 0.006 255);
-  --fg-muted: oklch(0.72 0.012 255);
-  --fg-subtle: oklch(0.58 0.012 255);
-
-  --brand: oklch(0.72 0.12 195);
-  --brand-fg: oklch(0.17 0.02 220);
-  --brand-soft: oklch(0.32 0.05 195);
-
-  --held: oklch(0.72 0.12 258);
-  --held-soft: oklch(0.31 0.06 258);
-  --confirmed: oklch(0.74 0.1 195);
-  --confirmed-soft: oklch(0.31 0.05 195);
-  --released: oklch(0.75 0.13 155);
-  --released-soft: oklch(0.31 0.06 155);
-  --pending: oklch(0.78 0.12 80);
-  --pending-soft: oklch(0.33 0.06 75);
-  --danger: oklch(0.7 0.16 25);
-  --danger-soft: oklch(0.33 0.08 25);
+  --held: oklch(0.475 0.155 262);
+  --held-soft: oklch(0.958 0.028 262);
+  --confirmed: oklch(0.468 0.105 205);
+  --confirmed-soft: oklch(0.957 0.03 205);
+  --released: oklch(0.455 0.13 158);
+  --released-soft: oklch(0.955 0.038 158);
+  --pending: oklch(0.505 0.125 68);
+  --pending-soft: oklch(0.958 0.045 78);
+  --danger: oklch(0.505 0.19 26);
+  --danger-soft: oklch(0.957 0.028 26);
 }
 
 html {
   color-scheme: light;
-}
-html.dark {
-  color-scheme: dark;
+  -webkit-text-size-adjust: 100%;
 }
 
 body {
   @apply bg-canvas text-fg font-sans antialiased;
+  font-size: 15px;
+  line-height: 1.55;
+  letter-spacing: -0.006em;
+  text-rendering: optimizeLegibility;
+}
+
+/* Headings tighten as they grow, which keeps large numbers and titles from
+   looking loose. */
+h1,
+h2,
+h3 {
+  letter-spacing: -0.022em;
+}
+
+::selection {
+  background: var(--brand-soft);
+  color: var(--fg);
 }
 
 /* Money figures must never jitter as they update. */
 .tabular {
   font-variant-numeric: tabular-nums;
+  font-feature-settings: 'tnum';
+}
+
+/* Scrollbars, so wide tables don't get a heavy default bar on Windows. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-strong) transparent;
+}
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+*::-webkit-scrollbar-thumb {
+  background: var(--line-strong);
+  border: 3px solid transparent;
+  border-radius: 999px;
+  background-clip: content-box;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--fg-subtle);
+  border: 3px solid transparent;
+  background-clip: content-box;
+}
+
+/* One focus treatment for everything interactive. */
+:where(a, button, input, select, textarea):focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 2px;
 }

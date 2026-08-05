@@ -70,7 +70,7 @@ export function SettingsPage() {
         <div className="space-y-5">
           <Card>
             <CardHeader title="Fees" />
-            <div className="grid gap-4 px-5 py-4 sm:grid-cols-2">
+            <div className="grid gap-5 px-6 py-5 sm:grid-cols-2">
               <Field
                 label="Service fee"
                 hint={`Taken from each deal at release. Currently ${formatPercent(
@@ -110,7 +110,7 @@ export function SettingsPage() {
               title="Timers"
               subtitle="How long money waits before it moves on its own."
             />
-            <div className="grid gap-4 px-5 py-4 sm:grid-cols-2">
+            <div className="grid gap-5 px-6 py-5 sm:grid-cols-2">
               <Field
                 label="Auto-release"
                 hint="Days after the expected completion date before a silent buyer is treated as confirming."
@@ -150,7 +150,7 @@ export function SettingsPage() {
               title="Currencies"
               subtitle="A deal can only be created in a currency enabled here."
             />
-            <div className="flex flex-wrap gap-2 px-5 py-4">
+            <div className="flex flex-wrap gap-2 px-6 py-5">
               {ALL_CURRENCIES.map((c) => {
                 const on = currencies.includes(c)
                 return (
@@ -165,7 +165,7 @@ export function SettingsPage() {
                     className={cx(
                       'rounded-lg px-3 py-1.5 text-sm font-medium ring-1 ring-inset transition',
                       on
-                        ? 'bg-brand-soft text-fg ring-brand/40'
+                        ? 'bg-brand-soft text-brand ring-brand/30'
                         : 'bg-surface text-fg-muted ring-line hover:text-fg',
                     )}
                   >
@@ -196,7 +196,7 @@ export function SettingsPage() {
 
         {/* A worked example, because percentages and day counts are abstract
             until you see them applied to real money. */}
-        <Card className="h-fit p-5">
+        <Card className="h-fit p-6">
           <h2 className="text-sm font-semibold text-fg">On a 100,000 RWF deal</h2>
           <dl className="mt-3 space-y-2 text-sm">
             <div className="flex justify-between">

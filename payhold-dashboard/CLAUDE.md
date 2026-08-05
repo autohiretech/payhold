@@ -51,8 +51,17 @@ these against the real Edge Functions.** If a rule changes, change it here first
 
 - **Money is integer minor units everywhere.** Only `lib/format.ts` divides by
   100. Forms take major units and convert at the boundary.
+- **Light theme only.** There is no dark mode and no theme toggle. Don't add
+  `dark:` variants or a `.dark` class — they will not be styled.
 - Colors come from the semantic tokens in `index.css` (`bg-surface`, `text-fg`,
-  `bg-held-soft`…). No raw Tailwind palette colors in screens.
+  `bg-held-soft`…). No raw Tailwind palette colors in screens, and no `bg-fg` /
+  near-black fills — the product is white-surfaced throughout.
+- Token contrast is measured, not eyeballed. The ratios are recorded at the top
+  of `index.css`; if you change a color value, re-check it. `--brand` in
+  particular is pinned at L 0.46 because anything lighter fails `text-brand` on
+  `brand-soft`, which is the active nav item and every selected chip.
+- Form controls use `border-line-strong` (3:1 against white). `--line` is for
+  decorative dividers only.
 - Status vocabulary lives in `DEAL_STATUS_META` / `PAYOUT_STATUS_META`. Labels
   and plain-language hints are defined once, never inline.
 - Money mutations use `useMoneyMutation` / `useMoneyAction`, which invalidate

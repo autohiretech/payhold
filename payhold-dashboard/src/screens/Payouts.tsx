@@ -64,7 +64,7 @@ export function PayoutsPage() {
           subtitle="One per released deal. Dispatched automatically when the clearance window closes."
         />
         {payouts.isPending ? (
-          <div className="space-y-2 p-5">
+          <div className="space-y-2 p-6">
             {[0, 1, 2, 3].map((i) => (
               <Skeleton key={i} className="h-9" />
             ))}

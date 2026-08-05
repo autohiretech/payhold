@@ -122,7 +122,7 @@ function DisputeCard({ dispute, amount }: { dispute: Dispute; amount: string | n
         }
       />
 
-      <div className="space-y-4 px-5 py-4">
+      <div className="space-y-4 px-6 py-5">
         <blockquote className="border-l-2 border-line pl-3 text-sm text-fg">
           {dispute.reason}
         </blockquote>
@@ -149,7 +149,7 @@ function DisputeCard({ dispute, amount }: { dispute: Dispute; amount: string | n
                   className={cx(
                     'rounded-lg px-3 py-2 text-sm font-medium ring-1 ring-inset transition',
                     choice === option.key
-                      ? 'bg-brand-soft text-fg ring-brand/40'
+                      ? 'bg-brand-soft text-brand ring-brand/30'
                       : 'bg-surface text-fg-muted ring-line hover:text-fg',
                   )}
                 >

@@ -148,9 +148,36 @@ export function PublicFrame({ children }: { children: React.ReactNode }) {
   return (
     <div className="flex min-h-svh flex-col items-center justify-center bg-canvas px-4 py-10">
       <div className="w-full max-w-md">
+        <div className="mb-6 flex items-center justify-center gap-2.5">
+          <span className="flex size-8 items-center justify-center rounded-xl bg-brand text-brand-fg shadow-[var(--shadow-card)]">
+            <svg viewBox="0 0 24 24" className="size-[1.125rem]" aria-hidden="true">
+              <rect
+                x="3.5"
+                y="10"
+                width="17"
+                height="10.5"
+                rx="2.5"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.9"
+              />
+              <path
+                d="M7.75 10V7.25a4.25 4.25 0 0 1 8.5 0V10"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.9"
+                strokeLinecap="round"
+              />
+              <circle cx="12" cy="15.25" r="1.55" fill="currentColor" />
+            </svg>
+          </span>
+          <span className="text-sm font-semibold text-fg">PayHold</span>
+        </div>
+
         {children}
-        <p className="mt-5 text-center text-xs text-fg-subtle">
-          Payments held by PayHold
+
+        <p className="mt-6 text-center text-xs text-fg-subtle">
+          Your payment is held securely until both sides confirm.
         </p>
       </div>
     </div>

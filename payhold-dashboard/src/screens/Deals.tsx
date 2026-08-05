@@ -71,10 +71,10 @@ export function DealsPage() {
             key={f.label}
             onClick={() => setFilterIndex(i)}
             className={cx(
-              'rounded-full px-3 py-1.5 text-sm font-medium transition',
+              'rounded-full px-3.5 py-1.5 text-sm font-semibold transition',
               i === filterIndex
-                ? 'bg-fg text-canvas'
-                : 'bg-surface text-fg-muted ring-1 ring-line ring-inset hover:text-fg',
+                ? 'bg-brand text-brand-fg shadow-[var(--shadow-card)]'
+                : 'bg-surface text-fg-muted ring-1 ring-line ring-inset hover:bg-surface-2 hover:text-fg',
             )}
           >
             {f.label}
@@ -91,7 +91,7 @@ export function DealsPage() {
 
       <Card>
         {deals.isPending ? (
-          <div className="space-y-2 p-5">
+          <div className="space-y-2 p-6">
             {[0, 1, 2, 3, 4].map((i) => (
               <Skeleton key={i} className="h-9" />
             ))}
@@ -197,7 +197,7 @@ function CreateDealForm({ onClose }: { onClose: () => void }) {
 
   if (link) {
     return (
-      <Card className="mb-5 p-5">
+      <Card className="mb-5 p-6">
         <h2 className="text-sm font-semibold text-fg">Deal created</h2>
         <p className="mt-1 text-sm text-fg-muted">
           Send the buyer here to pay. Funds are held the moment the payment clears.
@@ -226,7 +226,7 @@ function CreateDealForm({ onClose }: { onClose: () => void }) {
   }
 
   return (
-    <Card className="mb-5 p-5">
+    <Card className="mb-5 p-6">
       <form onSubmit={submit} className="space-y-4">
         <div className="grid gap-4 sm:grid-cols-2">
           <Field label="Seller">

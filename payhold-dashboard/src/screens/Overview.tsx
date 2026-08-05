@@ -39,19 +39,20 @@ export function OverviewPage() {
 
       {/* Balances, one row per currency — a tenant can hold more than one. */}
       {balance.isPending ? (
-        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
           {[0, 1, 2, 3].map((i) => (
-            <Skeleton key={i} className="h-24" />
+            <Skeleton key={i} className="h-32" />
           ))}
         </div>
       ) : (
-        <div className="space-y-6">
+        <div className="space-y-8">
           {balance.data?.map((b) => (
             <section key={b.currency}>
-              <h2 className="mb-2 text-xs font-medium tracking-wide text-fg-muted uppercase">
+              <h2 className="mb-3 flex items-center gap-2 text-xs font-semibold tracking-[0.06em] text-fg-muted uppercase">
                 {b.currency} balance
+                <span className="h-px flex-1 bg-line" />
               </h2>
-              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+              <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
                 <StatTile
                   label="Held"
                   tone="held"
@@ -82,7 +83,7 @@ export function OverviewPage() {
       )}
 
       {(openDisputes.length > 0 || failedPayouts.length > 0) && (
-        <div className="mt-6 grid gap-3 sm:grid-cols-2">
+        <div className="mt-8 grid gap-4 sm:grid-cols-2">
           {openDisputes.length > 0 && (
             <AttentionCard
               to="/disputes"
@@ -102,17 +103,21 @@ export function OverviewPage() {
         </div>
       )}
 
-      <Card className="mt-6">
+      <Card className="mt-8">
         <CardHeader
           title="Recent deals"
+          subtitle="The eight most recent, newest first."
           action={
-            <Link to="/deals" className="text-sm font-medium text-brand hover:underline">
-              View all
+            <Link
+              to="/deals"
+              className="rounded-lg px-2.5 py-1.5 text-sm font-semibold text-brand transition hover:bg-brand-soft"
+            >
+              View all →
             </Link>
           }
         />
         {deals.isPending ? (
-          <div className="space-y-2 p-5">
+          <div className="space-y-2 p-6">
             {[0, 1, 2, 3].map((i) => (
               <Skeleton key={i} className="h-9" />
             ))}
@@ -172,10 +177,18 @@ function AttentionCard({
   body: string
 }) {
   return (
-    <Link to={to} className="block">
-      <Card className="border-danger/25 bg-danger-soft p-4 transition hover:brightness-[0.98]">
-        <p className="text-sm font-semibold text-danger">{title}</p>
-        <p className="mt-1 text-sm text-fg-muted">{body}</p>
+    <Link to={to} className="group block">
+      <Card className="flex items-start gap-3.5 border-danger/20 bg-danger-soft p-5 transition group-hover:shadow-[var(--shadow-lift)]">
+        <span className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-full bg-danger/12 text-danger">
+          <svg viewBox="0 0 24 24" className="size-4" fill="none" stroke="currentColor" strokeWidth="2">
+            <circle cx="12" cy="12" r="9" />
+            <path d="M12 8v5M12 16.5v.01" strokeLinecap="round" />
+          </svg>
+        </span>
+        <span className="min-w-0">
+          <span className="block text-sm font-semibold text-danger">{title}</span>
+          <span className="mt-1 block text-sm leading-relaxed text-fg-muted">{body}</span>
+        </span>
       </Card>
     </Link>
   )

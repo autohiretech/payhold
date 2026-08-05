@@ -1,4 +1,3 @@
-import { useEffect, useState } from 'react'
 import { NavLink, Outlet } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { api } from '@/api'
@@ -6,21 +5,24 @@ import { cx } from '@/components/ui'
 import { DevPanel } from './DevPanel'
 
 const NAV = [
-  { to: '/', label: 'Overview', end: true },
-  { to: '/deals', label: 'Deals' },
-  { to: '/payouts', label: 'Payouts' },
-  { to: '/disputes', label: 'Disputes' },
-  { to: '/sellers', label: 'Sellers' },
+  { to: '/', label: 'Overview', end: true, icon: IconHome },
+  { to: '/deals', label: 'Deals', icon: IconDeals },
+  { to: '/payouts', label: 'Payouts', icon: IconPayouts },
+  { to: '/disputes', label: 'Disputes', icon: IconDisputes },
+  { to: '/sellers', label: 'Sellers', icon: IconSellers },
 ]
 
 const NAV_ADMIN = [
-  { to: '/settings', label: 'Settings' },
-  { to: '/api-keys', label: 'API keys' },
-  { to: '/audit', label: 'Audit trail' },
+  { to: '/settings', label: 'Settings', icon: IconSettings },
+  { to: '/api-keys', label: 'API keys', icon: IconKey },
+  { to: '/audit', label: 'Audit trail', icon: IconAudit },
 ]
 
 export function AppShell() {
-  const { data: tenant } = useQuery({ queryKey: ['tenant'], queryFn: () => api.getTenant() })
+  const { data: tenant } = useQuery({
+    queryKey: ['tenant'],
+    queryFn: () => api.getTenant(),
+  })
   const { data: disputes } = useQuery({
     queryKey: ['disputes'],
     queryFn: () => api.listDisputes(),
@@ -34,13 +36,26 @@ export function AppShell() {
 
       <main className="min-w-0 flex-1">
         {tenant?.status === 'payouts_frozen' && (
-          <div className="border-b border-danger/20 bg-danger-soft px-6 py-2.5 text-sm text-danger">
-            <strong className="font-semibold">Payouts are frozen.</strong> A ledger
-            mismatch is under review — no funds will leave this account until it is
-            resolved.
+          <div className="flex items-start gap-3 border-b border-danger/20 bg-danger-soft px-6 py-3 text-sm text-danger">
+            <svg
+              viewBox="0 0 24 24"
+              className="mt-0.5 size-4 shrink-0"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+            >
+              <circle cx="12" cy="12" r="9" />
+              <path d="M12 8v5M12 16.5v.01" strokeLinecap="round" />
+            </svg>
+            <p>
+              <strong className="font-semibold">Payouts are frozen.</strong> A ledger
+              mismatch is under review — no funds will leave this account until it is
+              resolved.
+            </p>
           </div>
         )}
-        <div className="mx-auto max-w-6xl px-5 py-8 lg:px-8">
+
+        <div className="mx-auto max-w-6xl px-5 py-8 sm:px-7 lg:px-10 lg:py-10">
           <Outlet />
         </div>
       </main>
@@ -58,40 +73,49 @@ function Sidebar({
   openDisputes: number
 }) {
   return (
-    <aside className="shrink-0 border-b border-line bg-surface lg:sticky lg:top-0 lg:h-svh lg:w-60 lg:border-r lg:border-b-0">
-      <div className="flex items-center justify-between gap-3 px-5 py-4 lg:block">
-        <div>
-          <div className="flex items-center gap-2">
-            <Logo />
-            <span className="text-sm font-semibold tracking-tight text-fg">PayHold</span>
-          </div>
-          <p className="mt-1 truncate text-xs text-fg-muted lg:mt-2">
-            {tenantName ?? '…'}
+    <aside className="shrink-0 border-b border-line bg-surface lg:sticky lg:top-0 lg:h-svh lg:w-64 lg:border-r lg:border-b-0">
+      <div className="flex items-center gap-3 px-5 py-5 lg:px-4">
+        <span className="flex size-9 items-center justify-center rounded-xl bg-brand text-brand-fg shadow-[var(--shadow-card)]">
+          <Logo />
+        </span>
+        <div className="min-w-0">
+          <p className="text-sm leading-tight font-semibold text-fg">PayHold</p>
+          <p className="truncate text-xs leading-tight text-fg-muted">
+            {tenantName ?? 'Loading…'}
           </p>
         </div>
-        <ThemeToggle />
       </div>
 
-      <nav className="flex gap-1 overflow-x-auto px-3 pb-3 lg:flex-col lg:overflow-visible">
+      <nav className="flex gap-1 overflow-x-auto px-3 pb-3 lg:flex-col lg:overflow-visible lg:px-3">
         {NAV.map((item) => (
           <NavItem
             key={item.to}
             {...item}
-            badge={item.label === 'Disputes' && openDisputes > 0 ? openDisputes : undefined}
+            badge={
+              item.label === 'Disputes' && openDisputes > 0 ? openDisputes : undefined
+            }
           />
         ))}
 
-        <div className="my-2 hidden border-t border-line lg:block" />
-
+        <Divider label="Account" />
         {NAV_ADMIN.map((item) => (
           <NavItem key={item.to} {...item} />
         ))}
 
-        <div className="my-2 hidden border-t border-line lg:block" />
-
-        <NavItem to="/admin" label="Master admin" />
+        <Divider label="PayHold staff" />
+        <NavItem to="/admin" label="Master admin" icon={IconAdmin} />
       </nav>
     </aside>
+  )
+}
+
+function Divider({ label }: { label: string }) {
+  return (
+    <div className="hidden px-3 pt-5 pb-1.5 lg:block">
+      <span className="text-[0.6875rem] font-semibold tracking-[0.08em] text-fg-subtle uppercase">
+        {label}
+      </span>
+    </div>
   )
 }
 
@@ -100,11 +124,13 @@ function NavItem({
   label,
   end,
   badge,
+  icon: Icon,
 }: {
   to: string
   label: string
   end?: boolean
   badge?: number
+  icon?: () => React.ReactElement
 }) {
   return (
     <NavLink
@@ -112,16 +138,21 @@ function NavItem({
       end={end}
       className={({ isActive }) =>
         cx(
-          'flex shrink-0 items-center justify-between gap-2 rounded-lg px-3 py-2 text-sm font-medium transition',
+          'group relative flex shrink-0 items-center gap-2.5 rounded-xl px-3 py-2.5 text-sm font-medium transition',
           isActive
-            ? 'bg-brand-soft text-fg'
+            ? 'bg-brand-soft text-brand'
             : 'text-fg-muted hover:bg-surface-2 hover:text-fg',
         )
       }
     >
-      {label}
+      {Icon && (
+        <span className="shrink-0 opacity-90">
+          <Icon />
+        </span>
+      )}
+      <span className="flex-1 whitespace-nowrap">{label}</span>
       {badge !== undefined && (
-        <span className="rounded-full bg-danger px-1.5 text-xs font-semibold text-white">
+        <span className="ml-1 rounded-full bg-danger px-1.5 py-0.5 text-[0.6875rem] leading-none font-bold text-white">
           {badge}
         </span>
       )}
@@ -129,68 +160,126 @@ function NavItem({
   )
 }
 
+// ---------------------------------------------------------------------------
+// Icons — stroked, 1.7px, so they sit at the same weight as the type.
+// ---------------------------------------------------------------------------
+
+function icon(path: React.ReactNode) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      className="size-[1.125rem]"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.7"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      {path}
+    </svg>
+  )
+}
+
+function IconHome() {
+  return icon(<path d="M4 10.5 12 4l8 6.5V19a1 1 0 0 1-1 1h-4v-6H9v6H5a1 1 0 0 1-1-1z" />)
+}
+
+function IconDeals() {
+  return icon(
+    <>
+      <rect x="3" y="7" width="18" height="13" rx="2" />
+      <path d="M8 7V5a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M3 12h18" />
+    </>,
+  )
+}
+
+function IconPayouts() {
+  return icon(
+    <>
+      <path d="M12 3v14" />
+      <path d="m7 12 5 5 5-5" />
+      <path d="M4 21h16" />
+    </>,
+  )
+}
+
+function IconDisputes() {
+  return icon(
+    <>
+      <path d="M10.3 4.3 2.6 17.4A1.6 1.6 0 0 0 4 20h16a1.6 1.6 0 0 0 1.4-2.6L13.7 4.3a1.9 1.9 0 0 0-3.4 0Z" />
+      <path d="M12 9.5v4M12 17v.01" />
+    </>,
+  )
+}
+
+function IconSellers() {
+  return icon(
+    <>
+      <circle cx="9" cy="8" r="3.2" />
+      <path d="M3 20a6 6 0 0 1 12 0" />
+      <path d="M16 4.5a3.2 3.2 0 0 1 0 7M18 20a6 6 0 0 0-2-4.5" />
+    </>,
+  )
+}
+
+function IconSettings() {
+  return icon(
+    <>
+      <circle cx="12" cy="12" r="3" />
+      <path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 0 1-4 0v-.1A1.7 1.7 0 0 0 9 19.4a1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 0 1 0-4h.1A1.7 1.7 0 0 0 4.6 9a1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 0 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 0 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1Z" />
+    </>,
+  )
+}
+
+function IconKey() {
+  return icon(
+    <>
+      <circle cx="8" cy="15" r="4" />
+      <path d="m10.8 12.2 8.2-8.2M17 6l2.5 2.5M14.5 8.5 17 11" />
+    </>,
+  )
+}
+
+function IconAudit() {
+  return icon(
+    <>
+      <path d="M8 3h8a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Z" />
+      <path d="M10 8h4M10 12h4M10 16h2" />
+    </>,
+  )
+}
+
+function IconAdmin() {
+  return icon(
+    <>
+      <path d="M12 3 4 6.2V11c0 4.6 3.2 8.7 8 10 4.8-1.3 8-5.4 8-10V6.2Z" />
+      <path d="m9.2 12 2 2 3.6-3.8" />
+    </>,
+  )
+}
+
 function Logo() {
   return (
-    <svg viewBox="0 0 24 24" className="size-5 text-brand" aria-hidden="true">
+    <svg viewBox="0 0 24 24" className="size-5" aria-hidden="true">
       <rect
         x="3.5"
-        y="9.5"
+        y="10"
         width="17"
-        height="11"
+        height="10.5"
         rx="2.5"
         fill="none"
         stroke="currentColor"
-        strokeWidth="1.8"
+        strokeWidth="1.9"
       />
       <path
-        d="M7.5 9.5V7a4.5 4.5 0 0 1 9 0v2.5"
+        d="M7.75 10V7.25a4.25 4.25 0 0 1 8.5 0V10"
         fill="none"
         stroke="currentColor"
-        strokeWidth="1.8"
+        strokeWidth="1.9"
         strokeLinecap="round"
       />
-      <circle cx="12" cy="15" r="1.6" fill="currentColor" />
-    </svg>
-  )
-}
-
-function ThemeToggle() {
-  const [dark, setDark] = useState(
-    () =>
-      localStorage.getItem('payhold.theme') === 'dark' ||
-      (localStorage.getItem('payhold.theme') === null &&
-        window.matchMedia('(prefers-color-scheme: dark)').matches),
-  )
-
-  useEffect(() => {
-    document.documentElement.classList.toggle('dark', dark)
-    localStorage.setItem('payhold.theme', dark ? 'dark' : 'light')
-  }, [dark])
-
-  return (
-    <button
-      onClick={() => setDark((v) => !v)}
-      aria-label={dark ? 'Switch to light theme' : 'Switch to dark theme'}
-      className="rounded-lg p-2 text-fg-muted transition hover:bg-surface-2 hover:text-fg lg:absolute lg:top-4 lg:right-3"
-    >
-      {dark ? <SunIcon /> : <MoonIcon />}
-    </button>
-  )
-}
-
-function SunIcon() {
-  return (
-    <svg viewBox="0 0 24 24" className="size-4" fill="none" stroke="currentColor" strokeWidth="1.8">
-      <circle cx="12" cy="12" r="4" />
-      <path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" strokeLinecap="round" />
-    </svg>
-  )
-}
-
-function MoonIcon() {
-  return (
-    <svg viewBox="0 0 24 24" className="size-4" fill="none" stroke="currentColor" strokeWidth="1.8">
-      <path d="M20 14.5A8.5 8.5 0 0 1 9.5 4a8.5 8.5 0 1 0 10.5 10.5Z" strokeLinejoin="round" />
+      <circle cx="12" cy="15.25" r="1.55" fill="currentColor" />
     </svg>
   )
 }

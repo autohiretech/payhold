@@ -148,7 +148,7 @@ export function DealDetailPage() {
             />
             <ol className="divide-y divide-line">
               {audit.data?.map((entry) => (
-                <li key={entry.id} className="flex gap-3 px-5 py-3 text-sm">
+                <li key={entry.id} className="flex gap-4 px-6 py-3 text-sm">
                   <span className="w-32 shrink-0 text-fg-muted">
                     {formatDateTime(entry.created_at)}
                   </span>
@@ -163,7 +163,7 @@ export function DealDetailPage() {
         </div>
 
         <div className="space-y-5">
-          <Card className="p-5">
+          <Card className="p-6">
             <h2 className="text-sm font-semibold text-fg">Money</h2>
             <dl className="mt-3 space-y-2 text-sm">
               <Row label="Deal amount" value={formatMoney(d.amount, d.currency)} />
@@ -305,7 +305,7 @@ function Timeline({ deal, now }: { deal: Deal; now: Date }) {
   return (
     <Card>
       <CardHeader title="Lifecycle" />
-      <ol className="px-5 py-4">
+      <ol className="px-6 py-5">
         {steps.map((step, i) => (
           <li key={step.label} className="flex gap-3">
             <div className="flex flex-col items-center">
@@ -368,7 +368,7 @@ function Actions({ deal }: { deal: Deal }) {
     confirmMutation.error ?? refund.error ?? dispute.error ?? capture.error ?? releaseDeposit.error
 
   return (
-    <Card className="p-5">
+    <Card className="p-6">
       <h2 className="text-sm font-semibold text-fg">Actions</h2>
 
       {!canConfirm && !canRefund && !hasDeposit && (
