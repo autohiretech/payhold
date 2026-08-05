@@ -455,6 +455,11 @@ export function seedDb(): MockDb {
       description: spec.description,
       amount: spec.amount,
       currency,
+      // Fixtures are all priced in a currency the buyer's market can pay,
+      // so presentment matches settlement and no conversion applies.
+      presentment_currency: currency,
+      presentment_amount: spec.amount,
+      fx_rate: null,
       deposit_amount: spec.deposit_amount ?? null,
       buyer_country: country,
       provider,
@@ -525,6 +530,11 @@ export function seedDb(): MockDb {
     log('api:autohire-prod', 'deal.created', createdAt, {
       amount: spec.amount,
       currency,
+      // Fixtures are all priced in a currency the buyer's market can pay,
+      // so presentment matches settlement and no conversion applies.
+      presentment_currency: currency,
+      presentment_amount: spec.amount,
+      fx_rate: null,
     })
 
     if (spec.status !== 'created') {

@@ -21,6 +21,7 @@ import {
   type CreateDealInput,
   type CreateDealResult,
   type CreateSellerInput,
+  type Currency,
   type Deal,
   type Dispute,
   type LedgerEntry,
@@ -35,11 +36,14 @@ import {
   type WebhookEndpoint,
 } from '../types'
 import {
+  countryName,
+  currenciesFor,
   defaultCurrencyFor,
   defaultProviderFor,
   isMarketSupported,
   payoutRoute,
 } from '@/lib/rails'
+import { canConvert, convert } from '@/lib/fx'
 import {
   audit,
   captureDeposit,
@@ -75,6 +79,29 @@ const LATENCY_MS = 180
 
 function delay<T>(value: T): Promise<T> {
   return new Promise((resolve) => setTimeout(() => resolve(value), LATENCY_MS))
+}
+
+/**
+ * What to charge a buyer in this market, given what the seller is owed.
+ *
+ * Their own settlement currency if their market can take it, otherwise the
+ * best international currency their market can — USD first, since it is the
+ * most widely accepted and the one every rate table has.
+ */
+function presentmentCurrencyFor(
+  buyerCountry: Country,
+  settlement: Currency,
+): Currency | null {
+  if (isMarketSupported(buyerCountry, settlement)) return settlement
+
+  const payable = currenciesFor(buyerCountry)
+  const preferred: Currency[] = ['USD', 'EUR', 'GBP']
+
+  return (
+    preferred.find((c) => payable.includes(c) && canConvert(settlement, c)) ??
+    payable.find((c) => canConvert(settlement, c)) ??
+    null
+  )
 }
 
 /** Deep copy on the way out — screens must never mutate the store by accident. */
@@ -115,10 +142,24 @@ export class MockClient implements PayHoldClient {
       // country at checkout, and every country can pay by card.
       const buyerCountry: Country = input.buyer_country ?? seller.country
 
-      if (!isMarketSupported(buyerCountry, input.currency)) {
+      // The seller is owed `input.currency`. If the buyer's market cannot be
+      // charged in it — an Indian card cannot be charged RWF — find a currency
+      // it can, and convert. Refusing the deal would turn away a legitimate
+      // customer over a mechanical detail they cannot control.
+      const presentmentCurrency = presentmentCurrencyFor(buyerCountry, input.currency)
+
+      if (!presentmentCurrency) {
         throw new PayHoldError(
           'policy_violation',
-          `No payment rail is available for ${input.currency} from ${buyerCountry}`,
+          `PayHold cannot take a payment from ${countryName(buyerCountry)}.`,
+        )
+      }
+
+      const converted = convert(input.amount, input.currency, presentmentCurrency)
+      if (!converted) {
+        throw new PayHoldError(
+          'policy_violation',
+          `No exchange rate is available between ${input.currency} and ${presentmentCurrency}.`,
         )
       }
 
@@ -131,9 +172,14 @@ export class MockClient implements PayHoldClient {
         description: input.description,
         amount: input.amount,
         currency: input.currency,
+        presentment_currency: presentmentCurrency,
+        presentment_amount: converted.amount,
+        // Locked when the buyer pays, not now — the rate here is only for
+        // display until then.
+        fx_rate: null,
         deposit_amount: input.deposit_amount ?? null,
         buyer_country: buyerCountry,
-        provider: defaultProviderFor(buyerCountry, input.currency),
+        provider: defaultProviderFor(buyerCountry, presentmentCurrency),
         payment_method: null,
         payment_network: null,
         provider_ref: null,

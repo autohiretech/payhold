@@ -398,10 +398,11 @@ describe('rails', () => {
   })
 
   it('refuses a method that market cannot use', () => {
-    // Rwanda has no bank-transfer collection rail in USD.
+    // Rwanda has a bank-transfer rail in RWF but not in USD, and routing
+    // follows what the buyer is charged.
     const id = newDeal()
     const deal = requireDeal(db, id)
-    deal.currency = 'USD'
+    deal.presentment_currency = 'USD'
     expect(() => fundDeal(db, id, 'bank_transfer')).toThrow(/not available/i)
   })
 

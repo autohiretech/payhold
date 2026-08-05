@@ -10,16 +10,25 @@
 import { useState } from 'react'
 import { useParams } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
-import { api, isSimulated, type Country, type PaymentMethod } from '@/api'
+import {
+  api,
+  isSimulated,
+  type Country,
+  type Currency,
+  type Deal,
+  type PaymentMethod,
+} from '@/api'
 import { Button, Card, Dot, Select, Skeleton, cx } from '@/components/ui'
 import { MethodIcon, ProviderChip } from '@/components/rails'
 import { formatDate, formatMoney } from '@/lib/format'
+import { convert, formatRate } from '@/lib/fx'
 import {
   METHOD_BLURB,
   METHOD_LABEL,
   SCHEME_LABEL,
   collectionRails,
   countriesByRegion,
+  currenciesFor,
   countryFlag,
   countryName,
   marketSummary,
@@ -65,9 +74,15 @@ export function CheckoutPage() {
   }
 
   const d = deal.data
-  const total = d.amount + (d.deposit_amount ?? 0)
   const payingFrom = country ?? d.buyer_country
-  const rails = collectionRails(payingFrom, d.currency)
+
+  // The buyer may be somewhere other than the deal assumed, so re-price for
+  // wherever they say they are.
+  const charge = priceFor(d, payingFrom)
+  const total = charge.amount + (d.deposit_amount ?? 0)
+  const converted = charge.currency !== d.currency
+
+  const rails = collectionRails(payingFrom, charge.currency)
   const market = marketSummary(payingFrom)
 
   if (d.status !== 'created') {
@@ -103,9 +118,16 @@ export function CheckoutPage() {
         </div>
 
         <dl className="space-y-2 px-6 py-5 text-sm">
-          <div className="flex justify-between">
-            <dt className="text-fg-muted">Amount</dt>
-            <dd className="tabular">{formatMoney(d.amount, d.currency)}</dd>
+          <div className="flex justify-between gap-4">
+            <dt className="text-fg-muted">
+              Amount
+              {converted && (
+                <span className="mt-0.5 block text-xs text-fg-subtle">
+                  Priced at {formatMoney(d.amount, d.currency)}
+                </span>
+              )}
+            </dt>
+            <dd className="tabular">{formatMoney(charge.amount, charge.currency)}</dd>
           </div>
           {d.deposit_amount !== null && (
             <div className="flex justify-between">
@@ -115,15 +137,27 @@ export function CheckoutPage() {
                   Held on your card, released when you return the item
                 </span>
               </dt>
-              <dd className="tabular">{formatMoney(d.deposit_amount, d.currency)}</dd>
+              <dd className="tabular">
+                {formatMoney(d.deposit_amount, charge.currency)}
+              </dd>
             </div>
           )}
           <div className="flex justify-between border-t border-line pt-2 text-base">
             <dt className="font-medium text-fg">Total today</dt>
             <dd className="tabular font-semibold text-fg">
-              {formatMoney(total, d.currency)}
+              {formatMoney(total, charge.currency)}
             </dd>
           </div>
+
+          {converted && (
+            <p className="rounded-xl bg-surface-2 px-3.5 py-2.5 text-xs leading-relaxed text-fg-muted">
+              This is priced in {d.currency}, which cards in{' '}
+              {countryName(payingFrom)} cannot be charged in. You pay{' '}
+              {charge.currency} at {formatRate(d.currency, charge.currency, charge.rate)}
+              , and the seller receives their {d.currency}. Your bank may add its
+              own conversion fee on top.
+            </p>
+          )}
         </dl>
 
         {/* Country first — it decides the rail, and therefore the methods. */}
@@ -171,7 +205,7 @@ export function CheckoutPage() {
             <p className="mt-3 rounded-xl bg-danger-soft px-4 py-3 text-sm leading-relaxed text-danger">
               {market.restricted
                 ? `We are not able to accept payments from ${countryName(payingFrom)}.`
-                : `We cannot accept ${d.currency} from ${countryName(payingFrom)} yet. Pick another country, or ask the seller for a different way to pay.`}
+                : `We cannot take a payment from ${countryName(payingFrom)} yet. Pick another country, or ask the seller for a different way to pay.`}
             </p>
           ) : (
             <div className="mt-3 space-y-2">
@@ -245,7 +279,7 @@ export function CheckoutPage() {
               ? 'Redirecting…'
               : !method
                 ? 'Choose a payment method'
-                : `Pay ${formatMoney(total, d.currency)} with ${METHOD_LABEL[method]}`}
+                : `Pay ${formatMoney(total, charge.currency)} with ${METHOD_LABEL[method]}`}
           </Button>
           <p className="mt-3 text-center text-xs leading-relaxed text-fg-subtle">
             {method === 'card'
@@ -256,6 +290,32 @@ export function CheckoutPage() {
       </Card>
     </PublicFrame>
   )
+}
+
+/**
+ * What this buyer is actually charged, and at what rate.
+ *
+ * The deal carries a presentment currency chosen for whoever the seller
+ * expected. If the buyer says they are somewhere else, re-price rather than
+ * showing them a total their card cannot be charged.
+ */
+function priceFor(deal: Deal, country: Country): {
+  amount: number
+  currency: Currency
+  rate: number
+} {
+  const payable = currenciesFor(country)
+
+  const target: Currency = payable.includes(deal.currency)
+    ? deal.currency
+    : payable.includes(deal.presentment_currency)
+      ? deal.presentment_currency
+      : (payable.find((c) => c === 'USD') ?? payable[0] ?? deal.currency)
+
+  const conversion = convert(deal.amount, deal.currency, target)
+  return conversion
+    ? { amount: conversion.amount, currency: target, rate: conversion.rate }
+    : { amount: deal.amount, currency: deal.currency, rate: 1 }
 }
 
 export function PublicFrame({ children }: { children: React.ReactNode }) {

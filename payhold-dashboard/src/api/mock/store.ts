@@ -23,7 +23,8 @@ import type {
 
 // 2: countries widened to all of Africa + US, payment_method simplified to
 //    card/mobile_money/bank_transfer, deals gained payment_network.
-export const SCHEMA_VERSION = 2
+// 3: deals split settlement from presentment currency for cross-border pricing.
+export const SCHEMA_VERSION = 3
 const STORAGE_KEY = 'payhold.mock.v1'
 
 export interface MockDb {

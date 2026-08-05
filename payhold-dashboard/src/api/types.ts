@@ -82,8 +82,24 @@ export interface Deal {
   buyer_ref: string
   seller_id: string
   description: string
+  /** What the seller is owed, in the settlement currency. */
   amount: Money
+  /** Settlement currency — what the seller quoted and will be paid in. */
   currency: Currency
+  /**
+   * What the buyer is actually charged, when their market cannot be charged
+   * in the settlement currency. A card in Mumbai cannot be charged RWF, so an
+   * Indian buyer pays USD against a Rwandan host's RWF price.
+   *
+   * Equal to `currency` and `amount` when no conversion is needed.
+   */
+  presentment_currency: Currency
+  presentment_amount: Money
+  /**
+   * Units of presentment per unit of settlement, locked when the buyer paid.
+   * Null while the deal is unpaid, or when no conversion applies.
+   */
+  fx_rate: number | null
   /** Card pre-auth security deposit, held separately from the deal amount. */
   deposit_amount: Money | null
   /** Which market the buyer pays from — decides which rails are offered. */

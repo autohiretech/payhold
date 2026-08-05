@@ -27,6 +27,7 @@ import {
   formatRelative,
 } from '@/lib/format'
 import { COUNTRY_LABEL, METHOD_LABEL, PROVIDER_LABEL } from '@/lib/rails'
+import { formatRate } from '@/lib/fx'
 import {
   simNow,
   useAudit,
@@ -168,6 +169,24 @@ export function DealDetailPage() {
             <h2 className="text-sm font-semibold text-fg">Money</h2>
             <dl className="mt-3 space-y-2 text-sm">
               <Row label="Deal amount" value={formatMoney(d.amount, d.currency)} />
+              {d.presentment_currency !== d.currency && (
+                <>
+                  <Row
+                    label="Buyer charged"
+                    value={formatMoney(d.presentment_amount, d.presentment_currency)}
+                    muted
+                  />
+                  <Row
+                    label="Rate"
+                    value={
+                      d.fx_rate
+                        ? formatRate(d.currency, d.presentment_currency, d.fx_rate)
+                        : 'locks when paid'
+                    }
+                    muted
+                  />
+                </>
+              )}
               <Row
                 label="Your fee"
                 value={`− ${formatMoney(d.fee_amount, d.currency)}`}

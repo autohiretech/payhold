@@ -28,6 +28,7 @@ import {
   type TenantSettings,
 } from '../types'
 import { METHOD_LABEL, collectionRails, providerFor } from '@/lib/rails'
+import { convert } from '@/lib/fx'
 import { addDays, getDb, isDue, nextId, nowIso, type MockDb } from './store'
 
 // ---------------------------------------------------------------------------
@@ -63,7 +64,9 @@ function ledgerEntry(
     deal_id: deal.id,
     entry_type: type,
     amount,
-    currency: deal.currency,
+    // The currency that actually landed in the provider balance, which is what
+    // the buyer was charged — not what the seller is owed.
+    currency: deal.presentment_currency,
     provider: deal.provider,
     provider_ref: deal.provider_ref,
     created_at: nowIso(),
@@ -91,6 +94,15 @@ export function audit(
 
 function touch(deal: Deal): void {
   deal.updated_at = nowIso()
+}
+
+/** The fee, in the currency actually collected. */
+function presentmentFee(deal: Deal): number {
+  if (deal.presentment_currency === deal.currency) return deal.fee_amount
+  return (
+    convert(deal.fee_amount, deal.currency, deal.presentment_currency)?.amount ??
+    deal.fee_amount
+  )
 }
 
 // ---------------------------------------------------------------------------
@@ -121,15 +133,18 @@ export function fundDeal(
     )
   }
 
-  const rails = collectionRails(deal.buyer_country, deal.currency)
+  // Route on what the buyer is charged, not on what the seller is owed. An
+  // Indian buyer settling an RWF deal is charged USD, and it is the USD rails
+  // that have to exist.
+  const rails = collectionRails(deal.buyer_country, deal.presentment_currency)
   const chosen = method ?? rails[0]?.method ?? 'card'
-  const provider = providerFor(deal.buyer_country, deal.currency, chosen)
+  const provider = providerFor(deal.buyer_country, deal.presentment_currency, chosen)
   const rail = rails.find((r) => r.method === chosen)
 
   if (!provider) {
     throw new PayHoldError(
       'policy_violation',
-      `${METHOD_LABEL[chosen]} is not available for ${deal.currency} in ${deal.buyer_country}`,
+      `${METHOD_LABEL[chosen]} is not available for ${deal.presentment_currency} in ${deal.buyer_country}`,
     )
   }
 
@@ -148,7 +163,22 @@ export function fundDeal(
   )
   touch(deal)
 
-  ledgerEntry(db, deal, 'hold', deal.amount)
+  // Lock the rate at the moment of payment. Re-deriving it later would move
+  // the number under a deal that has already been paid.
+  if (deal.presentment_currency !== deal.currency) {
+    const locked = convert(deal.amount, deal.currency, deal.presentment_currency)
+    if (locked) {
+      deal.presentment_amount = locked.amount
+      deal.fx_rate = locked.rate
+      audit(db, deal.tenant_id, deal.id, 'system', 'fx.rate_locked', {
+        settlement: deal.currency,
+        presentment: deal.presentment_currency,
+        rate: locked.rate,
+      })
+    }
+  }
+
+  ledgerEntry(db, deal, 'hold', deal.presentment_amount)
   if (deal.deposit_amount) {
     ledgerEntry(db, deal, 'deposit_hold', deal.deposit_amount)
   }
@@ -233,19 +263,26 @@ function releaseDeal(db: MockDb, deal: Deal): Deal {
   deal.payout_due_at = addDays(releasedAt, cfg.clearance_days)
   touch(deal)
 
-  ledgerEntry(db, deal, 'release', -deal.amount)
-  ledgerEntry(db, deal, 'fee', -deal.fee_amount)
+  ledgerEntry(db, deal, 'release', -deal.presentment_amount)
+  ledgerEntry(db, deal, 'fee', -presentmentFee(deal))
   if (deal.deposit_amount && !depositSettled(db, deal.id)) {
     ledgerEntry(db, deal, 'deposit_release', -deal.deposit_amount)
   }
+
+  // The seller is owed the settlement currency, whatever the buyer paid in.
+  const seller = db.sellers.find((s) => s.id === deal.seller_id)
+  const netSettlement = deal.amount - deal.fee_amount
+  const payoutCurrency = seller?.payout_currency ?? deal.currency
+  const payoutAmount =
+    convert(netSettlement, deal.currency, payoutCurrency)?.amount ?? netSettlement
 
   db.payouts.push({
     id: nextId('po'),
     tenant_id: deal.tenant_id,
     deal_id: deal.id,
     seller_id: deal.seller_id,
-    amount: deal.amount - deal.fee_amount,
-    currency: deal.currency,
+    amount: payoutAmount,
+    currency: payoutCurrency,
     status: 'scheduled',
     scheduled_for: deal.payout_due_at,
     paid_at: null,
@@ -255,7 +292,8 @@ function releaseDeal(db: MockDb, deal: Deal): Deal {
 
   audit(db, deal.tenant_id, deal.id, 'system', 'deal.released', {
     fee_amount: deal.fee_amount,
-    net: deal.amount - deal.fee_amount,
+    net: netSettlement,
+    paid_in: payoutCurrency,
   })
   return deal
 }
@@ -277,7 +315,7 @@ export function refundDeal(db: MockDb, dealId: string, reason: string): Deal {
   deal.status = 'refunded'
   touch(deal)
 
-  ledgerEntry(db, deal, 'refund', -deal.amount)
+  ledgerEntry(db, deal, 'refund', -deal.presentment_amount)
   if (deal.deposit_amount && !depositSettled(db, deal.id)) {
     ledgerEntry(db, deal, 'deposit_release', -deal.deposit_amount)
   }
@@ -451,7 +489,12 @@ function dispatchPayout(db: MockDb, payout: Payout): void {
   payout.paid_at = nowIso()
   payout.failure_reason = null
 
-  ledgerEntry(db, deal, 'payout', -payout.amount)
+  // Debit the balance we actually hold. The seller receives `payout.amount` in
+  // their own currency; what leaves our vault is the presentment equivalent.
+  const leaving =
+    convert(payout.amount, payout.currency, deal.presentment_currency)?.amount ??
+    payout.amount
+  ledgerEntry(db, deal, 'payout', -leaving)
   deal.status = 'paid_out'
   touch(deal)
 
@@ -634,7 +677,7 @@ export function computeRailBalances(db: MockDb, tenantId: string): RailBalance[]
     // provider can change when the buyer picks their method, and the ledger is
     // the record of where the money actually went.
     const provider = entries[0]?.provider ?? deal.provider
-    const b = bucket(provider, deal.currency)
+    const b = bucket(provider, entries[0]?.currency ?? deal.presentment_currency)
 
     b.held += held
     b.paid_out += paid

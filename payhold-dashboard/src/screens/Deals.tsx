@@ -155,7 +155,9 @@ export function DealsPage() {
                   <Td align="right" className="tabular font-medium">
                     {formatMoney(deal.amount, deal.currency)}
                     <span className="mt-0.5 block text-xs font-normal text-fg-muted">
-                      fee {formatMoney(deal.fee_amount, deal.currency)}
+                      {deal.presentment_currency !== deal.currency
+                        ? `buyer paid ${formatMoney(deal.presentment_amount, deal.presentment_currency)}`
+                        : `fee ${formatMoney(deal.fee_amount, deal.currency)}`}
                     </span>
                   </Td>
                   <Td align="right" className="text-fg-muted">
