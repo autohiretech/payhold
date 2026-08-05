@@ -26,6 +26,7 @@ import {
   formatMoney,
   formatRelative,
 } from '@/lib/format'
+import { COUNTRY_LABEL, METHOD_LABEL, PROVIDER_LABEL } from '@/lib/rails'
 import {
   simNow,
   useAudit,
@@ -187,7 +188,14 @@ export function DealDetailPage() {
             <dl className="mt-4 space-y-2 border-t border-line pt-3 text-sm">
               <Row label="Seller" value={seller?.name ?? d.seller_id} muted />
               <Row label="Payout to" value={seller?.masked_destination ?? '—'} muted />
-              <Row label="Provider" value={d.provider} muted />
+              <Row
+                label="Paid with"
+                value={d.payment_method ? METHOD_LABEL[d.payment_method] : 'not paid yet'}
+                muted
+              />
+              <Row label="Buyer market" value={COUNTRY_LABEL[d.buyer_country]} muted />
+              <Row label="Rail" value={PROVIDER_LABEL[d.provider]} muted />
+              <Row label="Provider ref" value={d.provider_ref ?? '—'} muted />
               <Row
                 label="Auto-release"
                 value={

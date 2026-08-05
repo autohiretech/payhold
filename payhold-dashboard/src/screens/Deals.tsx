@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
-import { DEAL_STATUSES, type Currency, type DealStatus } from '@/api'
+import { DEAL_STATUSES, type Country, type Currency, type DealStatus } from '@/api'
 import {
   Badge,
   Button,
@@ -18,7 +18,9 @@ import {
   Th,
   cx,
 } from '@/components/ui'
+import { MethodChip, ProviderChip } from '@/components/rails'
 import { DEAL_STATUS_META, formatMoney, formatRelative } from '@/lib/format'
+import { COUNTRY_LABEL, collectionRails } from '@/lib/rails'
 import { simNow, useDeals, useMoneyAction, useSellers, useSettings } from '@/lib/queries'
 import { api } from '@/api'
 
@@ -111,9 +113,9 @@ export function DealsPage() {
               <tr>
                 <Th>Deal</Th>
                 <Th>Seller</Th>
+                <Th>Paid with</Th>
                 <Th>Status</Th>
                 <Th align="right">Amount</Th>
-                <Th align="right">Fee</Th>
                 <Th align="right">Created</Th>
               </tr>
             </thead>
@@ -131,13 +133,23 @@ export function DealsPage() {
                   </Td>
                   <Td className="text-fg-muted">{sellerName(deal.seller_id)}</Td>
                   <Td>
+                    {deal.payment_method ? (
+                      <div className="flex flex-col gap-1">
+                        <MethodChip method={deal.payment_method} />
+                        <ProviderChip provider={deal.provider} className="self-start" />
+                      </div>
+                    ) : (
+                      <span className="text-sm text-fg-subtle">Not paid yet</span>
+                    )}
+                  </Td>
+                  <Td>
                     <Badge meta={DEAL_STATUS_META[deal.status]} />
                   </Td>
                   <Td align="right" className="tabular font-medium">
                     {formatMoney(deal.amount, deal.currency)}
-                  </Td>
-                  <Td align="right" className="tabular text-fg-muted">
-                    {formatMoney(deal.fee_amount, deal.currency)}
+                    <span className="mt-0.5 block text-xs font-normal text-fg-muted">
+                      fee {formatMoney(deal.fee_amount, deal.currency)}
+                    </span>
                   </Td>
                   <Td align="right" className="text-fg-muted">
                     {formatRelative(deal.created_at, now)}
@@ -169,8 +181,13 @@ function CreateDealForm({ onClose }: { onClose: () => void }) {
   const [description, setDescription] = useState('')
   const [amount, setAmount] = useState('')
   const [currency, setCurrency] = useState<Currency>('RWF')
+  const [country, setCountry] = useState<Country>('RW')
   const [deposit, setDeposit] = useState('')
   const [link, setLink] = useState<string | null>(null)
+
+  // What the buyer will actually be offered at checkout, shown here so a deal
+  // is never created into a market we cannot collect from.
+  const rails = collectionRails(country, currency)
 
   const create = useMoneyAction(() =>
     api.createDeal({
@@ -180,6 +197,7 @@ function CreateDealForm({ onClose }: { onClose: () => void }) {
       // The form takes major units; the API is minor units everywhere.
       amount: Math.round(Number(amount) * 100),
       currency,
+      buyer_country: country,
       deposit_amount: deposit ? Math.round(Number(deposit) * 100) : undefined,
     }),
   )
@@ -306,6 +324,48 @@ function CreateDealForm({ onClose }: { onClose: () => void }) {
               placeholder="0"
             />
           </Field>
+        </div>
+
+        <div className="grid gap-4 sm:grid-cols-2">
+          <Field
+            label="Buyer is paying from"
+            hint="Decides which payment methods appear at checkout."
+          >
+            <Select
+              value={country}
+              onChange={(e) => setCountry(e.target.value as Country)}
+            >
+              {(['RW', 'KE', 'UG', 'INTL'] as Country[]).map((c) => (
+                <option key={c} value={c}>
+                  {COUNTRY_LABEL[c]}
+                </option>
+              ))}
+            </Select>
+          </Field>
+
+          <div className="rounded-xl bg-surface-2 px-4 py-3">
+            <p className="text-xs font-semibold tracking-[0.06em] text-fg-muted uppercase">
+              They will be offered
+            </p>
+            {rails.length === 0 ? (
+              <p className="mt-2 text-sm font-medium text-danger">
+                Nothing — we cannot collect {currency} from{' '}
+                {COUNTRY_LABEL[country]}.
+              </p>
+            ) : (
+              <ul className="mt-2 space-y-1.5">
+                {rails.map((rail) => (
+                  <li
+                    key={`${rail.method}-${rail.provider}`}
+                    className="flex items-center justify-between gap-2 text-sm"
+                  >
+                    <MethodChip method={rail.method} />
+                    <ProviderChip provider={rail.provider} />
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
         </div>
 
         {create.isError && <ErrorNote message={(create.error as Error).message} />}

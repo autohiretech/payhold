@@ -1,5 +1,7 @@
 import { useState } from 'react'
-import { api, type PayoutProvider } from '@/api'
+import { api, type Country, type PayoutProvider } from '@/api'
+import { ProviderChip } from '@/components/rails'
+import { COUNTRY_LABEL, payoutCapability } from '@/lib/rails'
 import {
   Button,
   Card,
@@ -19,10 +21,22 @@ import {
 import { formatDate } from '@/lib/format'
 import { useMoneyAction, useSellers } from '@/lib/queries'
 
-const PROVIDER_LABEL: Record<PayoutProvider, string> = {
+const PAYOUT_LABEL: Record<PayoutProvider, string> = {
   flutterwave_momo: 'Mobile money (MTN / Airtel)',
+  flutterwave_mpesa: 'M-Pesa',
   flutterwave_bank: 'Bank transfer',
   stripe_connect: 'Stripe Connect',
+}
+
+/** Which payout methods make sense in each market. */
+const PAYOUT_BY_COUNTRY: Record<Country, PayoutProvider[]> = {
+  RW: ['flutterwave_momo', 'flutterwave_bank'],
+  KE: ['flutterwave_mpesa', 'flutterwave_bank'],
+  UG: ['flutterwave_momo', 'flutterwave_bank'],
+  TZ: ['flutterwave_mpesa', 'flutterwave_bank'],
+  GH: ['flutterwave_momo', 'flutterwave_bank'],
+  NG: ['flutterwave_bank'],
+  INTL: ['stripe_connect'],
 }
 
 export function SellersPage() {
@@ -64,30 +78,41 @@ export function SellersPage() {
             <thead>
               <tr>
                 <Th>Name</Th>
-                <Th>Method</Th>
+                <Th>Market</Th>
+                <Th>Payout method</Th>
                 <Th>Destination</Th>
-                <Th>Token</Th>
+                <Th>Paid via</Th>
                 <Th align="right">Added</Th>
               </tr>
             </thead>
             <tbody>
-              {sellers.data.map((s) => (
-                <tr key={s.id} className="hover:bg-surface-2">
-                  <Td className="font-medium">{s.name}</Td>
-                  <Td className="text-fg-muted">
-                    {PROVIDER_LABEL[s.payout_provider]}
-                  </Td>
-                  <Td>
-                    <Mono>{s.masked_destination}</Mono>
-                  </Td>
-                  <Td>
-                    <Mono>{s.beneficiary_token}</Mono>
-                  </Td>
-                  <Td align="right" className="text-fg-muted">
-                    {formatDate(s.created_at)}
-                  </Td>
-                </tr>
-              ))}
+              {sellers.data.map((s) => {
+                const capability = payoutCapability(s.country)
+                return (
+                  <tr key={s.id} className="hover:bg-surface-2">
+                    <Td className="font-medium">{s.name}</Td>
+                    <Td className="text-fg-muted">{COUNTRY_LABEL[s.country]}</Td>
+                    <Td className="text-fg-muted">
+                      {PAYOUT_LABEL[s.payout_provider]}
+                    </Td>
+                    <Td>
+                      <Mono>{s.masked_destination}</Mono>
+                    </Td>
+                    <Td>
+                      {capability.provider ? (
+                        <span title={capability.reason}>
+                          <ProviderChip provider={capability.provider} />
+                        </span>
+                      ) : (
+                        <span className="text-xs text-danger">No rail</span>
+                      )}
+                    </Td>
+                    <Td align="right" className="text-fg-muted">
+                      {formatDate(s.created_at)}
+                    </Td>
+                  </tr>
+                )
+              })}
             </tbody>
           </Table>
         )}
@@ -98,11 +123,19 @@ export function SellersPage() {
 
 function AddSellerForm({ onClose }: { onClose: () => void }) {
   const [name, setName] = useState('')
-  const [provider, setProvider] = useState<PayoutProvider>('flutterwave_momo')
+  const [country, setCountry] = useState<Country>('RW')
   const [destination, setDestination] = useState('')
 
+  // The market decides which payout methods are even possible, so it drives
+  // the method list rather than sitting beside it.
+  const available = PAYOUT_BY_COUNTRY[country]
+  const [provider, setProvider] = useState<PayoutProvider>('flutterwave_momo')
+  const effective = available.includes(provider) ? provider : available[0]!
+
+  const capability = payoutCapability(country)
+
   const create = useMoneyAction(() =>
-    api.createSeller({ name, payout_provider: provider, destination }),
+    api.createSeller({ name, country, payout_provider: effective, destination }),
   )
 
   return (
@@ -115,7 +148,7 @@ function AddSellerForm({ onClose }: { onClose: () => void }) {
           onClose()
         }}
       >
-        <div className="grid gap-4 sm:grid-cols-3">
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
           <Field label="Name">
             <Input
               required
@@ -125,14 +158,27 @@ function AddSellerForm({ onClose }: { onClose: () => void }) {
             />
           </Field>
 
+          <Field label="Market" hint={capability.reason}>
+            <Select
+              value={country}
+              onChange={(e) => setCountry(e.target.value as Country)}
+            >
+              {(Object.keys(PAYOUT_BY_COUNTRY) as Country[]).map((c) => (
+                <option key={c} value={c}>
+                  {COUNTRY_LABEL[c]}
+                </option>
+              ))}
+            </Select>
+          </Field>
+
           <Field label="Payout method">
             <Select
-              value={provider}
+              value={effective}
               onChange={(e) => setProvider(e.target.value as PayoutProvider)}
             >
-              {(Object.keys(PROVIDER_LABEL) as PayoutProvider[]).map((p) => (
+              {available.map((p) => (
                 <option key={p} value={p}>
-                  {PROVIDER_LABEL[p]}
+                  {PAYOUT_LABEL[p]}
                 </option>
               ))}
             </Select>

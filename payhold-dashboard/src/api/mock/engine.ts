@@ -21,9 +21,13 @@ import {
   type Dispute,
   type LedgerEntry,
   type LedgerEntryType,
+  type PaymentMethod,
   type Payout,
+  type Provider,
+  type RailBalance,
   type TenantSettings,
 } from '../types'
+import { METHOD_LABEL, collectionRails, providerFor } from '@/lib/rails'
 import { addDays, getDb, isDue, nextId, nowIso, type MockDb } from './store'
 
 // ---------------------------------------------------------------------------
@@ -97,8 +101,13 @@ function touch(deal: Deal): void {
  * A verified provider webhook has landed: the buyer's money is now in the
  * vault. In the real system this is only reachable after signature check AND
  * provider re-verification of amount, currency and status.
+ *
+ * The payment method the buyer chose fixes the rail — a deal that was
+ * provisionally routed to Flutterwave becomes a Stripe deal if they paid by
+ * international card, and the ledger entries follow the rail that actually
+ * holds the money.
  */
-export function fundDeal(db: MockDb, dealId: string): Deal {
+export function fundDeal(db: MockDb, dealId: string, method?: PaymentMethod): Deal {
   const deal = requireDeal(db, dealId)
   if (deal.status !== 'created') {
     throw new PayHoldError(
@@ -107,9 +116,22 @@ export function fundDeal(db: MockDb, dealId: string): Deal {
     )
   }
 
+  const chosen =
+    method ?? collectionRails(deal.buyer_country, deal.currency)[0]?.method ?? 'card'
+  const provider = providerFor(deal.buyer_country, deal.currency, chosen)
+
+  if (!provider) {
+    throw new PayHoldError(
+      'policy_violation',
+      `${METHOD_LABEL[chosen]} is not available for ${deal.currency} in ${deal.buyer_country}`,
+    )
+  }
+
   const cfg = settingsFor(db, deal.tenant_id)
   deal.status = 'funded_held'
-  deal.provider_ref = `FLW-${nextId('ref')}`
+  deal.payment_method = chosen
+  deal.provider = provider
+  deal.provider_ref = `${provider === 'stripe' ? 'pi' : 'FLW'}-${nextId('ref')}`
   deal.auto_release_at = addDays(
     deal.expected_complete_at ?? nowIso(),
     cfg.auto_release_days,
@@ -508,17 +530,66 @@ const HELD_TYPES: LedgerEntryType[] = ['hold', 'release', 'refund']
 export function computeBalances(db: MockDb, tenantId: string): Balance[] {
   const byCurrency = new Map<Currency, Balance>()
 
-  const bucket = (currency: Currency): Balance => {
-    let b = byCurrency.get(currency)
+  for (const rail of computeRailBalances(db, tenantId)) {
+    let b = byCurrency.get(rail.currency)
     if (!b) {
       b = {
+        currency: rail.currency,
+        held: 0,
+        pending_clearance: 0,
+        available: 0,
+        paid_out: 0,
+      }
+      byCurrency.set(rail.currency, b)
+    }
+    b.held += rail.held
+    b.pending_clearance += rail.pending_clearance
+    b.available += rail.available
+    b.paid_out += rail.paid_out
+  }
+
+  // A tenant with a configured currency and no activity should still show a
+  // zeroed row rather than vanishing from the overview.
+  for (const currency of settingsFor(db, tenantId).currencies) {
+    if (!byCurrency.has(currency)) {
+      byCurrency.set(currency, {
+        currency,
+        held: 0,
+        pending_clearance: 0,
+        available: 0,
+        paid_out: 0,
+      })
+    }
+  }
+
+  return [...byCurrency.values()].sort((a, b) => a.currency.localeCompare(b.currency))
+}
+
+/**
+ * The same computation, split by the rail holding the money.
+ *
+ * This is the operational truth: "held" is never one pot. It is a Flutterwave
+ * balance and a Stripe balance, reconciled separately against different
+ * providers, and only one of them can pay an African seller. The reconciliation
+ * cron compares these rows — not the currency totals — to what each provider
+ * actually reports.
+ */
+export function computeRailBalances(db: MockDb, tenantId: string): RailBalance[] {
+  const byRail = new Map<string, RailBalance>()
+
+  const bucket = (provider: Provider, currency: Currency): RailBalance => {
+    const key = `${provider}:${currency}`
+    let b = byRail.get(key)
+    if (!b) {
+      b = {
+        provider,
         currency,
         held: 0,
         pending_clearance: 0,
         available: 0,
         paid_out: 0,
       }
-      byCurrency.set(currency, b)
+      byRail.set(key, b)
     }
     return b
   }
@@ -534,7 +605,6 @@ export function computeBalances(db: MockDb, tenantId: string): Balance[] {
   for (const [dealId, entries] of entriesByDeal) {
     const deal = db.deals.find((d) => d.id === dealId)
     if (!deal) continue
-    const b = bucket(deal.currency)
 
     let held = 0
     let clearing = 0
@@ -550,17 +620,22 @@ export function computeBalances(db: MockDb, tenantId: string): Balance[] {
       }
     }
 
+    // Attribute to the rail recorded on the entries, not the deal — a deal's
+    // provider can change when the buyer picks their method, and the ledger is
+    // the record of where the money actually went.
+    const provider = entries[0]?.provider ?? deal.provider
+    const b = bucket(provider, deal.currency)
+
     b.held += held
     b.paid_out += paid
     if (isDue(deal.payout_due_at)) b.available += clearing
     else b.pending_clearance += clearing
   }
 
-  // A tenant with a configured currency and no activity should still show a
-  // zeroed row rather than vanishing from the overview.
-  for (const currency of settingsFor(db, tenantId).currencies) bucket(currency)
-
-  return [...byCurrency.values()].sort((a, b) => a.currency.localeCompare(b.currency))
+  return [...byRail.values()].sort(
+    (a, b) =>
+      a.provider.localeCompare(b.provider) || a.currency.localeCompare(b.currency),
+  )
 }
 
 // ---------------------------------------------------------------------------

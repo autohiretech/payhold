@@ -12,6 +12,7 @@ import { PayHoldError } from '../types'
 import {
   captureDeposit,
   computeBalances,
+  computeRailBalances,
   confirmDeal,
   fundDeal,
   openDispute,
@@ -374,6 +375,62 @@ describe('balances are derived from the ledger', () => {
     const after = computeBalances(db, AUTOHIRE).find((b) => b.currency === 'RWF')!
 
     expect(after.held).toBe(before.held - requireDeal(db, id).amount)
+  })
+})
+
+describe('rails', () => {
+  it('books the money to the rail the buyer actually paid on', () => {
+    const id = newDeal()
+    const deal = fundDeal(db, id, 'mtn_momo')
+
+    expect(deal.provider).toBe('flutterwave')
+    expect(deal.payment_method).toBe('mtn_momo')
+    expect(db.ledger.filter((e) => e.deal_id === id).every((e) => e.provider === 'flutterwave')).toBe(true)
+  })
+
+  it('moves a deal onto Stripe when the buyer pays by international card', () => {
+    const usd = db.deals.find(
+      (d) => d.currency === 'USD' && d.buyer_country === 'INTL',
+    )
+    expect(usd?.provider).toBe('stripe')
+    expect(usd?.provider_ref).toMatch(/^pi-/)
+  })
+
+  it('refuses a method that market cannot use', () => {
+    const id = newDeal() // an RWF deal from Rwanda
+    expect(() => fundDeal(db, id, 'mpesa')).toThrow(/not available/i)
+  })
+
+  it('keeps the Flutterwave and Stripe balances as separate pots', () => {
+    const rails = computeRailBalances(db, AUTOHIRE)
+    const providers = new Set(rails.map((r) => r.provider))
+
+    expect(providers.has('flutterwave')).toBe(true)
+    expect(providers.has('stripe')).toBe(true)
+
+    // Every rail row belongs to exactly one provider/currency pair.
+    const keys = rails.map((r) => `${r.provider}:${r.currency}`)
+    expect(new Set(keys).size).toBe(keys.length)
+  })
+
+  it('has rail balances that sum to the currency totals', () => {
+    const currencyTotals = computeBalances(db, AUTOHIRE)
+    const rails = computeRailBalances(db, AUTOHIRE)
+
+    for (const total of currencyTotals) {
+      const sum = rails
+        .filter((r) => r.currency === total.currency)
+        .reduce((acc, r) => acc + r.held, 0)
+      expect(sum).toBe(total.held)
+    }
+  })
+
+  it('holds Kenyan M-Pesa money on Flutterwave, not Stripe', () => {
+    const kesRails = computeRailBalances(db, AUTOHIRE).filter(
+      (r) => r.currency === 'KES',
+    )
+    expect(kesRails.length).toBeGreaterThan(0)
+    expect(kesRails.every((r) => r.provider === 'flutterwave')).toBe(true)
   })
 })
 

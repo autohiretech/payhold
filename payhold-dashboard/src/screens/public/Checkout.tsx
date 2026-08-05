@@ -7,21 +7,31 @@
  * in plain language: your money is held, nobody can take it, both sides confirm.
  */
 
+import { useState } from 'react'
 import { useParams } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
-import { api, isSimulated } from '@/api'
-import { Button, Card, Dot, Skeleton } from '@/components/ui'
+import { api, isSimulated, type PaymentMethod } from '@/api'
+import { Button, Card, Dot, Skeleton, cx } from '@/components/ui'
+import { MethodIcon, ProviderChip } from '@/components/rails'
 import { formatDate, formatMoney } from '@/lib/format'
+import {
+  COUNTRY_LABEL,
+  METHOD_BLURB,
+  METHOD_LABEL,
+  collectionRails,
+} from '@/lib/rails'
 import { useMoneyAction } from '@/lib/queries'
 
 export function CheckoutPage() {
   const { id = '' } = useParams()
   const deal = useQuery({ queryKey: ['public-deal', id], queryFn: () => api.getDeal(id) })
+  const [method, setMethod] = useState<PaymentMethod | null>(null)
 
   const pay = useMoneyAction(async () => {
     // Stands in for the provider redirect. In production the buyer leaves for
-    // Flutterwave or Stripe here, and comes back once the charge succeeds.
-    if (isSimulated(api)) await api.sim.simulateFunding(id)
+    // Flutterwave or Stripe here — whichever rail their method routes to — and
+    // comes back once the charge succeeds.
+    if (isSimulated(api) && method) await api.sim.simulateFunding(id, method)
   })
 
   if (deal.isPending) {
@@ -47,6 +57,7 @@ export function CheckoutPage() {
 
   const d = deal.data
   const total = d.amount + (d.deposit_amount ?? 0)
+  const rails = collectionRails(d.buyer_country, d.currency)
 
   if (d.status !== 'created') {
     return (
@@ -104,6 +115,59 @@ export function CheckoutPage() {
           </div>
         </dl>
 
+        {/* Method choice. Only rails that can actually take this currency from
+            this market are offered — an option the buyer cannot complete is
+            worse than no option. */}
+        <div className="border-t border-line px-6 py-5">
+          <p className="text-sm font-semibold text-fg">How would you like to pay?</p>
+
+          {rails.length === 0 ? (
+            <p className="mt-3 text-sm text-danger">
+              We cannot accept {d.currency} payments from {COUNTRY_LABEL[d.buyer_country]}{' '}
+              yet. Contact the seller for another way to pay.
+            </p>
+          ) : (
+            <div className="mt-3 space-y-2">
+              {rails.map((rail) => {
+                const selected = method === rail.method
+                return (
+                  <button
+                    key={`${rail.method}-${rail.provider}`}
+                    type="button"
+                    onClick={() => setMethod(rail.method)}
+                    className={cx(
+                      'flex w-full items-start gap-3 rounded-xl border px-4 py-3 text-left transition',
+                      selected
+                        ? 'border-brand bg-brand-soft ring-2 ring-brand/25'
+                        : 'border-line-strong bg-surface hover:bg-surface-2',
+                    )}
+                  >
+                    <span
+                      className={cx(
+                        'mt-0.5 shrink-0',
+                        selected ? 'text-brand' : 'text-fg-muted',
+                      )}
+                    >
+                      <MethodIcon method={rail.method} />
+                    </span>
+                    <span className="min-w-0 flex-1">
+                      <span className="block text-sm font-semibold text-fg">
+                        {METHOD_LABEL[rail.method]}
+                      </span>
+                      <span className="mt-0.5 block text-xs leading-relaxed text-fg-muted">
+                        {METHOD_BLURB[rail.method]}
+                      </span>
+                    </span>
+                    <span className="mt-0.5 shrink-0">
+                      <ProviderChip provider={rail.provider} />
+                    </span>
+                  </button>
+                )
+              })}
+            </div>
+          )}
+        </div>
+
         <div className="border-t border-line bg-surface-2 px-6 py-5">
           <p className="text-sm font-medium text-fg">How your money is protected</p>
           <ul className="mt-3 space-y-2.5 text-sm text-fg-muted">
@@ -127,16 +191,19 @@ export function CheckoutPage() {
           <Button
             variant="primary"
             className="w-full"
-            disabled={pay.isPending}
+            disabled={pay.isPending || !method}
             onClick={() => pay.mutate()}
           >
             {pay.isPending
               ? 'Redirecting…'
-              : `Pay ${formatMoney(total, d.currency)} securely`}
+              : !method
+                ? 'Choose a payment method'
+                : `Pay ${formatMoney(total, d.currency)} with ${METHOD_LABEL[method]}`}
           </Button>
-          <p className="mt-3 text-center text-xs text-fg-subtle">
-            Card and mobile money accepted. Card details go straight to our payment
-            provider — PayHold never sees or stores them.
+          <p className="mt-3 text-center text-xs leading-relaxed text-fg-subtle">
+            {method === 'card'
+              ? 'Your card details go straight to our payment provider and are verified with 3D Secure. PayHold never sees or stores them.'
+              : 'Your wallet details go straight to our payment provider. PayHold never sees or stores them.'}
           </p>
         </div>
       </Card>

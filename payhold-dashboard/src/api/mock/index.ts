@@ -17,23 +17,29 @@ import {
   type AuditLogEntry,
   type Balance,
   type ConfirmSide,
+  type Country,
   type CreateDealInput,
   type CreateDealResult,
   type CreateSellerInput,
   type Deal,
   type Dispute,
   type LedgerEntry,
+  type PaymentMethod,
   type Payout,
+  type PayoutProvider,
+  type RailBalance,
   type ReconciliationAlert,
   type Seller,
   type Tenant,
   type TenantSettings,
   type WebhookEndpoint,
 } from '../types'
+import { defaultProviderFor, isMarketSupported } from '@/lib/rails'
 import {
   audit,
   captureDeposit,
   computeBalances,
+  computeRailBalances,
   confirmDeal,
   fundDeal,
   injectDrift,
@@ -99,6 +105,20 @@ export class MockClient implements PayHoldClient {
         throw new PayHoldError('not_found', `Seller ${input.seller_id} not found`)
       }
 
+      // Default the buyer to the seller's market — most deals are local — and
+      // fall back to international for foreign currencies.
+      const buyerCountry: Country =
+        input.buyer_country ?? (input.currency === 'USD' || input.currency === 'EUR'
+          ? 'INTL'
+          : seller.country)
+
+      if (!isMarketSupported(buyerCountry, input.currency)) {
+        throw new PayHoldError(
+          'policy_violation',
+          `No payment rail is available for ${input.currency} from ${buyerCountry}`,
+        )
+      }
+
       const createdAt = nowIso()
       const deal: Deal = {
         id: nextId('deal'),
@@ -109,7 +129,9 @@ export class MockClient implements PayHoldClient {
         amount: input.amount,
         currency: input.currency,
         deposit_amount: input.deposit_amount ?? null,
-        provider: 'flutterwave',
+        buyer_country: buyerCountry,
+        provider: defaultProviderFor(buyerCountry, input.currency),
+        payment_method: null,
         provider_ref: null,
         status: 'created',
         expected_complete_at: input.expected_complete_at ?? addDays(createdAt, 3),
@@ -204,17 +226,19 @@ export class MockClient implements PayHoldClient {
       // The raw destination is tokenized here and immediately discarded — the
       // real system never stores it, and neither does the mock.
       const tail = input.destination.replace(/\D/g, '').slice(-4) || '0000'
-      const label =
-        input.payout_provider === 'flutterwave_momo'
-          ? 'MoMo'
-          : input.payout_provider === 'flutterwave_bank'
-            ? 'Bank'
-            : 'Stripe'
+      const DESTINATION_LABEL: Record<PayoutProvider, string> = {
+        flutterwave_momo: 'MoMo',
+        flutterwave_mpesa: 'M-Pesa',
+        flutterwave_bank: 'Bank',
+        stripe_connect: 'Stripe',
+      }
+      const label = DESTINATION_LABEL[input.payout_provider]
 
       const created: Seller = {
         id: nextId('sel'),
         tenant_id: db.current_tenant_id,
         name: input.name,
+        country: input.country,
         payout_provider: input.payout_provider,
         beneficiary_token: `ben_fw_${nextId('tok')}`,
         masked_destination: `${label} •••• ${tail}`,
@@ -235,6 +259,11 @@ export class MockClient implements PayHoldClient {
   async getBalance(): Promise<Balance[]> {
     const db = getDb()
     return delay(computeBalances(db, db.current_tenant_id))
+  }
+
+  async getRailBalances(): Promise<RailBalance[]> {
+    const db = getDb()
+    return delay(computeRailBalances(db, db.current_tenant_id))
   }
 
   async listLedger(dealId?: string): Promise<LedgerEntry[]> {
@@ -468,8 +497,8 @@ export class MockClient implements PayHoldClient {
   // -- Simulation ----------------------------------------------------------
 
   sim: SimulationApi = {
-    async simulateFunding(dealId: string): Promise<Deal> {
-      return delay(clone(mutate((db) => fundDeal(db, dealId))))
+    async simulateFunding(dealId: string, method?: PaymentMethod): Promise<Deal> {
+      return delay(clone(mutate((db) => fundDeal(db, dealId, method))))
     },
 
     async advanceTime(hours: number): Promise<void> {

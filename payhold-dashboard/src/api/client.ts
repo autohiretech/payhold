@@ -26,6 +26,8 @@ import type {
   Dispute,
   LedgerEntry,
   Payout,
+  PaymentMethod,
+  RailBalance,
   ReconciliationAlert,
   Seller,
   Tenant,
@@ -60,6 +62,8 @@ export interface PayHoldClient {
 
   // -- Money ---------------------------------------------------------------
   getBalance(): Promise<Balance[]>
+  /** The same buckets split by the rail holding the money. */
+  getRailBalances(): Promise<RailBalance[]>
   listLedger(dealId?: string): Promise<LedgerEntry[]>
   listPayouts(): Promise<Payout[]>
   retryPayout(id: string): Promise<Payout>
@@ -106,8 +110,11 @@ export interface AdminApi {
  * provider or a cron job. `HttpClient` will not implement this.
  */
 export interface SimulationApi {
-  /** Simulate a verified provider webhook landing: created → funded_held. */
-  simulateFunding(dealId: string): Promise<Deal>
+  /**
+   * Simulate a verified provider webhook landing: created → funded_held.
+   * The method fixes which rail the deal ends up on.
+   */
+  simulateFunding(dealId: string, method?: PaymentMethod): Promise<Deal>
   /** Move the world's clock forward, firing any timers that come due. */
   advanceTime(hours: number): Promise<void>
   /** Run the cron pass now: auto-release, clearance, payout dispatch. */

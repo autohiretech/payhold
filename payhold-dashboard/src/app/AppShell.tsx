@@ -10,6 +10,7 @@ const NAV = [
   { to: '/payouts', label: 'Payouts', icon: IconPayouts },
   { to: '/disputes', label: 'Disputes', icon: IconDisputes },
   { to: '/sellers', label: 'Sellers', icon: IconSellers },
+  { to: '/rails', label: 'Payment rails', icon: IconRails },
 ]
 
 const NAV_ADMIN = [
@@ -246,6 +247,15 @@ function IconAudit() {
     <>
       <path d="M8 3h8a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Z" />
       <path d="M10 8h4M10 12h4M10 16h2" />
+    </>,
+  )
+}
+
+function IconRails() {
+  return icon(
+    <>
+      <rect x="2.5" y="6" width="19" height="12" rx="2.5" />
+      <path d="M2.5 10.5h19M6.5 14.5h3M13.5 14.5h4" />
     </>,
   )
 }

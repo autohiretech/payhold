@@ -6,6 +6,7 @@ import { DealDetailPage } from '@/screens/DealDetail'
 import { PayoutsPage } from '@/screens/Payouts'
 import { DisputesPage } from '@/screens/Disputes'
 import { SellersPage } from '@/screens/Sellers'
+import { RailsPage } from '@/screens/Rails'
 import { SettingsPage } from '@/screens/Settings'
 import { ApiKeysPage } from '@/screens/ApiKeys'
 import { AuditPage } from '@/screens/Audit'
@@ -24,6 +25,7 @@ export const router = createBrowserRouter([
       { path: 'payouts', element: <PayoutsPage /> },
       { path: 'disputes', element: <DisputesPage /> },
       { path: 'sellers', element: <SellersPage /> },
+      { path: 'rails', element: <RailsPage /> },
       { path: 'settings', element: <SettingsPage /> },
       { path: 'api-keys', element: <ApiKeysPage /> },
       { path: 'audit', element: <AuditPage /> },

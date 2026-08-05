@@ -47,10 +47,36 @@ on non-disputed deals, payouts blocked while frozen, deposits capped at the
 pre-auth, balances derived purely from ledger entries. **Reproduce every one of
 these against the real Edge Functions.** If a rule changes, change it here first.
 
+## Payment rails
+
+`src/lib/rails.ts` is the routing table: which provider handles which payment
+method, in which market, for collection and for payout. Everything rail-related
+reads from it — the checkout method picker, the deal form's preview, the Rails
+screen, seller registration.
+
+**Every row is `verified: false`.** The table encodes the *plan* from the build
+spec, not a checked capability list. Before any rail carries live money, confirm
+it against the provider's own country/method documentation and the signed
+account agreement, then flip the flag. A wrong row means a charge that cannot be
+collected — or money collected that cannot be paid out. `rails.test.ts` asserts
+nothing is marked verified, so flipping one forces a deliberate update.
+
+Two rules are structural rather than configurable:
+
+- **Collection and payout are separate capabilities.** A rail that can take
+  money cannot always send it. Cards collect only — a refund goes back to the
+  card, but a payout never does.
+- **African payouts always ride Flutterwave.** Stripe collects internationally
+  and cannot send funds to Rwanda or Kenya, so a deal can be *collected* on
+  Stripe and *paid out* on Flutterwave. This is why `RailBalance` exists: "held"
+  is never one pot, and reconciliation compares each provider's rows separately.
+
 ## Conventions
 
 - **Money is integer minor units everywhere.** Only `lib/format.ts` divides by
   100. Forms take major units and convert at the boundary.
+- Rail vocabulary (`METHOD_LABEL`, `COUNTRY_LABEL`, `PROVIDER_LABEL`) lives in
+  `lib/rails.ts`. Never inline a provider or method name in a screen.
 - **Light theme only.** There is no dark mode and no theme toggle. Don't add
   `dark:` variants or a `.dark` class — they will not be styled.
 - Colors come from the semantic tokens in `index.css` (`bg-surface`, `text-fg`,

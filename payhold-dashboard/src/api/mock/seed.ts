@@ -15,18 +15,22 @@ import type {
   ApiKey,
   AuditLogEntry,
   ConfirmSide,
+  Country,
   Currency,
   Deal,
   DealStatus,
   Dispute,
   LedgerEntry,
+  PaymentMethod,
   Payout,
+  Provider,
   ReconciliationAlert,
   Seller,
   Tenant,
   TenantSettings,
   WebhookEndpoint,
 } from '../types'
+import { collectionRails, defaultProviderFor, providerFor } from '@/lib/rails'
 import { SCHEMA_VERSION, addDays, type MockDb } from './store'
 
 const AUTOHIRE = 'ten_0001'
@@ -67,7 +71,8 @@ export function seedDb(): MockDb {
       buyer_fee: 0,
       clearance_days: 7,
       auto_release_days: 3,
-      currencies: ['RWF', 'USD'],
+      // Rwanda is home; KES covers the Kenya expansion, USD the tourist trade.
+      currencies: ['RWF', 'USD', 'KES'],
     },
     {
       tenant_id: EQUIPCO,
@@ -84,6 +89,7 @@ export function seedDb(): MockDb {
       id: 'sel_0001',
       tenant_id: AUTOHIRE,
       name: 'Jean-Paul Habimana',
+      country: 'RW',
       payout_provider: 'flutterwave_momo',
       beneficiary_token: 'ben_fw_8sk21',
       masked_destination: 'MTN •••• 4821',
@@ -93,6 +99,7 @@ export function seedDb(): MockDb {
       id: 'sel_0002',
       tenant_id: AUTOHIRE,
       name: 'Kigali City Rentals',
+      country: 'RW',
       payout_provider: 'flutterwave_bank',
       beneficiary_token: 'ben_fw_2ma94',
       masked_destination: 'BK •••• 0073',
@@ -102,6 +109,7 @@ export function seedDb(): MockDb {
       id: 'sel_0003',
       tenant_id: AUTOHIRE,
       name: 'Aline Uwase',
+      country: 'RW',
       payout_provider: 'flutterwave_momo',
       beneficiary_token: 'ben_fw_5df10',
       masked_destination: 'Airtel •••• 9302',
@@ -111,15 +119,27 @@ export function seedDb(): MockDb {
       id: 'sel_0004',
       tenant_id: AUTOHIRE,
       name: 'Musanze Fleet Services',
+      country: 'RW',
       payout_provider: 'flutterwave_bank',
       beneficiary_token: 'ben_fw_7qz45',
       masked_destination: 'Equity •••• 6611',
       created_at: ago(88),
     },
     {
+      id: 'sel_0006',
+      tenant_id: AUTOHIRE,
+      name: 'Nairobi Car Hire Ltd',
+      country: 'KE',
+      payout_provider: 'flutterwave_mpesa',
+      beneficiary_token: 'ben_fw_4ke82',
+      masked_destination: 'M-Pesa •••• 5540',
+      created_at: ago(52),
+    },
+    {
       id: 'sel_0005',
       tenant_id: EQUIPCO,
       name: 'Nyabugogo Plant Hire',
+      country: 'RW',
       payout_provider: 'flutterwave_momo',
       beneficiary_token: 'ben_fw_1cc38',
       masked_destination: 'MTN •••• 7714',
@@ -140,6 +160,10 @@ export function seedDb(): MockDb {
     description: string
     amount: number
     currency?: Currency
+    /** Defaults from the currency: KES→Kenya, USD→international, else Rwanda. */
+    country?: Country
+    /** Defaults to the first rail available in that market. */
+    method?: PaymentMethod
     deposit_amount?: number
     status: DealStatus
     /** Days ago the deal was created. */
@@ -194,14 +218,53 @@ export function seedDb(): MockDb {
       created: 3,
     },
     {
+      // A tourist paying by international card — this one rides Stripe.
       tenant_id: AUTOHIRE,
       seller_id: 'sel_0002',
       buyer_ref: 'bk_9b41',
       description: 'Nissan X-Trail — 7 days, Akagera self-drive',
-      amount: 31_500_00,
+      amount: 315_00,
       currency: 'USD',
+      country: 'INTL',
+      method: 'card',
       status: 'funded_held',
       created: 4,
+    },
+    {
+      // Kenya expansion — M-Pesa, collected and paid out on Flutterwave.
+      tenant_id: AUTOHIRE,
+      seller_id: 'sel_0006',
+      buyer_ref: 'bk_9b12',
+      description: 'Toyota Axio — 4 days, Nairobi',
+      amount: 24_000_00,
+      currency: 'KES',
+      method: 'mpesa',
+      status: 'funded_held',
+      created: 2,
+    },
+    {
+      tenant_id: AUTOHIRE,
+      seller_id: 'sel_0006',
+      buyer_ref: 'bk_9a44',
+      description: 'Nissan Note — 3 days, Mombasa road trip',
+      amount: 15_500_00,
+      currency: 'KES',
+      method: 'mpesa',
+      status: 'paid_out',
+      created: 38,
+      confirmed: ['buyer', 'seller'],
+      paid: 26,
+    },
+    {
+      // Airtel Money, so both Rwandan wallets appear in the fixtures.
+      tenant_id: AUTOHIRE,
+      seller_id: 'sel_0003',
+      buyer_ref: 'bk_9c55',
+      description: 'Toyota Sienta — 2 days, Kigali',
+      amount: 8_600_00,
+      method: 'airtel_money',
+      status: 'funded_held',
+      created: 1,
     },
 
     // --- Partially confirmed ------------------------------------------------
@@ -356,7 +419,15 @@ export function seedDb(): MockDb {
   for (const spec of specs) {
     const cfg = settings.find((s) => s.tenant_id === spec.tenant_id)!
     const currency: Currency = spec.currency ?? 'RWF'
-    const provider = 'flutterwave' as const
+    const country: Country =
+      spec.country ?? (currency === 'KES' ? 'KE' : currency === 'USD' ? 'INTL' : 'RW')
+    const method: PaymentMethod =
+      spec.method ?? collectionRails(country, currency)[0]?.method ?? 'card'
+    // Unpaid deals only have a provisional rail — the buyer has not chosen yet.
+    const provider: Provider =
+      spec.status === 'created'
+        ? defaultProviderFor(country, currency)
+        : (providerFor(country, currency, method) ?? 'flutterwave')
     const createdAt = ago(spec.created)
     const fee = Math.round(spec.amount * cfg.service_fee_rate)
     const dealId = id('deal')
@@ -377,8 +448,13 @@ export function seedDb(): MockDb {
       amount: spec.amount,
       currency,
       deposit_amount: spec.deposit_amount ?? null,
+      buyer_country: country,
       provider,
-      provider_ref: spec.status === 'created' ? null : `FLW-${id('ref')}`,
+      payment_method: spec.status === 'created' ? null : method,
+      provider_ref:
+        spec.status === 'created'
+          ? null
+          : `${provider === 'stripe' ? 'pi' : 'FLW'}-${id('ref')}`,
       status: spec.status,
       expected_complete_at: expectedComplete,
       auto_release_at:
@@ -411,7 +487,9 @@ export function seedDb(): MockDb {
         entry_type: type,
         amount,
         currency,
-        provider,
+        // Entries carry the rail that actually held the money, which is what
+        // per-provider balances and reconciliation are computed from.
+        provider: deal.provider,
         provider_ref: deal.provider_ref,
         created_at: at,
       })

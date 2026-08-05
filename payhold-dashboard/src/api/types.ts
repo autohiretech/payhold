@@ -23,6 +23,21 @@ export type Timestamp = string
 
 export type Provider = 'flutterwave' | 'stripe' | 'fake'
 
+/** How the buyer actually pays. Determines which rail the charge routes to. */
+export type PaymentMethod =
+  | 'card'
+  | 'mtn_momo'
+  | 'airtel_money'
+  | 'mpesa'
+  | 'bank_transfer'
+
+/**
+ * Where the buyer or seller is. Drives rail selection: the same method routes
+ * to a different provider — or is unavailable — depending on the market.
+ * `INTL` covers everywhere PayHold does not have a local rail.
+ */
+export type Country = 'RW' | 'KE' | 'UG' | 'TZ' | 'GH' | 'NG' | 'INTL'
+
 // ---------------------------------------------------------------------------
 // Deal state machine
 // ---------------------------------------------------------------------------
@@ -71,7 +86,15 @@ export interface Deal {
   currency: Currency
   /** Card pre-auth security deposit, held separately from the deal amount. */
   deposit_amount: Money | null
+  /** Which market the buyer pays from — decides which rails are offered. */
+  buyer_country: Country
+  /**
+   * The rail this deal routes to. Provisional at creation (based on country and
+   * currency), and fixed once the buyer picks a method and pays.
+   */
   provider: Provider
+  /** Null until the buyer actually pays — we don't know how they will. */
+  payment_method: PaymentMethod | null
   provider_ref: string | null
   status: DealStatus
   expected_complete_at: Timestamp | null
@@ -91,12 +114,18 @@ export interface Deal {
 // Sellers and payouts
 // ---------------------------------------------------------------------------
 
-export type PayoutProvider = 'flutterwave_momo' | 'flutterwave_bank' | 'stripe_connect'
+export type PayoutProvider =
+  | 'flutterwave_momo'
+  | 'flutterwave_mpesa'
+  | 'flutterwave_bank'
+  | 'stripe_connect'
 
 export interface Seller {
   id: string
   tenant_id: string
   name: string
+  /** Where the seller banks. Decides which rail can actually pay them. */
+  country: Country
   payout_provider: PayoutProvider
   /** Provider-side token. PayHold never stores the real destination. */
   beneficiary_token: string
@@ -159,6 +188,17 @@ export interface Balance {
   available: Money
   /** Lifetime total already sent to sellers. */
   paid_out: Money
+}
+
+/**
+ * The same four buckets, split by the rail actually holding the money.
+ *
+ * This is the view that matters operationally: "held" is not one pot, it is a
+ * Flutterwave balance and a Stripe balance, reconciled separately, and only one
+ * of them can pay a Rwandan seller.
+ */
+export interface RailBalance extends Balance {
+  provider: Provider
 }
 
 // ---------------------------------------------------------------------------
@@ -266,6 +306,8 @@ export interface CreateDealInput {
   description: string
   amount: Money
   currency: Currency
+  /** Defaults to the tenant's home market when omitted. */
+  buyer_country?: Country
   deposit_amount?: Money
   expected_complete_at?: Timestamp
   metadata?: Record<string, string>
@@ -279,6 +321,7 @@ export interface CreateDealResult {
 
 export interface CreateSellerInput {
   name: string
+  country: Country
   payout_provider: PayoutProvider
   /** Raw destination — tokenized immediately, never stored. */
   destination: string
