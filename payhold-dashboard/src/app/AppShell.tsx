@@ -2,6 +2,7 @@ import { NavLink, Outlet } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { api } from '@/api'
 import { cx } from '@/components/ui'
+import { AssistantProvider } from '@/components/assistant'
 import { DevPanel } from './DevPanel'
 
 const NAV = [
@@ -9,6 +10,7 @@ const NAV = [
   { to: '/deals', label: 'Deals', icon: IconDeals },
   { to: '/payouts', label: 'Payouts', icon: IconPayouts },
   { to: '/disputes', label: 'Disputes', icon: IconDisputes },
+  { to: '/intelligence', label: 'Intelligence', icon: IconIntelligence },
   { to: '/sellers', label: 'Sellers', icon: IconSellers },
   { to: '/rails', label: 'Payment rails', icon: IconRails },
 ]
@@ -32,6 +34,7 @@ export function AppShell() {
   const openDisputes = disputes?.filter((d) => d.status === 'open').length ?? 0
 
   return (
+    <AssistantProvider>
     <div className="flex min-h-svh flex-col lg:flex-row">
       <Sidebar tenantName={tenant?.name} openDisputes={openDisputes} />
 
@@ -63,6 +66,7 @@ export function AppShell() {
 
       <DevPanel />
     </div>
+    </AssistantProvider>
   )
 }
 
@@ -184,6 +188,15 @@ function icon(path: React.ReactNode) {
 
 function IconHome() {
   return icon(<path d="M4 10.5 12 4l8 6.5V19a1 1 0 0 1-1 1h-4v-6H9v6H5a1 1 0 0 1-1-1z" />)
+}
+
+function IconIntelligence() {
+  return icon(
+    <>
+      <path d="M12 3.5 13.6 8.4 18.5 10 13.6 11.6 12 16.5 10.4 11.6 5.5 10 10.4 8.4z" />
+      <path d="M18 16.5l.7 2 2 .7-2 .7-.7 2-.7-2-2-.7 2-.7z" />
+    </>,
+  )
 }
 
 function IconDeals() {

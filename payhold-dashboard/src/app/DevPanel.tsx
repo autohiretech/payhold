@@ -49,7 +49,7 @@ export function DevPanel() {
   }
 
   return (
-    <div className="fixed right-4 bottom-4 z-50 print:hidden">
+    <div className="fixed right-4 bottom-20 z-50 print:hidden">
       {open && (
         <Card className="mb-2 w-80 p-4">
           <div className="flex items-baseline justify-between">
@@ -117,7 +117,21 @@ export function DevPanel() {
                 size="sm"
                 disabled={busy !== null}
                 onClick={() =>
-                  run('drift', 'Ledger drift injected — payouts frozen', () =>
+                  run('webhook', 'Next webhook attempt will fail', async () =>
+                    sim.failNextWebhook(),
+                  )
+                }
+              >
+                Fail next webhook
+              </Button>
+              <Button
+                size="sm"
+                disabled={busy !== null}
+                onClick={() =>
+                  // Sets the provider's balance at odds with ours, then runs the
+                  // real reconciliation pass — which is what finds it and
+                  // freezes payouts.
+                  run('drift', 'Provider balance now disagrees — payouts frozen', () =>
                     sim.injectDrift('ten_0001', 250_00),
                   )
                 }

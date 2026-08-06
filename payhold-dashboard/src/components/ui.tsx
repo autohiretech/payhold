@@ -157,7 +157,7 @@ const CONTROL =
   'placeholder:text-fg-subtle hover:border-fg-subtle ' +
   'focus:border-brand focus:ring-4 focus:ring-brand/15 focus:outline-none'
 
-export function Input(props: React.InputHTMLAttributes<HTMLInputElement>) {
+export function Input(props: React.ComponentProps<'input'>) {
   return <input {...props} className={cx(CONTROL, props.className)} />
 }
 

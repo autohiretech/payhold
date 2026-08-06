@@ -2,6 +2,12 @@ import { useState } from 'react'
 import { Link } from 'react-router-dom'
 import { api, type Dispute } from '@/api'
 import {
+  AiSuggestionCard,
+  AiUnavailable,
+  DisputeStatements,
+  DraftButton,
+} from '@/components/ai'
+import {
   Button,
   Card,
   CardHeader,
@@ -15,7 +21,17 @@ import {
   cx,
 } from '@/components/ui'
 import { formatDateTime, formatMoney } from '@/lib/format'
-import { useDeals, useDisputes, useMoneyMutation } from '@/lib/queries'
+import {
+  useAiAction,
+  useAiSuggestions,
+  useAiUsage,
+  useDeals,
+  useDisputes,
+  useMoneyMutation,
+} from '@/lib/queries'
+
+/** Who an approval is recorded as. Real auth will supply this. */
+const ME = 'grace@autohire.rw'
 
 export function DisputesPage() {
   const disputes = useDisputes()
@@ -97,7 +113,20 @@ function DisputeCard({ dispute, amount }: { dispute: Dispute; amount: string | n
     api.resolveDispute(dispute.id, resolution, note),
   )
 
+  const usage = useAiUsage()
+  const suggestions = useAiSuggestions(dispute.deal_id)
+  const draft = useAiAction(() => api.draftDisputeSuggestion(dispute.id))
+  // Approving a draft can move money, so it invalidates like any release.
+  const decide = useMoneyMutation(
+    ({ id, decision }: { id: string; decision: 'approved' | 'rejected' }) =>
+      api.decideAiSuggestion(id, decision, ME),
+  )
+
   const isOpen = dispute.status === 'open'
+  const aiOff = usage.data && (!usage.data.enabled || usage.data.over_budget)
+  const openDraft = suggestions.data?.find(
+    (s) => s.decision === null && s.output.kind === 'dispute_resolution',
+  )
 
   return (
     <Card>
@@ -123,9 +152,7 @@ function DisputeCard({ dispute, amount }: { dispute: Dispute; amount: string | n
       />
 
       <div className="space-y-4 px-6 py-5">
-        <blockquote className="border-l-2 border-line pl-3 text-sm text-fg">
-          {dispute.reason}
-        </blockquote>
+        <DisputeStatements dispute={dispute} />
 
         {!isOpen && dispute.resolution_note && (
           <p className="text-sm text-fg-muted">
@@ -134,8 +161,32 @@ function DisputeCard({ dispute, amount }: { dispute: Dispute; amount: string | n
           </p>
         )}
 
+        {isOpen &&
+          (openDraft ? (
+            <AiSuggestionCard
+              suggestion={openDraft}
+              variant="inline"
+              dealLink={false}
+              pending={decide.isPending}
+              error={decide.isError ? decide.error.message : undefined}
+              onDecide={(decision) => decide.mutate({ id: openDraft.id, decision })}
+            />
+          ) : aiOff && usage.data ? (
+            <AiUnavailable usage={usage.data} />
+          ) : (
+            <DraftButton
+              label="Ask the assistant to draft a resolution"
+              pending={draft.isPending}
+              error={draft.isError ? draft.error.message : undefined}
+              onClick={() => draft.mutate()}
+            />
+          ))}
+
         {isOpen && (
           <>
+            <p className="text-[0.6875rem] font-semibold tracking-[0.06em] text-fg-subtle uppercase">
+              {openDraft ? 'Or decide yourself' : 'Decide'}
+            </p>
             <div className="flex flex-wrap gap-2">
               {(
                 [

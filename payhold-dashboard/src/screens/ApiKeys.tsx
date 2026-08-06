@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { api } from '@/api'
 import {
+  Badge,
   Button,
   Card,
   CardHeader,
@@ -16,8 +17,19 @@ import {
   Td,
   Th,
 } from '@/components/ui'
-import { formatDate, formatDateTime } from '@/lib/format'
-import { keys, useMoneyAction, useMoneyMutation } from '@/lib/queries'
+import {
+  DELIVERY_STATUS_META,
+  formatDate,
+  formatDateTime,
+  formatRelative,
+} from '@/lib/format'
+import {
+  keys,
+  simNow,
+  useMoneyAction,
+  useMoneyMutation,
+  useWebhookDeliveries,
+} from '@/lib/queries'
 
 export function ApiKeysPage() {
   const apiKeys = useQuery({ queryKey: keys.apiKeys, queryFn: () => api.listApiKeys() })
@@ -34,6 +46,9 @@ export function ApiKeysPage() {
   const createKey = useMoneyAction(() => api.createApiKey(label))
   const revokeKey = useMoneyMutation((id: string) => api.revokeApiKey(id))
   const createEndpoint = useMoneyAction(() => api.createWebhookEndpoint(url))
+  const disableEndpoint = useMoneyMutation((id: string) =>
+    api.disableWebhookEndpoint(id),
+  )
 
   return (
     <>
@@ -168,19 +183,35 @@ export function ApiKeysPage() {
                 <Th>URL</Th>
                 <Th>Signing secret</Th>
                 <Th align="right">Added</Th>
+                <Th align="right" />
               </tr>
             </thead>
             <tbody>
               {endpoints.data.map((w) => (
-                <tr key={w.id}>
+                <tr key={w.id} className={w.disabled_at ? 'opacity-50' : undefined}>
                   <Td>
                     <Mono>{w.url}</Mono>
+                    {w.disabled_at && (
+                      <span className="ml-2 text-xs text-danger">disabled</span>
+                    )}
                   </Td>
                   <Td>
                     <Mono>{w.masked_secret}</Mono>
                   </Td>
                   <Td align="right" className="text-fg-muted">
                     {formatDate(w.created_at)}
+                  </Td>
+                  <Td align="right">
+                    {!w.disabled_at && (
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        disabled={disableEndpoint.isPending}
+                        onClick={() => disableEndpoint.mutate(w.id)}
+                      >
+                        Disable
+                      </Button>
+                    )}
                   </Td>
                 </tr>
               ))}
@@ -215,7 +246,106 @@ export function ApiKeysPage() {
           </form>
         </div>
       </Card>
+
+      <DeliveriesCard />
     </>
+  )
+}
+
+/**
+ * Every attempt we have made to notify this account's endpoints.
+ *
+ * This exists for one conversation: a client says their site never heard about
+ * a release. The answer should be a row with a timestamp, a status code and an
+ * attempt count — not "we think we sent it."
+ */
+function DeliveriesCard() {
+  const deliveries = useWebhookDeliveries({ limit: 25 })
+  const retry = useMoneyMutation((id: string) => api.retryWebhookDelivery(id))
+  const now = simNow()
+
+  return (
+    <Card className="mt-5">
+      <CardHeader
+        title="Recent deliveries"
+        subtitle="What we sent, when, and whether it landed. Failures retry with backoff."
+      />
+
+      {retry.isError && (
+        <div className="px-6 pt-4">
+          <ErrorNote message={retry.error.message} />
+        </div>
+      )}
+
+      {deliveries.isPending ? (
+        <div className="space-y-2 p-6">
+          {[0, 1, 2].map((i) => (
+            <Skeleton key={i} className="h-9" />
+          ))}
+        </div>
+      ) : !deliveries.data?.length ? (
+        <EmptyState
+          title="Nothing sent yet"
+          body="Deliveries appear here as soon as a deal changes state."
+        />
+      ) : (
+        <Table>
+          <thead>
+            <tr>
+              <Th>Event</Th>
+              <Th>Deal</Th>
+              <Th>Status</Th>
+              <Th align="right">Attempts</Th>
+              <Th align="right">When</Th>
+              <Th align="right" />
+            </tr>
+          </thead>
+          <tbody>
+            {deliveries.data.map((d) => (
+              <tr key={d.id}>
+                <Td>
+                  <Mono>{d.event}</Mono>
+                </Td>
+                <Td className="text-fg-muted">
+                  {d.deal_id ? <Mono>{d.deal_id}</Mono> : '—'}
+                </Td>
+                <Td>
+                  <Badge meta={DELIVERY_STATUS_META[d.status]} />
+                  {d.error && (
+                    <p className="mt-1 max-w-56 text-xs text-danger">{d.error}</p>
+                  )}
+                </Td>
+                <Td align="right" className="tabular text-fg-muted">
+                  {d.attempts}
+                </Td>
+                <Td align="right" className="text-fg-muted">
+                  {formatRelative(d.delivered_at ?? d.created_at, now)}
+                </Td>
+                <Td align="right">
+                  {d.status !== 'delivered' && (
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      disabled={retry.isPending}
+                      onClick={() => retry.mutate(d.id)}
+                    >
+                      Send again
+                    </Button>
+                  )}
+                </Td>
+              </tr>
+            ))}
+          </tbody>
+        </Table>
+      )}
+
+      <p className="border-t border-line px-6 py-4 text-xs text-fg-muted">
+        Every delivery carries an <Mono>X-PayHold-Signature</Mono> header of the
+        form <Mono>t=&lt;timestamp&gt;,v1=&lt;hmac&gt;</Mono>. Verify it against your
+        signing secret over <Mono>&lt;timestamp&gt;.&lt;body&gt;</Mono>, and reject
+        anything whose timestamp is not recent.
+      </p>
+    </Card>
   )
 }
 

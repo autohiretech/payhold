@@ -20,7 +20,8 @@ import {
   Th,
 } from '@/components/ui'
 import { formatDate, formatDateTime, formatMoney, type StatusMeta } from '@/lib/format'
-import { keys, useMoneyMutation } from '@/lib/queries'
+import { PROVIDER_LABEL } from '@/lib/rails'
+import { keys, useMoneyAction, useMoneyMutation } from '@/lib/queries'
 
 const TENANT_STATUS_META: Record<TenantStatus, StatusMeta> = {
   active: { label: 'Active', tone: 'released', hint: 'Operating normally.' },
@@ -44,6 +45,7 @@ export function AdminPage() {
 
   const freeze = useMoneyMutation((id: string) => api.admin.freezePayouts(id))
   const unfreeze = useMoneyMutation((id: string) => api.admin.unfreezePayouts(id))
+  const reconcile = useMoneyAction(() => api.admin.runReconciliation())
 
   const openAlerts = alerts.data?.filter((a) => !a.resolved_at) ?? []
 
@@ -58,6 +60,15 @@ export function AdminPage() {
         <CardHeader
           title="Reconciliation"
           subtitle="The cron job compares each account's ledger to the provider's real balance. Any drift freezes payouts."
+          action={
+            <Button
+              size="sm"
+              disabled={reconcile.isPending}
+              onClick={() => reconcile.mutate()}
+            >
+              {reconcile.isPending ? 'Checking…' : 'Run now'}
+            </Button>
+          }
         />
         {alerts.isPending ? (
           <div className="p-6">
@@ -73,6 +84,7 @@ export function AdminPage() {
             <thead>
               <tr>
                 <Th>Account</Th>
+                <Th>Rail</Th>
                 <Th align="right">Ledger says</Th>
                 <Th align="right">Provider says</Th>
                 <Th align="right">Drift</Th>
@@ -85,6 +97,11 @@ export function AdminPage() {
                 return (
                   <tr key={a.id}>
                     <Td className="font-medium">{tenant?.name ?? a.tenant_id}</Td>
+                    {/* Per rail, not per currency — you cannot ask two
+                        providers about one number. */}
+                    <Td className="text-fg-muted">
+                      {PROVIDER_LABEL[a.provider]} · {a.currency}
+                    </Td>
                     <Td align="right" className="tabular">
                       {formatMoney(a.ledger_balance, a.currency)}
                     </Td>

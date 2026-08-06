@@ -264,6 +264,31 @@ export async function verifySignedPayload(
   return await secureEquals(expected.signature, parts.v1)
 }
 
+/**
+ * How a webhook signing secret is stored, and read back.
+ *
+ * Encrypted, not hashed — unlike an API key. An API key is only ever compared,
+ * so a hash is enough and is strictly safer; a signing secret has to be *used*
+ * to compute an HMAC on every delivery, so it must be recoverable. The column
+ * is named `secret_encrypted` for that reason.
+ *
+ * These two wrappers exist so that fact lives in one place rather than being
+ * re-derived at each call site as "the blob happens to contain a `secret` key".
+ */
+export function sealWebhookSecret(plaintext: string): Promise<string> {
+  return encryptCredentials({ secret: plaintext })
+}
+
+export async function openWebhookSecret(blob: string): Promise<string> {
+  const opened = await decryptCredentials(blob)
+  const secret = opened.secret
+
+  if (!secret) {
+    throw new Error('Webhook secret blob is missing its `secret` field')
+  }
+  return secret
+}
+
 /** A webhook signing secret, shown to the client once at creation. */
 export function generateWebhookSecret(): { plaintext: string; masked: string } {
   const random = crypto.getRandomValues(new Uint8Array(24))

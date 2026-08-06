@@ -14,6 +14,10 @@
  */
 
 import type {
+  AiChatMessage,
+  AiDecision,
+  AiSuggestion,
+  AiUsage,
   ApiKey,
   AuditLogEntry,
   Balance,
@@ -23,6 +27,7 @@ import type {
   CreateDealResult,
   CreateSellerInput,
   Deal,
+  DealOutcome,
   DealStatus,
   Dispute,
   LedgerEntry,
@@ -34,9 +39,12 @@ import type {
   RailBalance,
   RailStatus,
   ReconciliationAlert,
+  RiskSignal,
   Seller,
   Tenant,
   TenantSettings,
+  WebhookDelivery,
+  WebhookDeliveryStatus,
   WebhookEndpoint,
 } from './types'
 
@@ -45,6 +53,13 @@ export interface DealListFilter {
   seller_id?: string
   /** Matches deal id, buyer_ref, or description. */
   search?: string
+  limit?: number
+}
+
+export interface WebhookDeliveryFilter {
+  endpoint_id?: string
+  deal_id?: string
+  status?: WebhookDeliveryStatus[]
   limit?: number
 }
 
@@ -72,6 +87,13 @@ export interface PayHoldClient {
   listLedger(dealId?: string): Promise<LedgerEntry[]>
   listPayouts(): Promise<Payout[]>
   retryPayout(id: string): Promise<Payout>
+  /**
+   * Let a payout a risk rule stopped go out. Rules hold; only people release,
+   * and the approval is recorded against the person who gave it.
+   */
+  approvePayoutReview(id: string, approvedBy: string): Promise<Payout>
+  /** What the deterministic rules noticed, whether or not they held anything. */
+  listRiskSignals(dealId?: string): Promise<RiskSignal[]>
 
   // -- Disputes ------------------------------------------------------------
   listDisputes(): Promise<Dispute[]>
@@ -105,6 +127,40 @@ export interface PayHoldClient {
   revokeApiKey(id: string): Promise<ApiKey>
   listWebhookEndpoints(): Promise<WebhookEndpoint[]>
   createWebhookEndpoint(url: string): Promise<{ endpoint: WebhookEndpoint; secret: string }>
+  /** Stops notifications without deleting the delivery history. */
+  disableWebhookEndpoint(id: string): Promise<WebhookEndpoint>
+  /** The answer to "did you tell us?" — every attempt, signed and dated. */
+  listWebhookDeliveries(filter?: WebhookDeliveryFilter): Promise<WebhookDelivery[]>
+  /** Send one again now, instead of waiting for the backoff to elapse. */
+  retryWebhookDelivery(id: string): Promise<WebhookDelivery>
+
+  // -- Intelligence (advisory only — spec §12) -----------------------------
+  /**
+   * Every method here is read-then-write-a-suggestion. None of them touch a
+   * deal, the ledger, or a payout.
+   *
+   * `decideAiSuggestion` is the one that can end in money moving, and only
+   * because a person called it with `approved`: it then runs the *same*
+   * `resolveDispute` an admin would have run by hand, and is audited as their
+   * decision, not the model's. Rejecting, or approving an `escalate`, moves
+   * nothing.
+   */
+  listAiSuggestions(dealId?: string): Promise<AiSuggestion[]>
+  /** Draft a resolution for an open dispute. Writes only `ai_suggestions`. */
+  draftDisputeSuggestion(disputeId: string): Promise<AiSuggestion>
+  /** Summarise what is known about a deal's counterparties before a payout. */
+  draftRiskSummary(dealId: string): Promise<AiSuggestion>
+  decideAiSuggestion(
+    id: string,
+    decision: AiDecision,
+    decidedBy: string,
+  ): Promise<AiSuggestion>
+  /** The dashboard support assistant. Answers from documents; has no tools. */
+  askAssistant(question: string): Promise<AiChatMessage>
+  listAiChat(): Promise<AiChatMessage[]>
+  /** The labelled history §12.3 accumulates for the models of §12.4. */
+  listDealOutcomes(): Promise<DealOutcome[]>
+  getAiUsage(): Promise<AiUsage>
 
   // -- Audit ---------------------------------------------------------------
   listAuditLog(dealId?: string): Promise<AuditLogEntry[]>
@@ -119,6 +175,12 @@ export interface PayHoldClient {
 export interface AdminApi {
   listTenants(): Promise<Tenant[]>
   listReconciliationAlerts(): Promise<ReconciliationAlert[]>
+  /**
+   * Compare every tenant's ledger against what each provider reports, now,
+   * instead of waiting for the nightly pass. Drift freezes payouts by itself;
+   * this returns whatever the pass touched.
+   */
+  runReconciliation(): Promise<ReconciliationAlert[]>
   freezePayouts(tenantId: string): Promise<Tenant>
   unfreezePayouts(tenantId: string): Promise<Tenant>
 }
@@ -144,6 +206,8 @@ export interface SimulationApi {
   runCron(): Promise<void>
   /** Make the next payout attempt fail, to exercise the triage path. */
   failNextPayout(): void
+  /** Make the next webhook attempt fail, to exercise backoff and retry. */
+  failNextWebhook(): void
   /** Introduce a ledger-vs-provider drift so reconciliation alerts. */
   injectDrift(tenantId: string, amount: number): Promise<void>
   /** Wipe localStorage and re-seed from fixtures. */

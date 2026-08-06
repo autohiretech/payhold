@@ -27,6 +27,10 @@ export function SettingsPage() {
   const [clearanceDays, setClearanceDays] = useState('')
   const [autoReleaseDays, setAutoReleaseDays] = useState('')
   const [currencies, setCurrencies] = useState<Currency[]>([])
+  const [aiEnabled, setAiEnabled] = useState(true)
+  const [aiBudget, setAiBudget] = useState('')
+  const [riskEnabled, setRiskEnabled] = useState(true)
+  const [riskThreshold, setRiskThreshold] = useState('')
   const [saved, setSaved] = useState(false)
 
   // Seed the form once the real values arrive, then leave it alone so typing
@@ -38,6 +42,10 @@ export function SettingsPage() {
     setClearanceDays(settings.data.clearance_days.toString())
     setAutoReleaseDays(settings.data.auto_release_days.toString())
     setCurrencies(settings.data.currencies)
+    setAiEnabled(settings.data.ai_enabled)
+    setAiBudget((settings.data.ai_monthly_budget_usd / 100).toString())
+    setRiskEnabled(settings.data.risk_rules_enabled)
+    setRiskThreshold((settings.data.risk_review_threshold_usd / 100).toString())
   }, [settings.data])
 
   const save = useMoneyAction(() =>
@@ -47,6 +55,10 @@ export function SettingsPage() {
       clearance_days: Number(clearanceDays),
       auto_release_days: Number(autoReleaseDays),
       currencies,
+      ai_enabled: aiEnabled,
+      ai_monthly_budget_usd: Math.round(Number(aiBudget) * 100),
+      risk_rules_enabled: riskEnabled,
+      risk_review_threshold_usd: Math.round(Number(riskThreshold) * 100),
     }),
   )
 
@@ -176,6 +188,98 @@ export function SettingsPage() {
                   </button>
                 )
               })}
+            </div>
+          </Card>
+
+          <Card>
+            <CardHeader
+              title="Risk rules"
+              subtitle="Fixed rules, checked before every payout leaves. Not the AI — these are arithmetic on your own history, and the same facts always give the same answer."
+            />
+            <div className="space-y-5 px-6 py-5">
+              <label className="flex items-start gap-3">
+                <input
+                  type="checkbox"
+                  checked={riskEnabled}
+                  onChange={(e) => setRiskEnabled(e.target.checked)}
+                  className="mt-0.5 size-4 rounded border-line-strong text-brand focus:ring-brand/30"
+                />
+                <span>
+                  <span className="block text-sm font-semibold text-fg">
+                    Hold unusual payouts for review
+                  </span>
+                  <span className="mt-1 block text-xs leading-relaxed text-fg-muted">
+                    A first payout to a seller who registered just before the
+                    booking, a jump well past anything they have been paid
+                    before, or a seller who recently lost a dispute. A held
+                    payout waits for a person — nothing is cancelled, and
+                    nothing sends itself. With this off we still record what we
+                    noticed; we just do not stop anything.
+                  </span>
+                </span>
+              </label>
+
+              <Field
+                label="Review threshold"
+                hint="Payouts at or above this get the closer look. Set in USD and converted to whatever the seller banks in."
+              >
+                <div className="flex items-center gap-2">
+                  <span className="text-sm text-fg-muted">USD</span>
+                  <Input
+                    type="number"
+                    min="0"
+                    step="1"
+                    value={riskThreshold}
+                    disabled={!riskEnabled}
+                    onChange={(e) => setRiskThreshold(e.target.value)}
+                  />
+                </div>
+              </Field>
+            </div>
+          </Card>
+
+          <Card>
+            <CardHeader
+              title="Intelligence"
+              subtitle="Drafted dispute resolutions, risk summaries before a payout, and the dashboard assistant."
+            />
+            <div className="space-y-5 px-6 py-5">
+              <label className="flex items-start gap-3">
+                <input
+                  type="checkbox"
+                  checked={aiEnabled}
+                  onChange={(e) => setAiEnabled(e.target.checked)}
+                  className="mt-0.5 size-4 rounded border-line-strong text-brand focus:ring-brand/30"
+                />
+                <span>
+                  <span className="block text-sm font-semibold text-fg">
+                    Draft suggestions and answer questions
+                  </span>
+                  <span className="mt-1 block text-xs leading-relaxed text-fg-muted">
+                    Suggestions are advisory. Approving one is your decision and
+                    is recorded as such. Turning this off removes the drafts and
+                    nothing else — deals, releases, refunds and payouts do not
+                    depend on it.
+                  </span>
+                </span>
+              </label>
+
+              <Field
+                label="Monthly budget"
+                hint="When the month's spend reaches this, drafts and chat switch off until next month. Money paths are never affected."
+              >
+                <div className="flex items-center gap-2">
+                  <span className="text-sm text-fg-muted">USD</span>
+                  <Input
+                    type="number"
+                    min="0"
+                    step="1"
+                    value={aiBudget}
+                    disabled={!aiEnabled}
+                    onChange={(e) => setAiBudget(e.target.value)}
+                  />
+                </div>
+              </Field>
             </div>
           </Card>
 

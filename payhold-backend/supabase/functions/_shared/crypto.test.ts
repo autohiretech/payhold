@@ -14,6 +14,8 @@ import {
   generateApiKey,
   generateWebhookSecret,
   hashApiKey,
+  openWebhookSecret,
+  sealWebhookSecret,
   secureEquals,
   signPayload,
   verifySignedPayload,
@@ -192,4 +194,41 @@ Deno.test('webhook secrets are prefixed and masked', () => {
   const s = generateWebhookSecret()
   assert(s.plaintext.startsWith('whsec_'))
   assert(s.masked.length < s.plaintext.length)
+})
+
+Deno.test('a signing secret survives the round trip, unlike an API key', async () => {
+  withKey()
+  const sealed = await sealWebhookSecret('whsec_abc123')
+
+  // Encrypted, not hashed. An API key is only ever compared, so a hash is
+  // enough and is safer; a signing secret has to be USED on every delivery, so
+  // it must come back out.
+  assertNotEquals(sealed, 'whsec_abc123')
+  assertEquals(await openWebhookSecret(sealed), 'whsec_abc123')
+})
+
+Deno.test('a signing secret blob missing its field is an error, not an empty secret', async () => {
+  withKey()
+  const wrongShape = await encryptCredentials({ not_the_secret: 'x' })
+
+  await assertRejects(() => openWebhookSecret(wrongShape), Error, 'missing its')
+})
+
+/**
+ * The dashboard mock signs deliveries too, so a client can develop against it.
+ * If the two disagree on the format, that client's verification breaks the day
+ * they point at the real API — so this pins the exact bytes.
+ *
+ * The digest below was computed independently (node's crypto, HMAC-SHA256 over
+ * `${unix_seconds}.${body}`), not by this code. The dashboard's
+ * `src/lib/hmac.test.ts` pins the same construction from the other side.
+ */
+Deno.test('the signature format matches the mock, byte for byte', async () => {
+  const body = '{"event":"deal.released","deal_id":"deal_0001"}'
+  const { header } = await signPayload('whsec_test_0123456789', body, 1785920400)
+
+  assertEquals(
+    header,
+    't=1785920400,v1=378ba5c3bf4f41ea2a133c0639896bed054889f89736b7094826e9b9a06a74e4',
+  )
 })

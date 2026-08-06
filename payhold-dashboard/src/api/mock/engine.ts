@@ -18,6 +18,7 @@ import {
   type ConfirmSide,
   type Currency,
   type Deal,
+  type DealOutcome,
   type Dispute,
   type LedgerEntry,
   type LedgerEntryType,
@@ -25,11 +26,30 @@ import {
   type Payout,
   type Provider,
   type RailBalance,
+  type ReconciliationAlert,
   type TenantSettings,
 } from '../types'
 import { METHOD_LABEL, collectionRails, providerFor } from '@/lib/rails'
 import { convert } from '@/lib/fx'
-import { addDays, getDb, isDue, nextId, nowIso, type MockDb } from './store'
+import {
+  addDays,
+  audit,
+  getDb,
+  isDue,
+  nextId,
+  nowIso,
+  type MockDb,
+} from './store'
+import { dealFindings, payoutFindings, recordFindings } from './risk'
+import { deliverPending, emitWebhook } from './webhooks'
+
+/**
+ * Re-exported so the many callers that reach for `audit` alongside the money
+ * functions keep one import. It lives in `store` because the webhook
+ * dispatcher and the reconciliation pass write audit rows too, and importing
+ * them from here would put a cycle through the money paths.
+ */
+export { audit } from './store'
 
 // ---------------------------------------------------------------------------
 // Lookups
@@ -69,25 +89,6 @@ function ledgerEntry(
     currency: deal.presentment_currency,
     provider: deal.provider,
     provider_ref: deal.provider_ref,
-    created_at: nowIso(),
-  })
-}
-
-export function audit(
-  db: MockDb,
-  tenantId: string,
-  dealId: string | null,
-  actor: string,
-  action: string,
-  details: Record<string, unknown> = {},
-): void {
-  db.audit.push({
-    id: nextId('aud'),
-    tenant_id: tenantId,
-    deal_id: dealId,
-    actor,
-    action,
-    details,
     created_at: nowIso(),
   })
 }
@@ -189,6 +190,20 @@ export function fundDeal(
   audit(db, deal.tenant_id, deal.id, 'system', 'deal.funded_held', {
     amount: deal.amount,
   })
+
+  // Everything knowable about the counterparties at the moment money lands.
+  // None of it can stop the deal — a rule that could hold a buyer's payment
+  // would be a worse product than the fraud it prevents.
+  recordFindings(db, deal.tenant_id, deal.id, deal.seller_id, dealFindings(db, deal))
+
+  emitWebhook(db, deal.tenant_id, 'deal.funded_held', deal.id, {
+    amount: deal.amount,
+    currency: deal.currency,
+    presentment_amount: deal.presentment_amount,
+    presentment_currency: deal.presentment_currency,
+    payment_method: deal.payment_method,
+    auto_release_at: deal.auto_release_at,
+  })
   return deal
 }
 
@@ -219,6 +234,8 @@ export function confirmDeal(
   }
 
   // Idempotent: confirming twice from the same side is a no-op, not an error.
+  // The notification is inside the guard for the same reason the audit row is
+  // — a client resending a confirmation should not see two events.
   if (!deal.confirmations.some((c) => c.side === side)) {
     deal.confirmations.push({ side, confirmed_at: nowIso(), actor })
     audit(
@@ -229,6 +246,7 @@ export function confirmDeal(
       `deal.confirmed_${side}`,
       { actor },
     )
+    emitWebhook(db, deal.tenant_id, 'deal.confirmed', deal.id, { side, actor })
   }
 
   const hasBuyer = deal.confirmations.some((c) => c.side === 'buyer')
@@ -245,6 +263,38 @@ export function confirmDeal(
  * Move money out of the hold. Only reachable with both confirmations present —
  * the timer path gets there by writing the missing confirmation first.
  */
+/**
+ * Label a deal's terminal result — the training set of spec §12.3.
+ *
+ * This lives on the money path rather than beside the AI code on purpose: the
+ * labels have to come from *every* resolution, including the ones no model was
+ * involved in, or the eventual fraud model learns from a biased sample. It is
+ * also why this is written now rather than when a model is trained — an
+ * outcome nobody recorded at the time cannot be reconstructed later.
+ */
+function recordOutcome(
+  db: MockDb,
+  deal: Deal,
+  outcome: DealOutcome['outcome'],
+  reasonCode: string,
+  notes: string | null = null,
+  amountDisputed: number | null = null,
+): void {
+  if (db.deal_outcomes.some((o) => o.deal_id === deal.id)) return
+
+  db.deal_outcomes.push({
+    id: nextId('out'),
+    tenant_id: deal.tenant_id,
+    deal_id: deal.id,
+    outcome,
+    reason_code: reasonCode,
+    notes,
+    amount_disputed: amountDisputed,
+    resolved_at: nowIso(),
+    created_at: nowIso(),
+  })
+}
+
 function releaseDeal(db: MockDb, deal: Deal): Deal {
   const hasBoth =
     deal.confirmations.some((c) => c.side === 'buyer') &&
@@ -288,6 +338,9 @@ function releaseDeal(db: MockDb, deal: Deal): Deal {
     paid_at: null,
     failure_reason: null,
     attempts: 0,
+    review_held_at: null,
+    review_approved_by: null,
+    review_approved_at: null,
   })
 
   audit(db, deal.tenant_id, deal.id, 'system', 'deal.released', {
@@ -295,6 +348,25 @@ function releaseDeal(db: MockDb, deal: Deal): Deal {
     net: netSettlement,
     paid_in: payoutCurrency,
   })
+
+  emitWebhook(db, deal.tenant_id, 'deal.released', deal.id, {
+    fee_amount: deal.fee_amount,
+    net: netSettlement,
+    payout_currency: payoutCurrency,
+    payout_amount: payoutAmount,
+    payout_due_at: deal.payout_due_at,
+  })
+
+  // A dispute resolution records its own, more specific label.
+  if (!db.disputes.some((d) => d.deal_id === deal.id)) {
+    const auto = deal.confirmations.some((c) => c.actor === 'auto')
+    recordOutcome(
+      db,
+      deal,
+      auto ? 'auto_released' : 'released_clean',
+      auto ? 'timer_fired' : 'both_confirmed',
+    )
+  }
   return deal
 }
 
@@ -321,6 +393,15 @@ export function refundDeal(db: MockDb, dealId: string, reason: string): Deal {
   }
 
   audit(db, deal.tenant_id, deal.id, 'dashboard', 'deal.refunded', { reason })
+  emitWebhook(db, deal.tenant_id, 'deal.refunded', deal.id, {
+    reason,
+    amount: deal.presentment_amount,
+    currency: deal.presentment_currency,
+  })
+
+  if (!db.disputes.some((d) => d.deal_id === deal.id)) {
+    recordOutcome(db, deal, 'refunded', 'client_refund', reason)
+  }
   return deal
 }
 
@@ -357,6 +438,11 @@ export function captureDeposit(db: MockDb, dealId: string, amount: number): Deal
     ledgerEntry(db, deal, 'deposit_release', -(deal.deposit_amount - amount))
   }
   audit(db, deal.tenant_id, deal.id, 'dashboard', 'deposit.captured', { amount })
+  emitWebhook(db, deal.tenant_id, 'deposit.captured', deal.id, {
+    amount,
+    held: deal.deposit_amount,
+    returned: deal.deposit_amount - amount,
+  })
   touch(deal)
   return deal
 }
@@ -373,6 +459,9 @@ export function releaseDeposit(db: MockDb, dealId: string): Deal {
 
   ledgerEntry(db, deal, 'deposit_release', -deal.deposit_amount)
   audit(db, deal.tenant_id, deal.id, 'dashboard', 'deposit.released', {
+    amount: deal.deposit_amount,
+  })
+  emitWebhook(db, deal.tenant_id, 'deposit.released', deal.id, {
     amount: deal.deposit_amount,
   })
   touch(deal)
@@ -404,6 +493,10 @@ export function openDispute(
     deal_id: deal.id,
     raised_by: raisedBy,
     reason,
+    // The other side has not been asked yet — a dispute starts one-sided, and
+    // the assistant is told so rather than left to assume silence means guilt.
+    counter_statement: null,
+    evidence: [],
     status: 'open',
     opened_at: nowIso(),
     resolved_at: null,
@@ -414,6 +507,11 @@ export function openDispute(
   deal.status = 'disputed'
   touch(deal)
   audit(db, deal.tenant_id, deal.id, `user:${raisedBy}`, 'deal.disputed', { reason })
+  emitWebhook(db, deal.tenant_id, 'deal.disputed', deal.id, {
+    dispute_id: dispute.id,
+    raised_by: raisedBy,
+    reason,
+  })
   return dispute
 }
 
@@ -454,12 +552,63 @@ export function resolveDispute(
     resolution,
     note,
   })
+  emitWebhook(db, deal.tenant_id, 'deal.dispute_resolved', deal.id, {
+    dispute_id: dispute.id,
+    resolution,
+    note,
+  })
+  recordOutcome(
+    db,
+    deal,
+    resolution === 'release' ? 'dispute_released' : 'dispute_refunded',
+    `dispute_${dispute.raised_by}_raised`,
+    note,
+    deal.amount,
+  )
   return dispute
 }
 
 // ---------------------------------------------------------------------------
 // Payouts
 // ---------------------------------------------------------------------------
+
+/**
+ * Run the deterministic rules against a payout that is about to leave.
+ *
+ * Returns true when the payout was held. The signals are written either way —
+ * the record of what we noticed is worth keeping even when nothing was worth
+ * stopping for, because that is the history a model of our own trains on.
+ */
+function screenPayout(db: MockDb, payout: Payout): boolean {
+  // Already looked at by a person: their decision stands, and re-running the
+  // rules would let a rule overrule the human who overruled it.
+  if (payout.review_approved_at) return false
+
+  const cfg = settingsFor(db, payout.tenant_id)
+  const findings = payoutFindings(db, payout, cfg)
+  if (findings.length === 0) return false
+
+  recordFindings(db, payout.tenant_id, payout.deal_id, payout.seller_id, findings)
+
+  const blocking = findings.filter((f) => f.severity === 'review')
+  if (!cfg.risk_rules_enabled || blocking.length === 0) return false
+
+  payout.status = 'held_for_review'
+  payout.review_held_at = nowIso()
+
+  audit(db, payout.tenant_id, payout.deal_id, 'system', 'payout.held_for_review', {
+    payout_id: payout.id,
+    signals: blocking.map((f) => f.signal),
+    reasons: blocking.map((f) => f.explanation),
+  })
+  emitWebhook(db, payout.tenant_id, 'payout.held_for_review', payout.deal_id, {
+    payout_id: payout.id,
+    amount: payout.amount,
+    currency: payout.currency,
+    signals: blocking.map((f) => f.signal),
+  })
+  return true
+}
 
 function dispatchPayout(db: MockDb, payout: Payout): void {
   const tenant = db.tenants.find((t) => t.id === payout.tenant_id)
@@ -471,6 +620,11 @@ function dispatchPayout(db: MockDb, payout: Payout): void {
     return
   }
 
+  // Screening happens before the attempt counter moves: a payout a rule stopped
+  // was never tried, and counting it as an attempt would misreport the
+  // provider's reliability.
+  if (screenPayout(db, payout)) return
+
   payout.attempts += 1
 
   if (db.fail_next_payout) {
@@ -478,6 +632,11 @@ function dispatchPayout(db: MockDb, payout: Payout): void {
     payout.status = 'failed'
     payout.failure_reason = 'Provider rejected the transfer (simulated failure)'
     audit(db, payout.tenant_id, payout.deal_id, 'system', 'payout.failed', {
+      reason: payout.failure_reason,
+      attempts: payout.attempts,
+    })
+    emitWebhook(db, payout.tenant_id, 'payout.failed', payout.deal_id, {
+      payout_id: payout.id,
       reason: payout.failure_reason,
       attempts: payout.attempts,
     })
@@ -502,6 +661,12 @@ function dispatchPayout(db: MockDb, payout: Payout): void {
     amount: payout.amount,
     seller_id: payout.seller_id,
   })
+  emitWebhook(db, payout.tenant_id, 'deal.paid_out', payout.deal_id, {
+    payout_id: payout.id,
+    amount: payout.amount,
+    currency: payout.currency,
+    seller_id: payout.seller_id,
+  })
 }
 
 export function retryPayout(db: MockDb, payoutId: string): Payout {
@@ -510,6 +675,44 @@ export function retryPayout(db: MockDb, payoutId: string): Payout {
   if (payout.status === 'paid') {
     throw new PayHoldError('invalid_state', 'This payout has already been sent')
   }
+  // Retry is for provider failures. A payout a rule stopped needs a decision,
+  // not another attempt — otherwise "retry" is a button that skips review.
+  if (payout.status === 'held_for_review') {
+    throw new PayHoldError(
+      'invalid_state',
+      'This payout is held for review — approve it to send it',
+    )
+  }
+  dispatchPayout(db, payout)
+  return payout
+}
+
+/**
+ * A person overriding a rule. This is the only way a held payout moves, and it
+ * is recorded against them rather than against the system.
+ */
+export function approvePayoutReview(
+  db: MockDb,
+  payoutId: string,
+  approvedBy: string,
+): Payout {
+  const payout = db.payouts.find((p) => p.id === payoutId)
+  if (!payout) throw new PayHoldError('not_found', `Payout ${payoutId} not found`)
+  if (payout.status !== 'held_for_review') {
+    throw new PayHoldError('invalid_state', 'This payout is not held for review')
+  }
+
+  payout.review_approved_by = approvedBy
+  payout.review_approved_at = nowIso()
+
+  const signals = db.risk_signals.filter(
+    (s) => s.deal_id === payout.deal_id && s.severity === 'review',
+  )
+  audit(db, payout.tenant_id, payout.deal_id, approvedBy, 'payout.review_approved', {
+    payout_id: payout.id,
+    overrode: signals.map((s) => s.signal),
+  })
+
   dispatchPayout(db, payout)
   return payout
 }
@@ -522,14 +725,32 @@ export interface CronResult {
   auto_released: number
   paid: number
   frozen: number
+  held_for_review: number
+  webhooks_delivered: number
+  drift_alerts: number
 }
 
 /**
- * One pass of everything the scheduled jobs do: fire auto-release timers, then
- * dispatch payouts whose clearance window has closed.
+ * One pass of every scheduled job, in the order they have to run:
+ *
+ *   1. reconciliation, first — drift freezes payouts, and a pass that paid out
+ *      before checking would be sending money out of a balance we already know
+ *      we cannot explain
+ *   2. auto-release timers
+ *   3. payout dispatch for anything whose clearance window has closed
+ *   4. outbound webhook delivery, last, so this pass's own events go out
  */
 export function runCron(db: MockDb): CronResult {
-  const result: CronResult = { auto_released: 0, paid: 0, frozen: 0 }
+  const result: CronResult = {
+    auto_released: 0,
+    paid: 0,
+    frozen: 0,
+    held_for_review: 0,
+    webhooks_delivered: 0,
+    drift_alerts: 0,
+  }
+
+  result.drift_alerts = runReconciliation(db).filter((a) => !a.resolved_at).length
 
   for (const deal of db.deals) {
     const canAutoRelease =
@@ -552,13 +773,18 @@ export function runCron(db: MockDb): CronResult {
   }
 
   for (const payout of db.payouts) {
+    // `held_for_review` is deliberately not dispatchable: cron must never be
+    // the thing that lets a held payout through. Only a person can.
     const dispatchable = payout.status === 'scheduled' || payout.status === 'frozen'
     if (!dispatchable || !isDue(payout.scheduled_for)) continue
 
     dispatchPayout(db, payout)
     if (payout.status === 'paid') result.paid += 1
     if (payout.status === 'frozen') result.frozen += 1
+    if (payout.status === 'held_for_review') result.held_for_review += 1
   }
+
+  result.webhooks_delivered = deliverPending(db).delivered
 
   return result
 }
@@ -695,31 +921,151 @@ export function computeRailBalances(db: MockDb, tenantId: string): RailBalance[]
 // Reconciliation
 // ---------------------------------------------------------------------------
 
+/** Key into `provider_drift` — one rail, one currency, one tenant. */
+export function driftKey(
+  tenantId: string,
+  provider: Provider,
+  currency: Currency,
+): string {
+  return `${tenantId}:${provider}:${currency}`
+}
+
+/**
+ * What the provider says it is holding for this tenant on this rail.
+ *
+ * In the real system this is an API call — Flutterwave's `/balances`, Stripe's
+ * balance endpoint. Here it is our own number plus whatever drift the dev panel
+ * injected, which is the same shape of answer: something computed elsewhere
+ * that we have to agree with.
+ */
+function providerReportedBalance(
+  db: MockDb,
+  tenantId: string,
+  rail: RailBalance,
+): number {
+  const expected = rail.held + rail.pending_clearance + rail.available
+  return expected + (db.provider_drift[driftKey(tenantId, rail.provider, rail.currency)] ?? 0)
+}
+
+/**
+ * The reconciliation cron: compare every rail's ledger balance against what the
+ * provider reports, and freeze payouts on any mismatch.
+ *
+ * "Ledger balance" here means everything still sitting with the provider —
+ * held, plus released money inside its clearance window, plus cleared money not
+ * yet sent. Paid-out money has left. Release is a move between our buckets, not
+ * a movement of funds, which is why it cannot be read off the ledger's signs
+ * directly.
+ *
+ * Freezing is automatic; unfreezing is not. A mismatch means we cannot explain
+ * where money is, and the safe response is to stop sending it — but resuming
+ * is a judgement about whether it has been explained, which is a person's call.
+ */
+export function runReconciliation(db: MockDb, tenantId?: string): ReconciliationAlert[] {
+  const tenants = tenantId
+    ? db.tenants.filter((t) => t.id === tenantId)
+    : db.tenants
+  const touched: ReconciliationAlert[] = []
+
+  for (const tenant of tenants) {
+    let raisedNew = false
+
+    for (const rail of computeRailBalances(db, tenant.id)) {
+      const ledgerBalance = rail.held + rail.pending_clearance + rail.available
+      const providerBalance = providerReportedBalance(db, tenant.id, rail)
+      const drift = providerBalance - ledgerBalance
+
+      const open = db.alerts.find(
+        (a) =>
+          a.tenant_id === tenant.id &&
+          a.provider === rail.provider &&
+          a.currency === rail.currency &&
+          a.resolved_at === null,
+      )
+
+      if (drift === 0) {
+        // The books agree again. Close the alert, but leave the freeze — the
+        // drift going away is not the same as someone having understood it.
+        if (open) {
+          open.resolved_at = nowIso()
+          open.ledger_balance = ledgerBalance
+          open.provider_balance = providerBalance
+          open.drift = 0
+          open.resolution_note = 'Balances agree on a later pass'
+          audit(db, tenant.id, null, 'system', 'reconciliation.cleared', {
+            provider: rail.provider,
+            currency: rail.currency,
+          })
+          touched.push(open)
+        }
+        continue
+      }
+
+      if (open) {
+        // Same disagreement, still there. One alert per rail, refreshed —
+        // a new row every pass would bury the first report under a hundred
+        // copies of itself.
+        open.ledger_balance = ledgerBalance
+        open.provider_balance = providerBalance
+        open.drift = drift
+        open.last_seen_at = nowIso()
+        touched.push(open)
+        continue
+      }
+
+      const alert: ReconciliationAlert = {
+        id: nextId('rec'),
+        tenant_id: tenant.id,
+        provider: rail.provider,
+        currency: rail.currency,
+        ledger_balance: ledgerBalance,
+        provider_balance: providerBalance,
+        drift,
+        detected_at: nowIso(),
+        last_seen_at: nowIso(),
+        resolved_at: null,
+        resolution_note: null,
+      }
+      db.alerts.push(alert)
+      touched.push(alert)
+      raisedNew = true
+
+      audit(db, tenant.id, null, 'system', 'reconciliation.mismatch', {
+        provider: rail.provider,
+        currency: rail.currency,
+        ledger_balance: ledgerBalance,
+        provider_balance: providerBalance,
+        drift,
+        action: 'payouts frozen',
+      })
+    }
+
+    if (raisedNew && tenant.status === 'active') {
+      tenant.status = 'payouts_frozen'
+      audit(db, tenant.id, null, 'system', 'tenant.payouts_frozen', {
+        reason: 'Reconciliation found a balance we cannot explain',
+      })
+    }
+  }
+
+  return touched
+}
+
+/**
+ * Dev-panel lever: make a provider disagree with us.
+ *
+ * It sets the disagreement and then runs the real job, rather than writing an
+ * alert directly. That distinction is the point of the exercise — the thing
+ * being demonstrated is that the job *finds* drift, not that we can display an
+ * alert we invented.
+ */
 export function injectDrift(db: MockDb, tenantId: string, amount: number): void {
-  const balances = computeBalances(db, tenantId)
-  const first = balances.find((b) => b.held > 0) ?? balances[0]
-  const currency: Currency = first?.currency ?? 'RWF'
-  const ledgerBalance = first?.held ?? 0
+  const rails = computeRailBalances(db, tenantId)
+  const rail = rails.find((r) => r.held > 0) ?? rails[0]
+  if (!rail) return
 
-  db.alerts.push({
-    id: nextId('rec'),
-    tenant_id: tenantId,
-    currency,
-    ledger_balance: ledgerBalance,
-    provider_balance: ledgerBalance + amount,
-    drift: amount,
-    detected_at: nowIso(),
-    resolved_at: null,
-  })
-
-  const tenant = db.tenants.find((t) => t.id === tenantId)
-  if (tenant) tenant.status = 'payouts_frozen'
-
-  audit(db, tenantId, null, 'system', 'reconciliation.mismatch', {
-    drift: amount,
-    currency,
-    action: 'payouts frozen',
-  })
+  db.provider_drift[driftKey(tenantId, rail.provider, rail.currency)] = amount
+  runReconciliation(db, tenantId)
 }
 
 /** Convenience for callers that already hold the singleton. */

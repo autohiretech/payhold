@@ -4,7 +4,12 @@
  */
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { api, isSimulated, type DealListFilter } from '@/api'
+import {
+  api,
+  isSimulated,
+  type DealListFilter,
+  type WebhookDeliveryFilter,
+} from '@/api'
 
 export const keys = {
   tenant: ['tenant'] as const,
@@ -20,7 +25,14 @@ export const keys = {
   railStatus: ['rail-status'] as const,
   providerRequirements: ['provider-requirements'] as const,
   webhooks: ['webhook-endpoints'] as const,
+  webhookDeliveries: (filter?: WebhookDeliveryFilter) =>
+    ['webhook-deliveries', filter ?? {}] as const,
+  riskSignals: (dealId?: string) => ['risk-signals', dealId ?? 'all'] as const,
   audit: (dealId?: string) => ['audit', dealId ?? 'all'] as const,
+  aiSuggestions: (dealId?: string) => ['ai-suggestions', dealId ?? 'all'] as const,
+  aiChat: ['ai-chat'] as const,
+  aiUsage: ['ai-usage'] as const,
+  dealOutcomes: ['deal-outcomes'] as const,
   tenants: ['admin', 'tenants'] as const,
   alerts: ['admin', 'alerts'] as const,
 }
@@ -69,6 +81,70 @@ export const useLedger = (dealId?: string) =>
 
 export const useAudit = (dealId?: string) =>
   useQuery({ queryKey: keys.audit(dealId), queryFn: () => api.listAuditLog(dealId) })
+
+export const useWebhookEndpoints = () =>
+  useQuery({ queryKey: keys.webhooks, queryFn: () => api.listWebhookEndpoints() })
+
+export const useWebhookDeliveries = (filter?: WebhookDeliveryFilter) =>
+  useQuery({
+    queryKey: keys.webhookDeliveries(filter),
+    queryFn: () => api.listWebhookDeliveries(filter),
+  })
+
+/** What the deterministic rules noticed — advisory context, or a live hold. */
+export const useRiskSignals = (dealId?: string) =>
+  useQuery({
+    queryKey: keys.riskSignals(dealId),
+    queryFn: () => api.listRiskSignals(dealId),
+  })
+
+// -- Intelligence -----------------------------------------------------------
+
+export const useAiSuggestions = (dealId?: string) =>
+  useQuery({
+    queryKey: keys.aiSuggestions(dealId),
+    queryFn: () => api.listAiSuggestions(dealId),
+  })
+
+export const useAiChat = () =>
+  useQuery({ queryKey: keys.aiChat, queryFn: () => api.listAiChat() })
+
+export const useAiUsage = () =>
+  useQuery({ queryKey: keys.aiUsage, queryFn: () => api.getAiUsage() })
+
+export const useDealOutcomes = () =>
+  useQuery({ queryKey: keys.dealOutcomes, queryFn: () => api.listDealOutcomes() })
+
+/**
+ * Drafting and chatting are not money moves, so they invalidate narrowly:
+ * suggestions, the transcript and the spend meter, and nothing else. A screen
+ * refreshing its deal list because someone asked a question would be a small
+ * lie about what just happened.
+ */
+export function useAiMutation<TArgs, TResult>(fn: (args: TArgs) => Promise<TResult>) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: fn,
+    onSuccess: () => {
+      // The bare prefix catches the per-deal keys as well as the all-deals one.
+      qc.invalidateQueries({ queryKey: ['ai-suggestions'] })
+      qc.invalidateQueries({ queryKey: keys.aiChat })
+      qc.invalidateQueries({ queryKey: keys.aiUsage })
+    },
+  })
+}
+
+/** Same, for drafts that take no arguments. */
+export function useAiAction<TResult>(fn: () => Promise<TResult>) {
+  const qc = useQueryClient()
+  return useMutation<TResult, Error, void>({
+    mutationFn: fn,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['ai-suggestions'] })
+      qc.invalidateQueries({ queryKey: keys.aiUsage })
+    },
+  })
+}
 
 /**
  * Money moves touch several views at once — a release changes the deal, the

@@ -1,10 +1,12 @@
-"""Generate src/lib/countries.ts — the world registry.
+"""Generate the world registry, for both the dashboard and the backend.
 
 Data sources (checked August 2026):
   Stripe fully-supported countries : stripe.com/global
   Flutterwave channels + currencies: flutterwave.com/gb/support/payment-methods/payment-channels
   Flutterwave mobile money         : flutterwave.com/mw/support/payment-methods/pay-with-mobile-money
 """
+
+from pathlib import Path
 
 # (code, name, currency, region)
 COUNTRIES = [
@@ -269,7 +271,14 @@ def ts_string(value: str) -> str:
     return "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
 
 
-def main() -> None:
+def render(backend: bool) -> str:
+    """One registry, two consumers.
+
+    The dashboard and the backend both need to know which markets exist and
+    what each provider can do there. Emitting the file twice from one generator
+    is the only arrangement where they cannot disagree — a hand-copied second
+    copy drifts the first time coverage changes.
+    """
     codes = [row[0] for row in COUNTRIES]
     assert len(codes) == len(set(codes)), "duplicate country code"
 
@@ -345,19 +354,31 @@ def main() -> None:
     w("]")
     w("")
 
-    w("/** ISO-3166 alpha-2 for every country PayHold knows about. */")
-    w("export type Country =")
-    for i in range(0, len(codes), 10):
-        chunk = " | ".join(ts_string(code) for code in codes[i : i + 10])
-        w(f"  | {chunk}")
-    w("")
+    if backend:
+        # The backend deliberately does not narrow these to unions. Its
+        # `types.ts` types every country and currency as `string` and validates
+        # membership at the edge, the same way the SQL `country_code` and
+        # `currency_code` domains do — a request body arrives as a string, and
+        # a union here would only move the cast somewhere less visible.
+        w("/** Widened on purpose — see the note in _shared/types.ts. */")
+        w("export type Country = string")
+        w("")
+        w("export type Currency = string")
+        w("")
+    else:
+        w("/** ISO-3166 alpha-2 for every country PayHold knows about. */")
+        w("export type Country =")
+        for i in range(0, len(codes), 10):
+            chunk = " | ".join(ts_string(code) for code in codes[i : i + 10])
+            w(f"  | {chunk}")
+        w("")
 
-    w("/** ISO-4217 for every currency any of those countries uses. */")
-    w("export type Currency =")
-    for i in range(0, len(currencies), 10):
-        chunk = " | ".join(ts_string(cur) for cur in currencies[i : i + 10])
-        w(f"  | {chunk}")
-    w("")
+        w("/** ISO-4217 for every currency any of those countries uses. */")
+        w("export type Currency =")
+        for i in range(0, len(currencies), 10):
+            chunk = " | ".join(ts_string(cur) for cur in currencies[i : i + 10])
+            w(f"  | {chunk}")
+        w("")
 
     w("export const COUNTRIES: CountryInfo[] = [")
     current_region = None
@@ -413,9 +434,27 @@ export function countriesByRegion(): { region: string; countries: CountryInfo[] 
 }
 ''')
 
-    text = "\n".join(out) + "\n"
-    with open("src/lib/countries.ts", "w") as fh:
-        fh.write(text)
+    return "\n".join(out) + "\n"
+
+
+# Run from the repo root that contains both packages, or from the dashboard.
+TARGETS = [
+    ("payhold-dashboard/src/lib/countries.ts", False),
+    ("payhold-backend/supabase/functions/_shared/countries.ts", True),
+]
+
+
+def main() -> None:
+    root = Path(__file__).resolve().parents[2]
+    codes = [row[0] for row in COUNTRIES]
+    currencies = sorted({row[2] for row in COUNTRIES} | {"USD", "EUR", "GBP"})
+
+    for relative, backend in TARGETS:
+        path = root / relative
+        if not path.parent.is_dir():
+            raise SystemExit(f"missing output directory: {path.parent}")
+        path.write_text(render(backend))
+        print(f"wrote {relative}")
 
     print(f"{len(COUNTRIES)} countries, {len(currencies)} currencies")
     print(f"  stripe payout   : {len(STRIPE_PAYOUT)}")

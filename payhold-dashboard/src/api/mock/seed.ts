@@ -12,14 +12,18 @@
  */
 
 import type {
+  AiChatMessage,
+  AiSuggestion,
   ApiKey,
   AuditLogEntry,
   ConfirmSide,
   Country,
   Currency,
   Deal,
+  DealOutcome,
   DealStatus,
   Dispute,
+  DisputeEvidence,
   LedgerEntry,
   PaymentMethod,
   Payout,
@@ -31,6 +35,17 @@ import type {
   TenantSettings,
   WebhookEndpoint,
 } from '../types'
+import { AI_META, composeDisputeDraft, hashInput } from './ai'
+import {
+  BUMPER_AT_RETURN,
+  BUMPER_CLOSE_UP,
+  CANCELLATION_MESSAGE,
+  DEPOT_GATE_LOG,
+  MECHANIC_INVOICE,
+  PANEL_BEATER_QUOTE,
+  PICKUP_WIDE,
+  PRE_HIRE_CHECKLIST,
+} from './evidence-photos'
 import { collectionRails, defaultProviderFor, providerFor } from '@/lib/rails'
 import { SCHEMA_VERSION, addDays, type MockDb } from './store'
 
@@ -74,6 +89,10 @@ export function seedDb(): MockDb {
       auto_release_days: 3,
       // Rwanda is home; KES covers the Kenya expansion, USD the tourist trade.
       currencies: ['RWF', 'USD', 'KES'],
+      ai_enabled: true,
+      ai_monthly_budget_usd: 25_00,
+      risk_rules_enabled: true,
+      risk_review_threshold_usd: 1_000_00,
     },
     {
       tenant_id: EQUIPCO,
@@ -82,6 +101,16 @@ export function seedDb(): MockDb {
       clearance_days: 5,
       auto_release_days: 4,
       currencies: ['RWF'],
+      // Deliberately off, so switching tenant in the dev panel shows what a
+      // company without Intelligence looks like: no drafts, no chat, and every
+      // money path behaving exactly as it does for AutoHire.
+      ai_enabled: false,
+      ai_monthly_budget_usd: 10_00,
+      // Equipment hire moves larger sums less often, so the same absolute
+      // threshold would hold every payout they make. Their number is their
+      // own, which is the §17 promise: a limit is a setting, not a deploy.
+      risk_rules_enabled: true,
+      risk_review_threshold_usd: 5_000_00,
     },
   ]
 
@@ -159,6 +188,35 @@ export function seedDb(): MockDb {
   const payouts: Payout[] = []
   const audit: AuditLogEntry[] = []
   const disputes: Dispute[] = []
+  const deal_outcomes: DealOutcome[] = []
+  const ai_suggestions: AiSuggestion[] = []
+
+  /**
+   * A dispute with both sides on the record.
+   *
+   * The fixtures give the assistant something real to weigh: a statement from
+   * each party and the evidence they submitted, timestamped. The three seeded
+   * cases are chosen to produce all three recommendations — one that clearly
+   * favours the seller, one that clearly favours the buyer, and one the
+   * evidence genuinely splits, which has to come back "ask a person".
+   */
+  interface DisputeSpec {
+    raised_by: ConfirmSide
+    reason: string
+    counter_statement?: string
+    /** `day` is days after the deal was created. */
+    evidence?: {
+      side: ConfirmSide
+      kind: 'photo' | 'document'
+      description: string
+      /** Served by the client site; PayHold holds the reference, not the file. */
+      url: string | null
+      day: number
+    }[]
+    /** Seed it already closed, the way a past case would be. */
+    resolved?: 'released' | 'refunded'
+    resolution_note?: string
+  }
 
   interface DealSpec {
     tenant_id: string
@@ -181,7 +239,7 @@ export function seedDb(): MockDb {
     /** Days ago the payout was actually sent, for paid_out deals. */
     paid?: number
     payout_failed?: boolean
-    dispute_reason?: string
+    dispute?: DisputeSpec
   }
 
   const specs: DealSpec[] = [
@@ -378,6 +436,32 @@ export function seedDb(): MockDb {
       amount: 5_400_00,
       status: 'refunded',
       created: 26,
+      // A closed case, so the assistant has history to weigh and the training
+      // set has a label that predates today's demo.
+      dispute: {
+        raised_by: 'buyer',
+        reason:
+          'The host cancelled on the morning of collection and the car was never delivered. Nobody answered the number on the booking.',
+        evidence: [
+          {
+            side: 'buyer',
+            kind: 'photo',
+            description: 'Screenshot of the cancellation message',
+            url: CANCELLATION_MESSAGE,
+            day: 0.5,
+          },
+          {
+            side: 'buyer',
+            kind: 'document',
+            description: 'Call log showing four unanswered calls',
+            url: null,
+            day: 0.7,
+          },
+        ],
+        resolved: 'refunded',
+        resolution_note:
+          'Host cancelled with no notice and offered no replacement vehicle.',
+      },
     },
 
     // --- Disputed -----------------------------------------------------------
@@ -389,7 +473,46 @@ export function seedDb(): MockDb {
       amount: 24_000_00,
       status: 'disputed',
       created: 8,
-      dispute_reason: 'Vehicle returned with damage to the rear bumper.',
+      // The buyer signed off before the seller found the damage — which is
+      // exactly the ordering that should carry weight.
+      confirmed: ['buyer'],
+      dispute: {
+        raised_by: 'seller',
+        reason:
+          'Vehicle returned with a cracked rear bumper and a deep scratch across the tailgate.',
+        counter_statement:
+          'The scratch was there when I collected it — I pointed it out to the yard attendant before I drove off.',
+        evidence: [
+          {
+            side: 'seller',
+            kind: 'photo',
+            description: 'Rear bumper at return, timestamped',
+            url: BUMPER_AT_RETURN,
+            day: 4.0,
+          },
+          {
+            side: 'seller',
+            kind: 'photo',
+            description: 'The crack, close up',
+            url: BUMPER_CLOSE_UP,
+            day: 4.05,
+          },
+          {
+            side: 'seller',
+            kind: 'document',
+            description: 'Panel-beater quote for RWF 180,000',
+            url: PANEL_BEATER_QUOTE,
+            day: 4.2,
+          },
+          {
+            side: 'buyer',
+            kind: 'photo',
+            description: 'One photo taken at pickup, bumper not clearly visible',
+            url: PICKUP_WIDE,
+            day: 4.4,
+          },
+        ],
+      },
     },
     {
       tenant_id: AUTOHIRE,
@@ -399,7 +522,57 @@ export function seedDb(): MockDb {
       amount: 13_000_00,
       status: 'disputed',
       created: 12,
-      dispute_reason: 'Buyer says the vehicle was never delivered.',
+      // The seller has stayed silent, which is the whole case.
+      dispute: {
+        raised_by: 'buyer',
+        reason:
+          'The pickup was never delivered. Nobody arrived at the depot and no one answered the number on the booking.',
+        evidence: [
+          {
+            side: 'buyer',
+            kind: 'document',
+            description: 'Depot gate log showing no vehicle arrived that day',
+            url: DEPOT_GATE_LOG,
+            day: 2.4,
+          },
+        ],
+      },
+    },
+    {
+      tenant_id: AUTOHIRE,
+      seller_id: 'sel_0006',
+      buyer_ref: 'bk_9a91',
+      description: 'Mazda Demio — 3 days, Nakuru',
+      amount: 19_000_00,
+      currency: 'KES',
+      method: 'mobile_money',
+      status: 'disputed',
+      created: 7,
+      // Both sides answered, both submitted something, neither is ahead. This
+      // is the case that has to come back "ask a person" rather than guess.
+      dispute: {
+        raised_by: 'buyer',
+        reason:
+          'Car overheated on the second day and I lost half a day of the trip waiting for a mechanic.',
+        counter_statement:
+          'The coolant was topped up before collection. The renter drove 400km on a hire booked for town use.',
+        evidence: [
+          {
+            side: 'buyer',
+            kind: 'document',
+            description: 'Mechanic invoice from Nakuru, dated day two',
+            url: MECHANIC_INVOICE,
+            day: 2.2,
+          },
+          {
+            side: 'seller',
+            kind: 'document',
+            description: 'Pre-hire checklist signed at collection',
+            url: PRE_HIRE_CHECKLIST,
+            day: 2.8,
+          },
+        ],
+      },
     },
 
     // --- Second tenant ------------------------------------------------------
@@ -567,20 +740,83 @@ export function seedDb(): MockDb {
       })
     }
 
-    if (spec.dispute_reason) {
-      const openedAt = addDays(createdAt, 3.2)
+    if (spec.dispute) {
+      const d = spec.dispute
+      // A dispute always follows whatever confirmations came before it — the
+      // ordering is the evidence, so getting it wrong here would quietly teach
+      // the assistant the opposite of what the fixture means.
+      const lastConfirmation = deal.confirmations.at(-1)?.confirmed_at
+      const openedAt = lastConfirmation
+        ? addDays(lastConfirmation, 0.3)
+        : addDays(createdAt, 3.2)
+      const resolvedAt = d.resolved ? addDays(createdAt, 5) : null
+
+      const evidence: DisputeEvidence[] = (d.evidence ?? []).map((e) => ({
+        side: e.side,
+        kind: e.kind,
+        description: e.description,
+        url: e.url,
+        submitted_at: addDays(createdAt, e.day),
+      }))
+
+      const disputeId = id('dsp')
       disputes.push({
-        id: id('dsp'),
+        id: disputeId,
         tenant_id: spec.tenant_id,
         deal_id: dealId,
-        raised_by: spec.description.includes('never delivered') ? 'buyer' : 'seller',
-        reason: spec.dispute_reason,
-        status: 'open',
+        raised_by: d.raised_by,
+        reason: d.reason,
+        counter_statement: d.counter_statement ?? null,
+        evidence,
+        status: !d.resolved
+          ? 'open'
+          : d.resolved === 'released'
+            ? 'resolved_released'
+            : 'resolved_refunded',
         opened_at: openedAt,
-        resolved_at: null,
-        resolution_note: null,
+        resolved_at: resolvedAt,
+        resolution_note: d.resolution_note ?? null,
       })
-      log('system', 'deal.disputed', openedAt, { reason: spec.dispute_reason })
+      log(`user:${d.raised_by}`, 'deal.disputed', openedAt, { reason: d.reason })
+      for (const e of evidence) {
+        log(`user:${e.side}`, 'dispute.evidence_submitted', e.submitted_at, {
+          description: e.description,
+        })
+      }
+
+      if (d.resolved && resolvedAt) {
+        log('payhold-staff', 'dispute.resolved', resolvedAt, {
+          resolution: d.resolved === 'released' ? 'release' : 'refund',
+          note: d.resolution_note,
+        })
+        deal_outcomes.push({
+          id: id('out'),
+          tenant_id: spec.tenant_id,
+          deal_id: dealId,
+          outcome: d.resolved === 'released' ? 'dispute_released' : 'dispute_refunded',
+          reason_code: `dispute_${d.raised_by}_raised`,
+          notes: d.resolution_note ?? null,
+          amount_disputed: spec.amount,
+          resolved_at: resolvedAt,
+          created_at: resolvedAt,
+        })
+      }
+    } else if (spec.status === 'paid_out' || spec.status === 'refunded') {
+      // Every terminal deal gets a label, not just the interesting ones — a
+      // training set of nothing but disputes teaches a model that every deal
+      // goes wrong.
+      const at = spec.paid ? ago(spec.paid) : addDays(createdAt, 2)
+      deal_outcomes.push({
+        id: id('out'),
+        tenant_id: spec.tenant_id,
+        deal_id: dealId,
+        outcome: spec.status === 'refunded' ? 'refunded' : 'released_clean',
+        reason_code: spec.status === 'refunded' ? 'client_refund' : 'both_confirmed',
+        notes: null,
+        amount_disputed: null,
+        resolved_at: at,
+        created_at: at,
+      })
     }
 
     // Payouts exist for anything that released and cleared.
@@ -607,6 +843,9 @@ export function seedDb(): MockDb {
           ? 'Beneficiary rejected: MoMo account not active'
           : null,
         attempts: spec.payout_failed ? 3 : paidAt ? 1 : 0,
+        review_held_at: null,
+        review_approved_by: null,
+        review_approved_at: null,
       })
 
       if (paidAt) {
@@ -620,6 +859,109 @@ export function seedDb(): MockDb {
       }
     }
   }
+
+  /**
+   * A payout destination that moved days before a payout is due. Nothing is
+   * wrong with it — sellers change phones — but it is the single line a human
+   * most wants surfaced before they approve, so the risk narrator has a real
+   * row to cite rather than an invented one.
+   */
+  audit.push({
+    id: id('aud'),
+    tenant_id: AUTOHIRE,
+    deal_id: null,
+    actor: 'api:autohire-prod',
+    action: 'seller.destination_updated',
+    details: {
+      seller_id: 'sel_0001',
+      masked_destination: 'MTN •••• 4821',
+      previous: 'MTN •••• 1190',
+    },
+    created_at: ago(1),
+  })
+
+  /**
+   * Two drafts, produced by running the real drafting code over the fixtures
+   * rather than by hand — so the demo opens with something to decide, and the
+   * seeded wording can never drift from what the button produces.
+   *
+   * One is waiting on a person. The other was approved days ago, so the trail
+   * is visible from the first minute: a suggestion, the named human who took
+   * it, and the labelled outcome that followed.
+   */
+  const draftView = { deals, disputes, sellers, audit } as MockDb
+
+  const draftFor = (
+    dispute: Dispute,
+    at: string,
+    decided?: { by: string; at: string },
+  ) => {
+    const { output, input } = composeDisputeDraft(draftView, dispute)
+    const suggestionId = id('ais')
+
+    ai_suggestions.push({
+      id: suggestionId,
+      tenant_id: dispute.tenant_id,
+      deal_id: dispute.deal_id,
+      kind: 'dispute_resolution',
+      model: AI_META.model,
+      prompt_version: AI_META.prompt.dispute,
+      input_hash: hashInput(input),
+      output,
+      cost_usd: AI_META.cost.dispute,
+      created_at: at,
+      decision: decided ? 'approved' : null,
+      decided_by: decided?.by ?? null,
+      decided_at: decided?.at ?? null,
+    })
+
+    audit.push({
+      id: id('aud'),
+      tenant_id: dispute.tenant_id,
+      deal_id: dispute.deal_id,
+      actor: `ai:${AI_META.model}`,
+      action: 'ai.suggestion_drafted',
+      details: {
+        suggestion_id: suggestionId,
+        kind: 'dispute_resolution',
+        prompt_version: AI_META.prompt.dispute,
+        cost_usd: AI_META.cost.dispute,
+      },
+      created_at: at,
+    })
+
+    if (decided) {
+      audit.push({
+        id: id('aud'),
+        tenant_id: dispute.tenant_id,
+        deal_id: dispute.deal_id,
+        actor: decided.by,
+        action: 'ai.suggestion_approved',
+        details: { suggestion_id: suggestionId, kind: 'dispute_resolution' },
+        created_at: decided.at,
+      })
+    }
+  }
+
+  const waiting = disputes.find(
+    (d) => d.status === 'open' && d.reason.includes('bumper'),
+  )
+  if (waiting) draftFor(waiting, ago(0.08))
+
+  const closedDispute = disputes.find((d) => d.status === 'resolved_refunded')
+  if (closedDispute?.resolved_at) {
+    draftFor(closedDispute, addDays(closedDispute.resolved_at, -0.05), {
+      by: 'grace@autohire.rw',
+      at: closedDispute.resolved_at,
+    })
+  }
+
+  /**
+   * No transcript. The assistant shows nothing until it is asked something —
+   * a panel that opens already full of this account's business is noise at
+   * best, and at worst it looks like something happened while you were away.
+   */
+  const ai_chat: AiChatMessage[] = []
 
   const api_keys: ApiKey[] = [
     {
@@ -660,11 +1002,18 @@ export function seedDb(): MockDb {
     },
   ]
 
-  const webhook_endpoints: WebhookEndpoint[] = [
+  /**
+   * The secret is here because this file stands in for the backend, where it
+   * lives encrypted in `webhook_endpoints.secret_encrypted`. It never leaves
+   * the mock: the client returns `masked_secret`, and the only code that reads
+   * the real value is the signer.
+   */
+  const webhook_endpoints: (WebhookEndpoint & { secret: string })[] = [
     {
       id: id('whe'),
       tenant_id: AUTOHIRE,
       url: 'https://autohiretech.pages.dev/api/payhold-events',
+      secret: 'whsec_demo_autohire_signing_key_3f21',
       masked_secret: 'whsec_••••••••••••3f21',
       created_at: ago(210),
       disabled_at: null,
@@ -673,6 +1022,7 @@ export function seedDb(): MockDb {
       id: id('whe'),
       tenant_id: EQUIPCO,
       url: 'https://rwandaequipment.rw/hooks/payhold',
+      secret: 'whsec_demo_equipco_signing_key_9ab4',
       masked_secret: 'whsec_••••••••••••9ab4',
       created_at: ago(46),
       disabled_at: null,
@@ -687,18 +1037,19 @@ export function seedDb(): MockDb {
    */
   const provider_accounts: (ProviderAccount & { tenant_id: string })[] = []
 
-  const alerts: ReconciliationAlert[] = [
-    {
-      id: id('rec'),
-      tenant_id: EQUIPCO,
-      currency: 'RWF',
-      ledger_balance: 38_000_00,
-      provider_balance: 38_250_00,
-      drift: 25_000,
-      detected_at: ago(0.4),
-      resolved_at: null,
-    },
-  ]
+  /**
+   * No alert is seeded. What is seeded is the *disagreement*: Flutterwave is
+   * reporting 250.00 RWF more than Rwanda Equipment's ledger accounts for, and
+   * the first reconciliation pass discovers it and freezes their payouts.
+   *
+   * Handing the dashboard a pre-written alert would have demonstrated the
+   * alert component. This demonstrates the job.
+   */
+  const alerts: ReconciliationAlert[] = []
+
+  const provider_drift: Record<string, number> = {
+    [`${EQUIPCO}:flutterwave:RWF`]: 25_000,
+  }
 
   return {
     version: SCHEMA_VERSION,
@@ -714,9 +1065,16 @@ export function seedDb(): MockDb {
     api_keys,
     provider_accounts,
     webhook_endpoints,
+    webhook_deliveries: [],
     audit,
     alerts,
+    risk_signals: [],
+    ai_suggestions,
+    ai_chat,
+    deal_outcomes,
     fail_next_payout: false,
+    fail_next_webhook: false,
+    provider_drift,
     id_counter: counter,
   }
 }

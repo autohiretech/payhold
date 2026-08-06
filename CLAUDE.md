@@ -59,6 +59,13 @@ created → funded_held → confirmed_buyer / confirmed_seller → released
         ↘ refunded        ↘ disputed
 ```
 
+**Refunds are all-or-nothing in v1.** There is no partial-refund primitive, and
+that is a design decision rather than an omission: it is why the dispute
+assistant returns `escalate` instead of a split, and why `refund_deal` takes a
+reason and no amount. Anything describing PayHold as doing "full/partial"
+refunds is wrong and should be corrected to "full refunds". (Security deposits
+*are* partially capturable — that is `capture_deposit`, a different thing.)
+
 ## Invariants — every money path must satisfy all of these
 
 1. **Service-role only.** All money writes happen in Edge Functions using the
@@ -82,6 +89,14 @@ created → funded_held → confirmed_buyer / confirmed_seller → released
 9. **AI advises, never decides.** Model output is a suggestion. It runs on a
    read-only role and can only be executed by a human approval or a
    deterministic rule. No AI code path calls a money function.
+10. **Notified.** Every state transition queues a signed webhook to each of the
+    tenant's registered endpoints, in the same transaction as the transition. A
+    client endpoint being down can never fail a release — delivery is a
+    separate, retrying pass.
+11. **Rules stop, people send.** The deterministic risk rules may hold a payout
+    for review and may do nothing else. They cannot release, refund or send, so
+    a wrong rule costs a seller a wait rather than money. Only a person clears
+    a hold, and the approval is recorded against them.
 
 ## Secrets and PII
 
@@ -115,7 +130,9 @@ Flutterwave.** Adding Paystack/DPO later = one new class + one webhook function
 `service_fee_rate` (default 0.10), `buyer_fee` (optional), `clearance_days`
 (default 7), `auto_release_days` (default 3), `currencies`, `ai_enabled`
 (default true), `ai_monthly_budget_usd`, `ai_dispute_assistant`,
-`ai_risk_narrator`.
+`ai_risk_narrator`, `risk_rules_enabled` (default true),
+`risk_review_threshold_usd` (default $1,000, converted to the payout currency
+at compare time).
 
 In-flight deals keep the settings they were created with. Settings changes apply
 to new deals only.
@@ -128,13 +145,42 @@ Auth: `X-Api-Key`, hashed at rest, rate-limited per key.
 |---|---|
 | `POST /v1/deals` | Create deal → returns deal id + payment link |
 | `GET /v1/deals/:id` | Full status, timestamps, amounts |
+| `POST /v1/deals/:id/pay` | Start the charge on the rail the buyer's method implies |
 | `POST /v1/deals/:id/confirm` | `side=buyer\|seller` + end-user token; both → atomic release |
 | `POST /v1/deals/:id/refund` | Client-initiated, pre-release, policy-checked |
 | `POST /v1/deals/:id/deposit` `/capture` `/release` | Card pre-auth deposit lifecycle |
+| `GET /v1/payment-options` | What a buyer in a market can pay with — methods, wallets, card schemes, currencies |
 | `POST /v1/sellers` | Register payout destination → tokenized beneficiary |
 | `GET /v1/balance` | held / pending clearance / available / paid out |
 | `POST /v1/webhooks-endpoints` | Client registers their endpoint for signed notifications |
+| `GET /v1/webhook-deliveries` | Every attempt, with status and signature — the answer to "did you tell us?" |
+| `POST /v1/payouts/:id/approve-review` | Clear a risk hold. Person-only, audited against them |
+| `GET /v1/risk-signals` | What the deterministic rules noticed |
 | `/webhooks/flutterwave/:tenant` `/webhooks/stripe/:tenant` | Inbound provider webhooks |
+
+**A client site must never hardcode a payment method.** Which wallets exist in
+Uganda, whether Nigerian cards take Verve, which markets can be paid into and
+which can only be collected from — all of it changes when provider coverage
+changes, and a site with it baked in is wrong the day it does. AutoHire and
+every other tenant ask `/v1/payment-options` and render the answer:
+
+```
+GET /v1/payment-options                       every market, every currency
+GET /v1/payment-options?country=RW            methods, wallets, schemes there
+GET /v1/payment-options?country=IN&currency=RWF&amount=14000000
+                                              …plus "you will be charged $100"
+GET /v1/payment-options?payout_country=RW     can a seller there be paid, and how
+```
+
+Every response carries `rails_verified`. It is **false** until each row has been
+checked against provider documentation and a signed agreement, and a client
+should treat an unverified route as "probably" rather than "yes".
+
+Outbound deliveries carry `PayHold-Signature: t=<unix>,v1=<hmac-sha256>` over
+`<t>.<raw body>`, plus a `PayHold-Event` header. Clients must verify the digest
+**and** bound the age of `t`, or a captured delivery can be replayed at them.
+Failed deliveries retry five times with backoff (1m, 5m, 30m, 2h) and then stop
+and wait for a person.
 
 CORS: dashboard origin only. The API itself is origin-free but key-authenticated.
 
@@ -149,8 +195,9 @@ money path still works.
 Day one, no training data needed:
 
 - **Dispute assistant** — reads both sides' statements, photo descriptions and
-  the full deal history; drafts a suggested resolution (refund / release /
-  split) with the events it cited. An admin approves; the approval executes.
+  the full deal history; drafts a suggested resolution (refund / release, or
+  "needs a person" — there is no split, since v1 has no partial refund) with
+  the events it cited. An admin approves; the approval executes.
 - **Risk narrator** — before a large payout or on a flag, summarises what's
   known about the counterparties ("new seller, 3 deals, one prior dispute,
   payout destination changed yesterday"). Advisory only, never an auto-block.
@@ -173,11 +220,42 @@ risk_signals(id, tenant_id, deal_id, seller_id, signal, value jsonb, created_at)
 Prompts see one tenant's data only. No raw card or full MoMo numbers in these
 tables. The language rule binds model output too.
 
+## Fraud controls (spec §6)
+
+Four layers, and only one of them is allowed to stop anything:
+
+- **3DS** requested on every card charge, and never silently downgraded.
+- **Tokenization** — no raw card or full MoMo number is ever stored.
+- **Radar** on Stripe card charges (pending `StripeProvider`).
+- **Deterministic risk rules**, checked before a payout leaves: a first payout
+  to a seller who registered just before the booking, a jump past 3× anything
+  they have been paid before, a dispute lost in the last 90 days, a deal funded
+  and released within minutes. A rule can hold the payout for review and
+  nothing else. Signals are recorded whether or not the rules are switched on —
+  that history is what a fraud model of our own trains on later (§12.4) and it
+  cannot be backfilled.
+
+The rules are arithmetic over our own tables, which is exactly what lets them
+act at all under invariant 9. The AI risk *narrator* is a separate thing: it
+summarises, it never holds.
+
 ## Cron jobs
 
-Auto-release timer · clearance → payout dispatch · reminders ·
-ledger-vs-provider reconciliation (mismatch → **freeze that tenant's payouts**
-until resolved).
+| Job | Function |
+|---|---|
+| Auto-release timer | still to build |
+| Clearance → payout dispatch | still to build; must call `screen_payout` before transferring |
+| Reminders | still to build |
+| Outbound webhook delivery | `webhook-dispatch` ✅ |
+| Ledger-vs-provider reconciliation | `reconcile` ✅ |
+
+Reconciliation compares **per rail**, not per currency — you cannot ask two
+providers about one number. Any drift **freezes that tenant's payouts**
+automatically. Nothing unfreezes automatically: the numbers agreeing again is
+not the same as someone having understood why they did not.
+
+Scheduled jobs authenticate on `CRON_SECRET`, not an API key. A deployment
+without that secret set refuses to run them.
 
 ## Testing gate before any live traffic
 

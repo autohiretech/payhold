@@ -14,8 +14,55 @@ npm run test:sql             # schema invariants against PGlite — no Docker ne
 npm run test:functions       # Deno tests for crypto and the providers
 npm run typecheck            # deno check across the functions
 npx supabase db push         # apply migrations to the linked project
-npx supabase functions deploy provider-accounts
+npx supabase functions deploy deals payment-options sellers balance \
+                              webhook-endpoints flutterwave-webhook \
+                              provider-accounts webhook-dispatch reconcile
 ```
+
+`deno` must be on `PATH` (`~/.deno/bin` on this machine).
+
+## The v1 endpoints
+
+| Function | Serves |
+|---|---|
+| `deals` | create, list, get, `/pay`, `/confirm`, `/refund`, `/deposit`, `/capture`, `/release-deposit` |
+| `payment-options` | what a buyer in a market can pay with; the catalogue a client renders its checkout from |
+| `sellers` | register a tokenized payout destination, list |
+| `balance` | four buckets per currency, or `?by=rail` |
+| `webhook-endpoints` | register (secret shown once), list, `?deliveries=1`, disable |
+| `flutterwave-webhook` | inbound, at `/flutterwave-webhook/:tenant` |
+| `provider-accounts` | bring-your-own-keys |
+| `webhook-dispatch`, `reconcile` | cron only, `CRON_SECRET` |
+
+`resolveCaller` takes either an `X-Api-Key` or a dashboard JWT, key first. Every
+handler filters on the tenant it resolves, and a row belonging to someone else
+is a 404 — a 403 would confirm it exists.
+
+**The funding path is four steps and none of them are optional.** `POST /deals`
+creates it, `POST /deals/:id/pay` starts the charge on the rail the buyer's
+method implies (this is where a provisional Flutterwave deal becomes a Stripe
+deal), the provider redirects the buyer, and their webhook is what moves the
+deal to `funded_held` — after `flutterwave-webhook` checks the `verif-hash`
+*and* re-fetches the transaction. Starting a charge is not evidence one
+succeeded, so nothing about the deal's state changes at step two.
+
+The amount comparison lives in `fund_deal`, not in TypeScript, because
+"mismatch → disputed, never funded_held" is only a guarantee when the
+comparison and the state write share a transaction. A mismatch still books the
+hold for what actually arrived: the money genuinely reached the provider, and
+omitting the entry would hand the reconciliation pass a drift nobody could
+explain.
+
+## One registry, two repos
+
+`_shared/countries.ts` is generated — by `payhold-dashboard/scripts/gen-countries.py`,
+which writes **both** copies. Do not edit either by hand; edit the generator and
+re-run it. The backend copy widens `Country` and `Currency` to `string`,
+matching `types.ts`, and validates membership at the edge.
+
+`_shared/rails.ts` is the routing built on top of it, and is the deliberate
+mirror of `payhold-dashboard/src/lib/rails.ts` — same rule as `types.ts`, a
+change to either is a change to both in the same commit.
 
 Two test runners, deliberately: the migrations are exercised from Node (PGlite
 is a Node module), the Edge Functions from Deno (they use `Deno.env`, `jsr:`
@@ -26,9 +73,10 @@ never tries to run a `Deno.test` file.
 
 | Secret | Why |
 |---|---|
-| `CREDENTIALS_KEY` | base64 of 32 random bytes. Encrypts every tenant's provider credentials. **Losing it means every tenant must re-enter their keys.** |
+| `CREDENTIALS_KEY` | base64 of 32 random bytes. Encrypts every tenant's provider credentials **and** their webhook signing secrets. **Losing it means every tenant must re-enter their keys and re-register their endpoints.** |
 | `DASHBOARD_ORIGIN` | comma-separated origins allowed to call the API from a browser |
 | `PUBLIC_URL` | where buyers are sent to pay |
+| `CRON_SECRET` | sent by pg_cron as `x-cron-secret`. The scheduled jobs are not tenant-scoped, so no API key may trigger them. Unset means they refuse every caller. |
 
 Set with `npx supabase secrets set NAME=value`. Generate the master key with
 `openssl rand -base64 32`. Nothing falls back to a default — a missing
@@ -144,15 +192,89 @@ any form; the only reader is `loadProvider`, which hands back a
 `PaymentProvider` interface rather than a key. A tenant with no row falls back
 to `FakeProvider`, which is how demo mode stays true.
 
+## Outbound webhooks are queued by triggers, not by the money functions
+
+`enqueue_webhooks` is called from triggers on `deals`, `confirmations`,
+`disputes`, `payouts` and `ledger` — see migration `20260806000001`. The money
+functions do not mention notifications at all.
+
+The tradeoff, stated plainly: reading `release_deal` no longer tells you that a
+client gets told. In exchange, the notification cannot be forgotten by a new
+code path — including a manual correction someone runs by hand at 2am — and
+adding one line to nine functions does not mean restating nine function bodies
+in every future migration. Enqueue is still inside the same transaction as the
+state change, which is the property that actually matters.
+
+Delivery is deliberately *not* in that transaction. `webhook-dispatch` claims a
+batch with `for update skip locked`, signs each with the endpoint's decrypted
+secret, POSTs it, and records the outcome. A client's server being down can
+never fail a release.
+
+**Signing secrets are encrypted, not hashed** (`sealWebhookSecret` /
+`openWebhookSecret`). An API key is only ever compared, so hashing it is
+strictly safer; a signing secret has to be *used* on every delivery.
+`crypto.test.ts` pins the exact header bytes against a digest computed
+independently, and the dashboard mock pins the same construction from the other
+side — a client who develops against the mock must not break on the real API.
+
+## Risk rules live in SQL
+
+`screen_payout` implements them, for the same reason the release guard does: it
+must run in the transaction that then holds the payout. It can set
+`held_for_review` and nothing else — no ledger write, no transfer, no state
+change to the deal. `approve_payout_review` is the only way out, and it takes
+the approver's name because the audit row is about a person's decision.
+
+The payout dispatch cron must call `screen_payout` before it calls the
+provider. That job is not written yet; when it is, that ordering is the point.
+
+## Scheduling the cron jobs
+
+There is no migration for this. `pg_cron` does not exist in PGlite, so a
+migration creating schedules would fail the local harness on every run — and
+scheduling is a deploy-environment concern rather than a schema one.
+
+Against the linked project:
+
+```sql
+create extension if not exists pg_cron;
+create extension if not exists pg_net;
+
+select cron.schedule('payhold-webhooks', '* * * * *', $$
+  select net.http_post(
+    url := 'https://mwnbjjlilqrwdmwutbxr.supabase.co/functions/v1/webhook-dispatch',
+    headers := jsonb_build_object('x-cron-secret', current_setting('payhold.cron_secret'))
+  );
+$$);
+
+select cron.schedule('payhold-reconcile', '0 * * * *', $$
+  select net.http_post(
+    url := 'https://mwnbjjlilqrwdmwutbxr.supabase.co/functions/v1/reconcile',
+    headers := jsonb_build_object('x-cron-secret', current_setting('payhold.cron_secret'))
+  );
+$$);
+```
+
+Set the secret once with `alter database postgres set payhold.cron_secret = '…'`,
+matching the `CRON_SECRET` function secret. Keep it out of the migration files.
+
 ## Not built yet
 
-- Edge Functions for the v1 endpoints (§4) — `provider-accounts` is the only
-  one deployed so far
-- Inbound provider webhooks — signature + re-verify
-- `StripeProvider` (`FlutterwaveProvider` is written; its live calls are
-  unexercised until real keys are connected)
-- Cron jobs: auto-release, clearance → payout, reminders, reconciliation
-- Seed: AutoHire as tenant #1
+- **Cron jobs: auto-release and clearance → payout dispatch.** The two that
+  actually move money on a timer, and the largest remaining gap. The payout one
+  must call `screen_payout` before it calls the provider. Reminders too.
+- **End-user tokens.** Spec §4 has `confirm` taking one, so a buyer can confirm
+  without the client's API key. Today `/pay` and `/confirm` are called by the
+  client's server on the buyer's behalf.
+- **`StripeProvider`** — `loadProvider` throws for it rather than falling back
+  to the fake, because a deal routed to Stripe that silently collected nothing
+  would be worse than a loud failure.
+- **Stripe's inbound webhook.** `flutterwave-webhook` is the pattern to follow.
+- `FlutterwaveProvider`'s live calls are unexercised until real keys are
+  connected — every test to date runs against `FakeProvider` or PGlite.
+- Seed: AutoHire as tenant #1.
+- The dashboard still runs on its mock; `HttpClient` is one file plus one line
+  in `src/api/index.ts`.
 
 The acceptance spec for all of it is
 `payhold-dashboard/src/api/mock/engine.test.ts` — reproduce every one of those

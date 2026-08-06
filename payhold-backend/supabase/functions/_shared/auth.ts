@@ -136,6 +136,26 @@ export async function callerFromJwt(
 }
 
 /**
+ * Resolve whichever kind of caller this is.
+ *
+ * The v1 endpoints serve two populations from one URL: a client's server with
+ * an API key, and the dashboard with a session. `X-Api-Key` wins when present,
+ * because a request carrying one is unambiguously a server-to-server call —
+ * and because falling through to the JWT path on a bad key would report the
+ * wrong reason for the refusal.
+ */
+export async function resolveCaller(
+  db: SupabaseClient,
+  req: Request,
+  tenantId?: string,
+): Promise<Caller> {
+  if (req.headers.get('x-api-key')) {
+    return await callerFromApiKey(db, req)
+  }
+  return await callerFromJwt(db, req, tenantId)
+}
+
+/**
  * Reject a caller who may read but not act.
  *
  * Connecting provider credentials and moving money are owner-level actions;

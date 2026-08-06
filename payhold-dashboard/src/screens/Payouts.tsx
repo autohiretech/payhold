@@ -1,5 +1,7 @@
+import { useState } from 'react'
 import { Link } from 'react-router-dom'
 import { api } from '@/api'
+import { AiSuggestionCard, SparkIcon } from '@/components/ai'
 import {
   Badge,
   Button,
@@ -17,21 +19,48 @@ import {
 import { PAYOUT_STATUS_META, formatMoney, formatRelative } from '@/lib/format'
 import {
   simNow,
+  useAiMutation,
+  useAiSuggestions,
+  useAiUsage,
   useMoneyMutation,
   usePayouts,
+  useRiskSignals,
   useSellers,
   useSettings,
   useTenant,
 } from '@/lib/queries'
+
+/** Who the approval is recorded as. Real auth will supply this. */
+const ME = 'grace@autohire.rw'
 
 export function PayoutsPage() {
   const payouts = usePayouts()
   const sellers = useSellers()
   const settings = useSettings()
   const tenant = useTenant()
+  const signals = useRiskSignals()
   const now = simNow()
 
   const retry = useMoneyMutation((id: string) => api.retryPayout(id))
+  const approve = useMoneyMutation((id: string) => api.approvePayoutReview(id, ME))
+
+  /** The rules that stopped this one, in the words they were written in. */
+  const holdReasons = (dealId: string) =>
+    signals.data?.filter((s) => s.deal_id === dealId && s.severity === 'review') ?? []
+
+  // The risk narrator: a summary of who is about to be paid, on demand,
+  // before a person approves. It reads and writes a suggestion — it has no
+  // say in whether the payout goes.
+  const usage = useAiUsage()
+  const suggestions = useAiSuggestions()
+  const [checking, setChecking] = useState<string | null>(null)
+  const summarise = useAiMutation((dealId: string) => api.draftRiskSummary(dealId))
+  const aiReady = usage.data?.enabled && !usage.data.over_budget
+
+  const summaryFor = (dealId: string) =>
+    suggestions.data?.find(
+      (s) => s.deal_id === dealId && s.output.kind === 'risk_summary',
+    )
 
   const sellerFor = (id: string) => sellers.data?.find((s) => s.id === id)
 
@@ -55,6 +84,12 @@ export function PayoutsPage() {
       {retry.isError && (
         <div className="mb-4">
           <ErrorNote message={retry.error.message} />
+        </div>
+      )}
+
+      {approve.isError && (
+        <div className="mb-4">
+          <ErrorNote message={approve.error.message} />
         </div>
       )}
 
@@ -88,9 +123,15 @@ export function PayoutsPage() {
               </tr>
             </thead>
             <tbody>
-              {payouts.data.map((p) => {
+              {payouts.data.flatMap((p) => {
                 const seller = sellerFor(p.seller_id)
-                return (
+                const summary = summaryFor(p.deal_id)
+                const showSummary = checking === p.deal_id && summary
+                // A hold is not collapsed behind a toggle. It is the one row on
+                // this screen that is waiting on a person, so it says why.
+                const held = p.status === 'held_for_review' ? holdReasons(p.deal_id) : []
+
+                return [
                   <tr key={p.id} className="hover:bg-surface-2">
                     <Td className="font-medium">{seller?.name ?? p.seller_id}</Td>
                     <Td className="text-fg-muted">
@@ -118,7 +159,15 @@ export function PayoutsPage() {
                         : formatRelative(p.scheduled_for, now)}
                     </Td>
                     <Td align="right">
-                      {(p.status === 'failed' || p.status === 'frozen') && (
+                      {p.status === 'held_for_review' ? (
+                        <Button
+                          size="sm"
+                          disabled={approve.isPending}
+                          onClick={() => approve.mutate(p.id)}
+                        >
+                          Approve and send
+                        </Button>
+                      ) : p.status === 'failed' || p.status === 'frozen' ? (
                         <Button
                           size="sm"
                           disabled={retry.isPending}
@@ -126,10 +175,58 @@ export function PayoutsPage() {
                         >
                           Retry
                         </Button>
+                      ) : (
+                        p.status === 'scheduled' &&
+                        aiReady && (
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            disabled={summarise.isPending}
+                            onClick={() => {
+                              setChecking(showSummary ? null : p.deal_id)
+                              if (!summary) summarise.mutate(p.deal_id)
+                            }}
+                          >
+                            <SparkIcon className="size-3.5" />
+                            {showSummary ? 'Hide' : 'Check'}
+                          </Button>
+                        )
                       )}
                     </Td>
-                  </tr>
-                )
+                  </tr>,
+
+                  held.length > 0 && (
+                    <tr key={`${p.id}-held`}>
+                      <td
+                        colSpan={7}
+                        className="border-b border-line bg-pending-soft/40 px-6 py-4"
+                      >
+                        <p className="text-sm font-medium text-fg">
+                          Held by {held.length === 1 ? 'a rule' : `${held.length} rules`}
+                        </p>
+                        <ul className="mt-2 space-y-1">
+                          {held.map((s) => (
+                            <li key={s.id} className="text-sm text-fg-muted">
+                              {s.explanation}
+                            </li>
+                          ))}
+                        </ul>
+                        <p className="mt-2 text-xs text-fg-muted">
+                          Nothing has been sent. Approving records the decision
+                          against you and dispatches the transfer.
+                        </p>
+                      </td>
+                    </tr>
+                  ),
+
+                  showSummary && (
+                    <tr key={`${p.id}-summary`}>
+                      <td colSpan={7} className="border-b border-line bg-surface-2/30 px-6 py-4">
+                        <AiSuggestionCard suggestion={summary} variant="inline" dealLink={false} />
+                      </td>
+                    </tr>
+                  ),
+                ]
               })}
             </tbody>
           </Table>

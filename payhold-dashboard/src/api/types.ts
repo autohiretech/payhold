@@ -153,7 +153,20 @@ export interface Seller {
   created_at: Timestamp
 }
 
-export type PayoutStatus = 'scheduled' | 'processing' | 'paid' | 'failed' | 'frozen'
+/**
+ * `frozen` is the whole account stopped — reconciliation found drift, so
+ * nothing leaves until a person clears it. `held_for_review` is one payout
+ * stopped by a risk rule, and needs one approval rather than an account-wide
+ * decision. They are deliberately separate: the first is an emergency, the
+ * second is a queue.
+ */
+export type PayoutStatus =
+  | 'scheduled'
+  | 'processing'
+  | 'paid'
+  | 'failed'
+  | 'frozen'
+  | 'held_for_review'
 
 export interface Payout {
   id: string
@@ -168,6 +181,49 @@ export interface Payout {
   /** Populated on `failed`; surfaced in the dashboard for triage. */
   failure_reason: string | null
   attempts: number
+  /** When a risk rule stopped it. The signals that did are in `risk_signals`. */
+  review_held_at: Timestamp | null
+  /** Who let it through. A rule can hold a payout; only a person releases one. */
+  review_approved_by: string | null
+  review_approved_at: Timestamp | null
+}
+
+// ---------------------------------------------------------------------------
+// Risk rules — deterministic, and the only automation that may stop money
+// ---------------------------------------------------------------------------
+
+/**
+ * These are rules, not model output, which is what lets them act at all:
+ * invariant 9 bars an AI code path from touching money, and permits a
+ * deterministic rule. Every one of them is computable from our own tables, so
+ * the same inputs always produce the same hold — a decision an operator can
+ * reproduce and argue with.
+ *
+ * And what they do is *stop*, never send. The worst a bug here can cause is a
+ * payout waiting for a human, which is the safe direction to fail in.
+ */
+export type RiskSignalKind =
+  | 'new_seller'
+  | 'prior_dispute'
+  | 'buyer_velocity'
+  | 'large_payout'
+  | 'fast_release'
+
+/** `review` holds the payout. `info` is context for whoever looks. */
+export type RiskSeverity = 'info' | 'review'
+
+export interface RiskSignal {
+  id: string
+  tenant_id: string
+  deal_id: string
+  seller_id: string | null
+  signal: RiskSignalKind
+  severity: RiskSeverity
+  /** The numbers the rule fired on — what makes the hold checkable. */
+  value: Record<string, unknown>
+  /** One line an operator can read without knowing the rule. */
+  explanation: string
+  created_at: Timestamp
 }
 
 // ---------------------------------------------------------------------------
@@ -232,10 +288,28 @@ export interface Dispute {
   deal_id: string
   raised_by: ConfirmSide
   reason: string
+  /** The other side's account, once they give one. Null while they are silent. */
+  counter_statement: string | null
+  /**
+   * What each side submitted. PayHold stores no files — the client site holds
+   * them and sends us a description plus a URL, so a dispute can be reviewed
+   * with the photos in front of you while the images themselves stay theirs.
+   */
+  evidence: DisputeEvidence[]
   status: DisputeStatus
   opened_at: Timestamp
   resolved_at: Timestamp | null
   resolution_note: string | null
+}
+
+export interface DisputeEvidence {
+  side: ConfirmSide
+  kind: 'photo' | 'document'
+  /** What it shows. This, not the image, is what the assistant is given. */
+  description: string
+  /** Where the client site serves it. Null when they sent only a description. */
+  url: string | null
+  submitted_at: Timestamp
 }
 
 // ---------------------------------------------------------------------------
@@ -263,6 +337,25 @@ export interface TenantSettings {
   /** Days after expected completion before auto-release fires. Default 3. */
   auto_release_days: number
   currencies: Currency[]
+  /**
+   * Intelligence (§12). Off means no drafts and no chat — and nothing else.
+   * Every money path behaves identically either way, which is the point.
+   */
+  ai_enabled: boolean
+  /** Monthly ceiling on AI spend. Reaching it degrades to off, never to a block. */
+  ai_monthly_budget_usd: Money
+  /**
+   * The deterministic risk rules (§6). Off means payouts are never held for
+   * review — signals are still recorded, because the history is what a fraud
+   * model of our own is trained on later and it cannot be backfilled.
+   */
+  risk_rules_enabled: boolean
+  /**
+   * Payouts at or above this go to review when a rule also finds something
+   * about the counterparty. In USD minor units and converted at compare time,
+   * so one number covers a tenant paying out in four currencies.
+   */
+  risk_review_threshold_usd: Money
 }
 
 /**
@@ -327,6 +420,65 @@ export interface WebhookEndpoint {
   disabled_at: Timestamp | null
 }
 
+/**
+ * What a client's site is told about, and when.
+ *
+ * The names match the audit actions rather than inventing a second vocabulary:
+ * a client reading their logs beside ours should see the same words.
+ */
+export const WEBHOOK_EVENTS = [
+  'deal.funded_held',
+  'deal.confirmed',
+  'deal.released',
+  'deal.refunded',
+  'deal.disputed',
+  'deal.dispute_resolved',
+  'deal.paid_out',
+  'payout.failed',
+  'payout.held_for_review',
+  'deposit.captured',
+  'deposit.released',
+] as const
+
+export type WebhookEvent = (typeof WEBHOOK_EVENTS)[number]
+
+/** The signed envelope. `data` varies by event; everything else never does. */
+export interface WebhookPayload {
+  event: WebhookEvent
+  deal_id: string | null
+  occurred_at: Timestamp
+  data: Record<string, unknown>
+}
+
+export type WebhookDeliveryStatus = 'pending' | 'delivered' | 'failed'
+
+/**
+ * One attempt to notify one endpoint.
+ *
+ * Kept as a record rather than fire-and-forget because "did you tell us?" is a
+ * question clients ask during an incident, and "we think so" is not an answer.
+ */
+export interface WebhookDelivery {
+  id: string
+  tenant_id: string
+  endpoint_id: string
+  event: WebhookEvent
+  deal_id: string | null
+  payload: WebhookPayload
+  /** Exactly the bytes that were signed and sent. */
+  body: string
+  /** The `X-PayHold-Signature` header value: `t=<iso>,v1=<hex>`. */
+  signature: string
+  status: WebhookDeliveryStatus
+  attempts: number
+  status_code: number | null
+  error: string | null
+  /** Null once delivered or permanently failed. */
+  next_attempt_at: Timestamp | null
+  delivered_at: Timestamp | null
+  created_at: Timestamp
+}
+
 export interface AuditLogEntry {
   id: string
   tenant_id: string
@@ -339,12 +491,165 @@ export interface AuditLogEntry {
 }
 
 // ---------------------------------------------------------------------------
+// Intelligence — advisory only (spec §12)
+// ---------------------------------------------------------------------------
+
+/**
+ * Nothing in this section can move money, and the types are shaped to make
+ * that obvious rather than merely true: a suggestion has no execute method, it
+ * has a `decision`. The decision is made by a person, and the money path it
+ * triggers is the same one that person could have called by hand.
+ */
+
+export type AiSuggestionKind = 'dispute_resolution' | 'risk_summary'
+
+/**
+ * What the dispute assistant can recommend.
+ *
+ * There is no `split`: v1 has no partial-refund primitive, so a case the
+ * evidence genuinely divides is escalated to a human rather than described in
+ * terms the engine cannot execute.
+ */
+export type DisputeRecommendation = 'release' | 'refund' | 'escalate'
+
+/**
+ * A fact the model leaned on, with the row it came from. Citations are the
+ * difference between a summary an admin can check in ten seconds and one they
+ * have to take on trust.
+ */
+export interface CitedEvent {
+  /** An audit_log or ledger id — resolvable, not decorative. */
+  ref: string
+  at: Timestamp
+  label: string
+}
+
+export interface DisputeSuggestionOutput {
+  kind: 'dispute_resolution'
+  recommendation: DisputeRecommendation
+  /** One line, the way a colleague would open: what they'd do and why. */
+  headline: string
+  /** The reasoning, one factor per line. */
+  rationale: string[]
+  cited: CitedEvent[]
+  /** 0–1. Advisory, and deliberately not a threshold anything acts on. */
+  confidence: number
+}
+
+export interface RiskSummaryOutput {
+  kind: 'risk_summary'
+  headline: string
+  points: string[]
+  /** The things worth a second look, if any. Empty is a real answer. */
+  flags: string[]
+  cited: CitedEvent[]
+  confidence: number
+}
+
+export type AiOutput = DisputeSuggestionOutput | RiskSummaryOutput
+
+export type AiDecision = 'approved' | 'rejected'
+
+export interface AiSuggestion {
+  id: string
+  tenant_id: string
+  deal_id: string
+  kind: AiSuggestionKind
+  model: string
+  prompt_version: string
+  /** Hash of exactly what the model was shown, so a decision is reproducible. */
+  input_hash: string
+  output: AiOutput
+  /** What the call cost, in USD minor units. */
+  cost_usd: Money
+  created_at: Timestamp
+  /** Null until a person decides. Nothing happens before that. */
+  decision: AiDecision | null
+  decided_by: string | null
+  decided_at: Timestamp | null
+}
+
+export type AiChatRole = 'user' | 'assistant'
+
+/**
+ * What an answer can show beyond prose.
+ *
+ * Record kinds carry an **id, not a snapshot**, so a card in yesterday's
+ * transcript renders today's truth — a suggestion approved after it was shown
+ * reads as approved, and a deal that has since released says so. Tables are
+ * the exception: a list is an answer about a moment, and freezing it is
+ * honest.
+ */
+export type AiChatAttachment =
+  | { kind: 'suggestion'; id: string }
+  | { kind: 'deal'; id: string }
+  | { kind: 'evidence'; dispute_id: string }
+  | { kind: 'table'; caption?: string; columns: string[]; rows: string[][] }
+
+export interface AiChatMessage {
+  id: string
+  tenant_id: string
+  role: AiChatRole
+  text: string
+  /** Which documents the answer came from. An answer with none is a guess. */
+  sources: string[]
+  attachments: AiChatAttachment[]
+  created_at: Timestamp
+}
+
+/**
+ * The terminal label for a deal — the training set §12.3 exists to accumulate.
+ * These cannot be backfilled, which is why they are written from the first
+ * live deal rather than when a model is finally trained.
+ */
+export type DealOutcomeLabel =
+  | 'released_clean'
+  | 'auto_released'
+  | 'refunded'
+  | 'dispute_released'
+  | 'dispute_refunded'
+
+export interface DealOutcome {
+  id: string
+  tenant_id: string
+  deal_id: string
+  outcome: DealOutcomeLabel
+  reason_code: string
+  notes: string | null
+  /** What was contested, where that differs from the deal amount. */
+  amount_disputed: Money | null
+  resolved_at: Timestamp
+  created_at: Timestamp
+}
+
+/** Spend against budget, and how much labelled history has accumulated. */
+export interface AiUsage {
+  enabled: boolean
+  /** This calendar month's spend, USD minor units. */
+  spend_usd: Money
+  budget_usd: Money
+  /** Budget reached: drafts and chat are off. Money paths are untouched. */
+  over_budget: boolean
+  suggestions_this_month: number
+  labelled_outcomes: number
+}
+
+// ---------------------------------------------------------------------------
 // Master-admin
 // ---------------------------------------------------------------------------
 
+/**
+ * Drift between our ledger and one provider's reported balance.
+ *
+ * Per rail, not per currency: "held" is never one pot, and a Flutterwave RWF
+ * balance and a Stripe USD balance are reconciled against different APIs. An
+ * alert that summed them would be unactionable — you cannot ask two providers
+ * about one number.
+ */
 export interface ReconciliationAlert {
   id: string
   tenant_id: string
+  provider: Provider
   currency: Currency
   /** What our ledger says the provider should be holding. */
   ledger_balance: Money
@@ -353,7 +658,10 @@ export interface ReconciliationAlert {
   /** provider − ledger. Non-zero is the alert. */
   drift: Money
   detected_at: Timestamp
+  /** Refreshed on every pass while the drift persists. */
+  last_seen_at: Timestamp
   resolved_at: Timestamp | null
+  resolution_note: string | null
 }
 
 // ---------------------------------------------------------------------------

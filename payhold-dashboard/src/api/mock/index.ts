@@ -10,10 +10,20 @@
  *      properly instead of assuming instant data.
  */
 
-import type { AdminApi, DealListFilter, PayHoldClient, SimulationApi } from '../client'
+import type {
+  AdminApi,
+  DealListFilter,
+  PayHoldClient,
+  SimulationApi,
+  WebhookDeliveryFilter,
+} from '../client'
 import {
   HOLDING_STATUSES,
   PayHoldError,
+  type AiChatMessage,
+  type AiDecision,
+  type AiSuggestion,
+  type AiUsage,
   type ApiKey,
   type AuditLogEntry,
   type Balance,
@@ -24,6 +34,7 @@ import {
   type CreateSellerInput,
   type Currency,
   type Deal,
+  type DealOutcome,
   type Dispute,
   type LedgerEntry,
   type ConnectProviderInput,
@@ -36,9 +47,11 @@ import {
   type RailStatus,
   type RailBalance,
   type ReconciliationAlert,
+  type RiskSignal,
   type Seller,
   type Tenant,
   type TenantSettings,
+  type WebhookDelivery,
   type WebhookEndpoint,
 } from '../types'
 import {
@@ -51,6 +64,14 @@ import {
 } from '@/lib/rails'
 import { canConvert, convert } from '@/lib/fx'
 import {
+  aiUsage,
+  askAssistant,
+  decideSuggestion,
+  draftDisputeSuggestion,
+  draftRiskSummary,
+} from './ai'
+import {
+  approvePayoutReview,
   audit,
   captureDeposit,
   computeBalances,
@@ -65,8 +86,10 @@ import {
   resolveDispute,
   retryPayout,
   runCron,
+  runReconciliation,
   settingsFor,
 } from './engine'
+import { attemptDelivery } from './webhooks'
 import { seedDb } from './seed'
 import {
   addDays,
@@ -374,6 +397,19 @@ export class MockClient implements PayHoldClient {
     return delay(clone(mutate((db) => retryPayout(db, id))))
   }
 
+  async approvePayoutReview(id: string, approvedBy: string): Promise<Payout> {
+    return delay(clone(mutate((db) => approvePayoutReview(db, id, approvedBy))))
+  }
+
+  async listRiskSignals(dealId?: string): Promise<RiskSignal[]> {
+    const db = getDb()
+    const signals = db.risk_signals
+      .filter((s) => s.tenant_id === db.current_tenant_id)
+      .filter((s) => !dealId || s.deal_id === dealId)
+      .sort((a, b) => b.created_at.localeCompare(a.created_at))
+    return delay(clone(signals))
+  }
+
   // -- Disputes ------------------------------------------------------------
 
   async listDisputes(): Promise<Dispute[]> {
@@ -427,6 +463,18 @@ export class MockClient implements PayHoldClient {
         cfg.auto_release_days = patch.auto_release_days
       }
       if (patch.currencies) cfg.currencies = patch.currencies
+      if (patch.risk_rules_enabled !== undefined) {
+        cfg.risk_rules_enabled = patch.risk_rules_enabled
+      }
+      if (patch.risk_review_threshold_usd !== undefined) {
+        if (patch.risk_review_threshold_usd < 0) {
+          throw new PayHoldError(
+            'policy_violation',
+            'The review threshold cannot be negative',
+          )
+        }
+        cfg.risk_review_threshold_usd = patch.risk_review_threshold_usd
+      }
 
       audit(db, cfg.tenant_id, null, 'dashboard', 'settings.updated', { ...patch })
       return clone(cfg)
@@ -620,9 +668,11 @@ export class MockClient implements PayHoldClient {
 
   async listWebhookEndpoints(): Promise<WebhookEndpoint[]> {
     const db = getDb()
-    const endpoints = db.webhook_endpoints.filter(
-      (w) => w.tenant_id === db.current_tenant_id,
-    )
+    // The signing secret is stripped on the way out, the way the real API
+    // strips it — a screen that could read it would be a screen that leaks it.
+    const endpoints = db.webhook_endpoints
+      .filter((w) => w.tenant_id === db.current_tenant_id)
+      .map(({ secret: _secret, ...endpoint }) => endpoint)
     return delay(clone(endpoints))
   }
 
@@ -634,10 +684,11 @@ export class MockClient implements PayHoldClient {
         Math.floor(Math.random() * 36).toString(36),
       ).join('')}`
 
-      const endpoint: WebhookEndpoint = {
+      const endpoint: WebhookEndpoint & { secret: string } = {
         id: nextId('whe'),
         tenant_id: db.current_tenant_id,
         url,
+        secret,
         masked_secret: `whsec_••••••••••••${secret.slice(-4)}`,
         created_at: nowIso(),
         disabled_at: null,
@@ -646,9 +697,115 @@ export class MockClient implements PayHoldClient {
       audit(db, endpoint.tenant_id, null, 'dashboard', 'webhook_endpoint.created', {
         url,
       })
-      return { endpoint: clone(endpoint), secret }
+
+      // Returned once, here, and never again — the caller has exactly one
+      // chance to store it, which is the same deal API keys get.
+      const { secret: _secret, ...visible } = endpoint
+      return { endpoint: clone(visible), secret }
     })
     return delay(result)
+  }
+
+  async disableWebhookEndpoint(id: string): Promise<WebhookEndpoint> {
+    const updated = mutate((db) => {
+      const found = db.webhook_endpoints.find(
+        (w) => w.id === id && w.tenant_id === db.current_tenant_id,
+      )
+      if (!found) throw new PayHoldError('not_found', `Endpoint ${id} not found`)
+
+      found.disabled_at = nowIso()
+      audit(db, found.tenant_id, null, 'dashboard', 'webhook_endpoint.disabled', {
+        url: found.url,
+      })
+
+      const { secret: _secret, ...visible } = found
+      return clone(visible)
+    })
+    return delay(updated)
+  }
+
+  async listWebhookDeliveries(
+    filter: WebhookDeliveryFilter = {},
+  ): Promise<WebhookDelivery[]> {
+    const db = getDb()
+    const deliveries = db.webhook_deliveries
+      .filter((d) => d.tenant_id === db.current_tenant_id)
+      .filter((d) => !filter.endpoint_id || d.endpoint_id === filter.endpoint_id)
+      .filter((d) => !filter.deal_id || d.deal_id === filter.deal_id)
+      .filter((d) => !filter.status?.length || filter.status.includes(d.status))
+      .sort((a, b) => b.created_at.localeCompare(a.created_at))
+      .slice(0, filter.limit ?? 100)
+    return delay(clone(deliveries))
+  }
+
+  async retryWebhookDelivery(id: string): Promise<WebhookDelivery> {
+    const delivery = mutate((db) => {
+      const found = db.webhook_deliveries.find(
+        (d) => d.id === id && d.tenant_id === db.current_tenant_id,
+      )
+      if (!found) throw new PayHoldError('not_found', `Delivery ${id} not found`)
+      if (found.status === 'delivered') {
+        throw new PayHoldError('invalid_state', 'This one already went through')
+      }
+      return clone(attemptDelivery(db, found))
+    })
+    return delay(delivery)
+  }
+
+  // -- Intelligence ---------------------------------------------------------
+  //
+  // Reads are tenant-scoped like everything else. The writes here touch three
+  // tables — ai_suggestions, ai_chat, audit — and no others.
+
+  async listAiSuggestions(dealId?: string): Promise<AiSuggestion[]> {
+    const db = getDb()
+    const rows = db.ai_suggestions
+      .filter(
+        (s) => s.tenant_id === db.current_tenant_id && (!dealId || s.deal_id === dealId),
+      )
+      .sort((a, b) => b.created_at.localeCompare(a.created_at))
+    return delay(clone(rows))
+  }
+
+  async draftDisputeSuggestion(disputeId: string): Promise<AiSuggestion> {
+    return delay(clone(mutate((db) => draftDisputeSuggestion(db, disputeId))))
+  }
+
+  async draftRiskSummary(dealId: string): Promise<AiSuggestion> {
+    await this.getDeal(dealId)
+    return delay(clone(mutate((db) => draftRiskSummary(db, dealId))))
+  }
+
+  async decideAiSuggestion(
+    id: string,
+    decision: AiDecision,
+    decidedBy: string,
+  ): Promise<AiSuggestion> {
+    return delay(clone(mutate((db) => decideSuggestion(db, id, decision, decidedBy))))
+  }
+
+  async askAssistant(question: string): Promise<AiChatMessage> {
+    return delay(clone(mutate((db) => askAssistant(db, question))))
+  }
+
+  async listAiChat(): Promise<AiChatMessage[]> {
+    const db = getDb()
+    return delay(
+      clone(db.ai_chat.filter((m) => m.tenant_id === db.current_tenant_id)),
+    )
+  }
+
+  async listDealOutcomes(): Promise<DealOutcome[]> {
+    const db = getDb()
+    const rows = db.deal_outcomes
+      .filter((o) => o.tenant_id === db.current_tenant_id)
+      .sort((a, b) => b.resolved_at.localeCompare(a.resolved_at))
+    return delay(clone(rows))
+  }
+
+  async getAiUsage(): Promise<AiUsage> {
+    const db = getDb()
+    return delay(clone(aiUsage(db, db.current_tenant_id)))
   }
 
   // -- Audit ---------------------------------------------------------------
@@ -683,6 +840,10 @@ export class MockClient implements PayHoldClient {
         .alerts.slice()
         .sort((a, b) => b.detected_at.localeCompare(a.detected_at))
       return delay(clone(alerts))
+    },
+
+    async runReconciliation(): Promise<ReconciliationAlert[]> {
+      return delay(clone(mutate((db) => runReconciliation(db))))
     },
 
     async freezePayouts(tenantId: string): Promise<Tenant> {
@@ -742,6 +903,12 @@ export class MockClient implements PayHoldClient {
     failNextPayout(): void {
       mutate((db) => {
         db.fail_next_payout = true
+      })
+    },
+
+    failNextWebhook(): void {
+      mutate((db) => {
+        db.fail_next_webhook = true
       })
     },
 

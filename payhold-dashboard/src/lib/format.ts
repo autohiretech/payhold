@@ -1,4 +1,10 @@
-import type { Currency, DealStatus, Money, PayoutStatus } from '@/api'
+import type {
+  Currency,
+  DealStatus,
+  Money,
+  PayoutStatus,
+  WebhookDeliveryStatus,
+} from '@/api'
 import { ZERO_DECIMAL_CURRENCIES } from './countries'
 
 /**
@@ -155,6 +161,29 @@ export const PAYOUT_STATUS_META: Record<PayoutStatus, StatusMeta> = {
     label: 'Frozen',
     tone: 'pending',
     hint: 'Blocked because this account is under reconciliation review.',
+  },
+  held_for_review: {
+    label: 'Held for review',
+    tone: 'pending',
+    hint: 'A risk rule stopped this one. Someone needs to look before it sends.',
+  },
+}
+
+export const DELIVERY_STATUS_META: Record<WebhookDeliveryStatus, StatusMeta> = {
+  pending: {
+    label: 'Queued',
+    tone: 'neutral',
+    hint: 'Waiting to send, or waiting out a backoff after a failed attempt.',
+  },
+  delivered: {
+    label: 'Delivered',
+    tone: 'released',
+    hint: 'Your endpoint accepted it.',
+  },
+  failed: {
+    label: 'Failed',
+    tone: 'danger',
+    hint: 'Five attempts, no success. Send it again once the endpoint is back.',
   },
 }
 

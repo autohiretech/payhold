@@ -30,7 +30,8 @@ src/api/
 ├── types.ts     the v1 domain types — copy verbatim into payhold-backend
 ├── client.ts    PayHoldClient interface — what every screen codes against
 ├── index.ts     exports `api`; ONE line changes when the backend lands
-└── mock/        store (localStorage + simulated clock), seed, engine, client
+└── mock/        store (localStorage + simulated clock), seed, engine, ai,
+                 webhooks, risk, client
 ```
 
 Screens import `api` from `@/api` and nothing else. When `HttpClient` exists,
@@ -46,6 +47,132 @@ confirmations, no double release, refund blocked after release, timer fires only
 on non-disputed deals, payouts blocked while frozen, deposits capped at the
 pre-auth, balances derived purely from ledger entries. **Reproduce every one of
 these against the real Edge Functions.** If a rule changes, change it here first.
+
+Three more suites sit beside it, and they are the spec for the parts of the
+backend written most recently:
+
+- `webhooks.test.ts` — every state change queues a notification, a repeated
+  confirmation does not queue two, retries back off and then stop, and a client
+  holding the secret can verify the signature. The backend's counterpart is
+  `payhold-backend/tests/webhooks-risk-reconciliation.test.ts`.
+- `risk.test.ts` — a rule can hold a payout and do nothing else; only a person
+  clears the hold; cron and retry cannot.
+- `reconciliation.test.ts` — drift is *found* by comparing against a provider
+  balance, not handed to the dashboard. One alert per rail, refreshed. Drift
+  freezes; nothing unfreezes itself.
+
+## Intelligence (root spec §12)
+
+`src/api/mock/ai.ts` is to the assistant what `FakeProvider` is to the rails: a
+deterministic stand-in so demo mode with zero keys works end to end. Same
+inputs, same draft, no network. The real Edge Function assembles the same
+*inputs* and returns the same *shapes*, so no screen changes when it lands.
+
+The one rule everything is arranged around is invariant 9 — **it advises, a
+person decides**:
+
+- Drafting and chatting write to `ai_suggestions`, `ai_chat` and `audit_log`.
+  They touch no deal, no ledger entry and no payout, and `ai.test.ts` asserts
+  that by diffing a snapshot of all money state across every AI call.
+- `decideAiSuggestion` is the only path that can end in money moving, and only
+  on `approved` — it then calls the *same* `resolveDispute` an admin would have
+  called by hand, audited as their decision. Rejecting, approving an
+  `escalate`, or approving any risk summary moves nothing.
+- Approving is a `useMoneyMutation`; drafting and chat use `useAiMutation`,
+  which invalidates only the three AI queries. A deal list that refreshed
+  because someone asked a question would be a small lie about what happened.
+- There is no `split` recommendation. v1 has no partial-refund primitive, so a
+  case the evidence divides comes back `escalate` rather than in terms the
+  engine cannot execute.
+
+The assistant is a **corner panel, not a page** (`components/assistant.tsx`):
+⌘K or the launcher from anywhere, `?ask=1` to deep-link it open. It docks
+bottom-right with no scrim on desktop — the screen behind stays usable, because
+a question is something you have *while* looking at a payout, not instead of.
+Small screens get the sheet-and-scrim treatment where there is no room to dock.
+
+**It opens empty and stays empty until asked.** No seeded transcript: a panel
+that opens already full of this account's business is noise at best, and at
+worst it reads as something that happened while you were away.
+
+Answers can carry records. Attachments hold an **id, not a snapshot**, so a
+draft shown an hour ago renders today's truth — which is also why the Approve
+button inside a transcript is the same button, the same call and the same audit
+row as the one on the Disputes screen.
+
+Commands (`/help` lists them) read the whole account: `/queue`, `/deal`,
+`/evidence`, `/draft`, `/risk`, `/disputes`, `/deals`, `/payouts`, `/balance`,
+`/audit`. **`/approve <id>` and `/reject <id>` execute**, and that is not a hole
+in invariant 9: an exact command naming one record is the operator deciding in
+their own session, parsed literally with no inference, recorded against them.
+Anything the model would have to *interpret* — "approve that for me" — is
+refused and answered with the card and its buttons instead. `ai.test.ts` holds
+both halves of that line.
+
+The Intelligence page is a **queue, not a dashboard**: one column, and nothing gets a card
+unless you act on it. Two columns produced an L-shaped hole whenever the queue
+was empty, which is most of the time. A suggestion never nests a tinted box
+inside another box — `variant="standalone"` is the card on the Intelligence
+page, `variant="inline"` is the inset panel inside a dispute or a payout row.
+Provenance (prompt version, input hash) collapses behind a Details toggle: it
+is what makes a decision reproducible and it is noise while you are making one.
+
+Two things the fixtures encode deliberately:
+
+- Seeded drafts are produced by running `composeDisputeDraft` over the
+  fixtures, never by hand-copying its wording — a fixture that drifts from the
+  code it illustrates is worse than no fixture.
+- The three seeded disputes produce all three recommendations. The bumper case
+  turns on the buyer having confirmed *before* the seller opened the dispute —
+  if you touch the seeded timestamps, check `ai.test.ts` still passes, because
+  reordering those two events reverses the answer.
+- **Rwanda Equipment Co has `ai_enabled: false`.** Switch tenant in the dev
+  panel to see the degraded state: no drafts, no chat, and every money path
+  behaving identically. That is the §12.5 claim, made checkable.
+
+Dispute evidence carries a **URL, not a file**. The client's site serves the
+images; we store the reference, so a case can be reviewed with the photos in
+front of you while the files stay theirs. `evidence-photos.ts` draws the
+fixtures as inline SVG data URIs — no assets to ship, no network, and
+schematic on purpose, since a convincing fake photograph invites someone to
+treat a fixture as a record of something that happened. Note the split: people
+see the images, **the assistant is given the descriptions**, which is what
+spec §12.2 says it reads.
+
+`deal_outcomes` is written from the money path in `engine.ts`, not from the AI
+code, so the labels come from every resolution including the ones no model saw
+— a training set of only AI-assisted cases would be biased from the first row.
+`risk_signals` (spec §12.3) is **not** mocked: the narrator recomputes signals
+per request and they are captured in the suggestion's `output` and
+`input_hash`. The backend must persist them at decision time.
+
+## Outbound webhooks and risk rules
+
+`src/lib/hmac.ts` is a real synchronous HMAC-SHA256, not a stand-in. A mock
+that emitted a decorative signature would make invariant 7 untestable — a
+client could not check it and neither could we — so the mock signs for real and
+`webhooks.test.ts` verifies a delivery the way a client's server would. It is
+synchronous because the engine is: an `await` inside `releaseDeal` would be a
+lie about the backend's shape, where that step is one transaction.
+
+The header format (`t=<unix seconds>,v1=<hex>` over `<t>.<body>`) is pinned
+from both sides — here and in the backend's `crypto.test.ts` — because a client
+who develops against the mock must not break when they point at the real API.
+
+**Signing secrets live on the mock's `webhook_endpoints` rows** and never cross
+the client interface; `listWebhookEndpoints` strips them, as the real API will.
+This is the one place the mock deliberately holds a secret, for the same reason
+`FakeProvider` does: it is standing in for the backend, not for a browser.
+
+`src/api/mock/risk.ts` holds the deterministic rules. They can set a payout to
+`held_for_review` and nothing else — `risk.test.ts` asserts that by checking no
+ledger entry appears. `frozen` and `held_for_review` are separate statuses on
+purpose: the first is the whole account stopped by reconciliation, the second is
+one payout waiting on one person.
+
+Seller age is measured **at the deal's creation**, not at payout time. With a
+seven-day clearance window, every seller is a week old by the time their first
+payout comes due, so measuring at payout would make that rule unfireable.
 
 ## Payment rails
 
