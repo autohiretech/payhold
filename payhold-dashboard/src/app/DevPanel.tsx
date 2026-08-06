@@ -13,6 +13,7 @@
 import { useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { api, isSimulated } from '@/api'
+import { useAuth } from '@/auth/AuthProvider'
 import { Button, Card, cx } from '@/components/ui'
 import { formatDateTime } from '@/lib/format'
 import { MockClient } from '@/api/mock'
@@ -22,6 +23,7 @@ export function DevPanel() {
   const [busy, setBusy] = useState<string | null>(null)
   const [note, setNote] = useState<string | null>(null)
   const qc = useQueryClient()
+  const { signOut } = useAuth()
 
   if (!import.meta.env.DEV || !isSimulated(api)) return null
   const sim = api.sim
@@ -165,7 +167,16 @@ export function DevPanel() {
                 size="sm"
                 variant="danger"
                 disabled={busy !== null}
-                onClick={() => run('reset', 'Fixtures reloaded', () => sim.reset())}
+                onClick={() =>
+                  // Signing out is part of the reset: an account created by
+                  // signing up does not survive a re-seed, and leaving the
+                  // session in place would leave the app showing a company
+                  // that no longer exists.
+                  run('reset', 'Fixtures reloaded', async () => {
+                    await sim.reset()
+                    await signOut()
+                  })
+                }
               >
                 Reset all mock data
               </Button>

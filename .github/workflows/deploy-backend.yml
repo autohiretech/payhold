@@ -98,8 +98,10 @@ jobs:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
         run: |
           supabase functions deploy \
-            deals payment-options sellers balance webhook-endpoints \
-            flutterwave-webhook provider-accounts webhook-dispatch reconcile \
+            account deals payment-options sellers balance payouts risk-signals \
+            webhook-endpoints flutterwave-webhook provider-accounts \
+            webhook-dispatch reconcile auto-release payout-dispatch \
+            ai-dispute ai-risk-narrator ai-support ai-decisions \
             --project-ref "${{ secrets.SUPABASE_PROJECT_REF }}"
 
   # Migrations are deliberately NOT on the push trigger.

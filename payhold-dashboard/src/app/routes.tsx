@@ -1,5 +1,8 @@
-import { createBrowserRouter } from 'react-router-dom'
+import { createBrowserRouter, type RouteObject } from 'react-router-dom'
 import { AppShell } from './AppShell'
+import { RequireAuth } from '@/auth/AuthProvider'
+import { LoginPage } from '@/screens/auth/Login'
+import { SignupPage } from '@/screens/auth/Signup'
 import { OverviewPage } from '@/screens/Overview'
 import { DealsPage } from '@/screens/Deals'
 import { DealDetailPage } from '@/screens/DealDetail'
@@ -15,10 +18,24 @@ import { AdminPage } from '@/screens/Admin'
 import { CheckoutPage } from '@/screens/public/Checkout'
 import { DealStatusPage } from '@/screens/public/DealStatus'
 
-export const router = createBrowserRouter([
+/**
+ * The route table, separately from the browser router built out of it.
+ *
+ * Exported so a test can mount the same tree on a memory router: the gate is
+ * the one piece of routing worth asserting on, and a module-level browser
+ * router is a singleton whose history survives between mounts.
+ */
+export const routes: RouteObject[] = [
+  // Everything with dashboard chrome is behind a session. The gate is one
+  // wrapper around one route rather than a check per screen, so a new screen
+  // added under it cannot forget to be protected.
   {
     path: '/',
-    element: <AppShell />,
+    element: (
+      <RequireAuth>
+        <AppShell />
+      </RequireAuth>
+    ),
     children: [
       { index: true, element: <OverviewPage /> },
       { path: 'deals', element: <DealsPage /> },
@@ -34,8 +51,15 @@ export const router = createBrowserRouter([
       { path: 'admin', element: <AdminPage /> },
     ],
   },
+  // Getting in. Outside the gate for the obvious reason.
+  { path: '/login', element: <LoginPage /> },
+  { path: '/signup', element: <SignupPage /> },
+
   // Hosted pages a client site links to. No dashboard chrome, no auth — these
-  // are what the buyer and seller actually see.
+  // are what the buyer and seller actually see. A buyer opening a payment link
+  // from an email has no PayHold account and must never be asked for one.
   { path: '/pay/:id', element: <CheckoutPage /> },
   { path: '/status/:id', element: <DealStatusPage /> },
-])
+]
+
+export const router = createBrowserRouter(routes)

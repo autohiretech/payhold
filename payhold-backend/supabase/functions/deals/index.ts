@@ -24,6 +24,7 @@
 import type { SupabaseClient } from 'npm:@supabase/supabase-js@2'
 import { assertPayoutsNotFrozen, resolveCaller, type Caller } from '../_shared/auth.ts'
 import { serviceClient } from '../_shared/auth.ts'
+import { releaseFigures } from '../_shared/figures.ts'
 import { convertOrThrow, presentmentCurrencyFor } from '../_shared/fx.ts'
 import { handler, json, readJson, required } from '../_shared/http.ts'
 import { loadProvider } from '../_shared/load-provider.ts'
@@ -331,44 +332,6 @@ async function confirm(
   if (error) throw rpcError(error, 'confirm')
 
   return json(req, await withConfirmations(db, await getDeal(db, caller, id)))
-}
-
-/**
- * What `confirm_deal` needs in order to release, already converted.
- *
- * SQL owns the both-confirmations check and the ledger; the conversions are
- * this side's job, so they are computed up front rather than the database
- * calling out mid-transaction.
- */
-async function releaseFigures(
-  db: SupabaseClient,
-  deal: Deal,
-): Promise<{
-  p_payout_amount: number
-  p_payout_currency: string
-  p_fee_presentment: number
-}> {
-  const { data: seller } = await db
-    .from('sellers')
-    .select('payout_currency')
-    .eq('id', deal.seller_id)
-    .maybeSingle()
-
-  const payoutCurrency = seller?.payout_currency ?? deal.currency
-  const net = deal.amount - deal.fee_amount
-
-  return {
-    // The seller is owed the settlement currency, whatever the buyer paid in.
-    p_payout_amount: convertOrThrow(net, deal.currency, payoutCurrency).amount,
-    p_payout_currency: payoutCurrency,
-    // The fee leaves the balance we actually hold, so it is expressed in what
-    // was collected.
-    p_fee_presentment: convertOrThrow(
-      deal.fee_amount,
-      deal.currency,
-      deal.presentment_currency,
-    ).amount,
-  }
 }
 
 async function refund(

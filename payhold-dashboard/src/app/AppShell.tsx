@@ -1,7 +1,8 @@
 import { NavLink, Outlet } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { api } from '@/api'
-import { cx } from '@/components/ui'
+import { useAuth } from '@/auth/AuthProvider'
+import { cx, LogoMark } from '@/components/ui'
 import { AssistantProvider } from '@/components/assistant'
 import { DevPanel } from './DevPanel'
 
@@ -78,10 +79,10 @@ function Sidebar({
   openDisputes: number
 }) {
   return (
-    <aside className="shrink-0 border-b border-line bg-surface lg:sticky lg:top-0 lg:h-svh lg:w-64 lg:border-r lg:border-b-0">
+    <aside className="shrink-0 border-b border-line bg-surface lg:sticky lg:top-0 lg:flex lg:h-svh lg:w-64 lg:flex-col lg:border-r lg:border-b-0">
       <div className="flex items-center gap-3 px-5 py-5 lg:px-4">
         <span className="flex size-9 items-center justify-center rounded-xl bg-brand text-brand-fg shadow-[var(--shadow-card)]">
-          <Logo />
+          <LogoMark />
         </span>
         <div className="min-w-0">
           <p className="text-sm leading-tight font-semibold text-fg">PayHold</p>
@@ -91,7 +92,7 @@ function Sidebar({
         </div>
       </div>
 
-      <nav className="flex gap-1 overflow-x-auto px-3 pb-3 lg:flex-col lg:overflow-visible lg:px-3">
+      <nav className="flex gap-1 overflow-x-auto px-3 pb-3 lg:flex-1 lg:flex-col lg:overflow-visible lg:px-3">
         {NAV.map((item) => (
           <NavItem
             key={item.to}
@@ -110,7 +111,47 @@ function Sidebar({
         <Divider label="PayHold staff" />
         <NavItem to="/admin" label="Master admin" icon={IconAdmin} />
       </nav>
+
+      <AccountBlock />
     </aside>
+  )
+}
+
+/**
+ * Who you are signed in as, and the way out.
+ *
+ * The role is shown rather than implied: `viewer` cannot connect a rail or
+ * clear a held payout, and finding that out from a disabled button is worse
+ * than reading it here.
+ */
+function AccountBlock() {
+  const { account, signOut } = useAuth()
+  if (!account) return null
+
+  return (
+    <div className="border-t border-line px-4 py-3.5 lg:px-3">
+      <div className="flex items-center gap-2.5">
+        <span className="flex size-8 shrink-0 items-center justify-center rounded-full bg-brand-soft text-xs font-semibold text-brand uppercase">
+          {(account.full_name ?? account.email).slice(0, 2)}
+        </span>
+        <div className="min-w-0 flex-1">
+          <p className="truncate text-xs font-semibold text-fg">
+            {account.full_name ?? account.email}
+          </p>
+          <p className="truncate text-[0.6875rem] text-fg-muted">
+            {account.tenant_name} · {account.role}
+          </p>
+        </div>
+      </div>
+
+      <button
+        type="button"
+        onClick={() => void signOut()}
+        className="mt-2.5 w-full rounded-lg px-2 py-1.5 text-left text-xs font-medium text-fg-muted transition hover:bg-surface-2 hover:text-fg"
+      >
+        Sign out
+      </button>
+    </div>
   )
 }
 
@@ -279,30 +320,5 @@ function IconAdmin() {
       <path d="M12 3 4 6.2V11c0 4.6 3.2 8.7 8 10 4.8-1.3 8-5.4 8-10V6.2Z" />
       <path d="m9.2 12 2 2 3.6-3.8" />
     </>,
-  )
-}
-
-function Logo() {
-  return (
-    <svg viewBox="0 0 24 24" className="size-5" aria-hidden="true">
-      <rect
-        x="3.5"
-        y="10"
-        width="17"
-        height="10.5"
-        rx="2.5"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.9"
-      />
-      <path
-        d="M7.75 10V7.25a4.25 4.25 0 0 1 8.5 0V10"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.9"
-        strokeLinecap="round"
-      />
-      <circle cx="12" cy="15.25" r="1.55" fill="currentColor" />
-    </svg>
   )
 }

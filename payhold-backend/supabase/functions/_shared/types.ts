@@ -130,7 +130,13 @@ export interface Seller {
   created_at: Timestamp
 }
 
-export type PayoutStatus = 'scheduled' | 'processing' | 'paid' | 'failed' | 'frozen'
+export type PayoutStatus =
+  | 'scheduled'
+  | 'processing'
+  | 'paid'
+  | 'failed'
+  | 'frozen'
+  | 'held_for_review'
 
 export interface Payout {
   id: string
@@ -142,8 +148,16 @@ export interface Payout {
   status: PayoutStatus
   scheduled_for: Timestamp
   paid_at: Timestamp | null
+  /** Populated on `failed`; surfaced in the dashboard for triage. */
   failure_reason: string | null
   attempts: number
+  /** The provider's transfer reference, set once it has one. */
+  provider_ref?: string | null
+  /** When a risk rule stopped it. The signals that did are in `risk_signals`. */
+  review_held_at?: Timestamp | null
+  /** Who let it through. A rule can hold a payout; only a person releases one. */
+  review_approved_by?: string | null
+  review_approved_at?: Timestamp | null
 }
 
 // ---------------------------------------------------------------------------

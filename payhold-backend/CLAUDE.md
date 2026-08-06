@@ -14,9 +14,12 @@ npm run test:sql             # schema invariants against PGlite — no Docker ne
 npm run test:functions       # Deno tests for crypto and the providers
 npm run typecheck            # deno check across the functions
 npx supabase db push         # apply migrations to the linked project
-npx supabase functions deploy deals payment-options sellers balance \
-                              webhook-endpoints flutterwave-webhook \
-                              provider-accounts webhook-dispatch reconcile
+npx supabase functions deploy account deals payment-options sellers balance \
+                              payouts risk-signals webhook-endpoints \
+                              flutterwave-webhook provider-accounts \
+                              webhook-dispatch reconcile auto-release \
+                              payout-dispatch ai-dispute ai-risk-narrator \
+                              ai-support ai-decisions
 ```
 
 `deno` must be on `PATH` (`~/.deno/bin` on this machine).
@@ -28,8 +31,11 @@ money engine is SQL running inside Postgres transactions with row locks, and
 RLS is what keeps one tenant out of another's rows. Workers has neither.
 
 Functions redeploy on a push to `main` that touches `supabase/functions/`, but
-only after the SQL and Deno suites pass. All nine deploy together so a change
-in `_shared/` cannot land in one function and not another.
+only after the SQL and Deno suites pass. They all deploy together so a change
+in `_shared/` cannot land in one function and not another — which means a new
+function is three edits, not one: the directory, the `[functions.*]` block in
+`config.toml`, and the deploy list in the workflow. A function missing from
+either list is a function the gateway rejects or CI never ships.
 
 **Migrations do not run on push.** `db push` is forward-only and runs against
 the database holding real money; on every merge, that is how a lock on `deals`
@@ -48,6 +54,7 @@ environment or a build log.
 
 | Function | Serves |
 |---|---|
+| `account` | `/signup` creates a company and its first owner; `/me` turns a session into a tenant and a role |
 | `deals` | create, list, get, `/pay`, `/confirm`, `/refund`, `/deposit`, `/capture`, `/release-deposit` |
 | `payment-options` | what a buyer in a market can pay with; the catalogue a client renders its checkout from |
 | `sellers` | register a tokenized payout destination, list |
@@ -55,11 +62,52 @@ environment or a build log.
 | `webhook-endpoints` | register (secret shown once), list, `?deliveries=1`, disable |
 | `flutterwave-webhook` | inbound, at `/flutterwave-webhook/:tenant` |
 | `provider-accounts` | bring-your-own-keys |
-| `webhook-dispatch`, `reconcile` | cron only, `CRON_SECRET` |
+| `payouts` | list, get with signals, `/approve-review`, `/retry` |
+| `risk-signals` | what the deterministic rules noticed, filterable |
+| `webhook-dispatch`, `reconcile`, `auto-release`, `payout-dispatch` | cron only, `CRON_SECRET` |
+| `ai-dispute`, `ai-risk-narrator`, `ai-support` | draft a resolution, brief a payout, answer a question. These run as `payhold_ai` and never hold the service role |
+| `ai-decisions` | approve or reject a draft; `?usage=1`, `?outcomes=1`. The one AI-adjacent function that *does* hold the service role, because approving is what moves money |
 
 `resolveCaller` takes either an `X-Api-Key` or a dashboard JWT, key first. Every
 handler filters on the tenant it resolves, and a row belonging to someone else
 is a 404 — a 403 would confirm it exists.
+
+## Getting in
+
+**Signing in does not go through an Edge Function.** The dashboard posts to
+Supabase Auth's `/auth/v1/token` and holds the JWT; `resolveCaller` verifies it
+on every subsequent call. A sign-in proxy of our own would route every password
+in the system through code we maintain, for no check GoTrue does not do.
+
+Signup is the exception, and `functions/account/` exists for exactly one reason:
+two things must happen together and a browser can only do one of them. The auth
+user is Supabase Auth's; the `tenant_users` row that makes them a *PayHold* user
+is ours, and that table has no insert policy — deliberately. So the service role
+does both here.
+
+They are not one transaction and cannot be — different schemas behind different
+APIs — so the auth user is deleted if the tenant link fails. A half-made signup
+would hold the email address hostage against the retry.
+
+Three things worth knowing before changing it:
+
+- **The first person in is the `owner`.** Somebody has to be able to connect a
+  payment rail and clear a payout a risk rule held, and there is nobody else.
+- **Passwords are 12 characters minimum**, in the function and in
+  `config.toml`'s `minimum_password_length`. A dashboard session reads every
+  deal, payout and ledger entry a company has; GoTrue's floor of six is not a
+  boundary worth putting in front of that.
+- **Addresses are confirmed on creation**, because this project has no SMTP
+  sender. Requiring confirmation without a way to send it would lock out every
+  account it created. Turning on `auth.email.enable_confirmations` plus an
+  `[auth.email.smtp]` block is the production follow-up, and until it happens
+  a signed-up address is unproven.
+
+There is no invitation path yet: a second person joining an existing company has
+nowhere to be created from. Until there is, one company means one login.
+
+The acceptance spec is `payhold-dashboard/src/auth/mock.test.ts` — same
+arrangement as the money paths, where the mock's tests are the backend's.
 
 **The funding path is four steps and none of them are optional.** `POST /deals`
 creates it, `POST /deals/:id/pay` starts the charge on the rail the buyer's
@@ -100,11 +148,14 @@ never tries to run a `Deno.test` file.
 | `DASHBOARD_ORIGIN` | comma-separated origins allowed to call the API from a browser |
 | `PUBLIC_URL` | where buyers are sent to pay |
 | `CRON_SECRET` | sent by pg_cron as `x-cron-secret`. The scheduled jobs are not tenant-scoped, so no API key may trigger them. Unset means they refuse every caller. |
+| `ANTHROPIC_API_KEY` | the Intelligence layer's model key. Unset switches §12 off cleanly — the AI endpoints answer 422 and every money path is untouched. |
+| `SUPABASE_JWT_SECRET` | the project's JWT secret, used to mint the short-lived `payhold_ai` token in `_shared/ai-db.ts`. Also required for §12, and for the same reason it has no fallback: falling back would mean running the AI layer with the service role. |
 
 Set with `npx supabase secrets set NAME=value`. Generate the master key with
 `openssl rand -base64 32`. Nothing falls back to a default — a missing
 `CREDENTIALS_KEY` throws rather than silently encrypting with something
-guessable.
+guessable, and a missing `ANTHROPIC_API_KEY` or `SUPABASE_JWT_SECRET` refuses
+the AI call rather than reaching for a wider credential.
 
 ## The database is the money engine
 
@@ -136,6 +187,47 @@ The AI layer (root spec §12) sits outside this boundary on purpose: it reads
 with a scoped read role and never holds the service role, so no model output can
 reach `release_deal`, `confirm_deal`, `refund_deal` or `settle_payout`. What it
 writes is `ai_suggestions`; a human approval is what calls the money function.
+
+## Intelligence: invariant 9 as a grant list
+
+`20260806000004_intelligence.sql` is where §12 stops being a promise. The three
+drafting functions connect as **`payhold_ai`**, a Postgres role with `select` on
+the case-file tables, `insert` on `ai_suggestions`, `ai_chat` and `audit_log`,
+and execute on nothing that moves money. `_shared/ai-db.ts` mints a 60-second
+HS256 token carrying `role: payhold_ai` and a `tenant_id` claim; the policies
+read the tenant from the token, so a query that forgets its filter returns
+nothing rather than everything.
+
+That is the part worth defending in review. "The AI must not call `release_deal`"
+as a convention survives until someone adds a line to a file whose header they
+did not read; as a grant, Postgres refuses it. `tests/intelligence.test.ts`
+asserts the refusal for all nine money functions, and that the role cannot read
+an API key hash or a provider credential.
+
+`decide_ai_suggestion` is the single bridge across. It locks the suggestion
+`for update`, requires a `decided_by`, and only reaches `resolve_dispute` for an
+approved `dispute_resolution` of `release` or `refund`. A rejection, an approved
+`escalate`, and every risk summary write their row and stop. The endpoint in
+front of it (`ai-decisions`) is a separate deployment holding the service role,
+and it takes the approver from the session rather than the request body — a
+client that can name its own approver can forge an approval.
+
+Two smaller decisions worth knowing:
+
+- **`deal_outcomes` is written by triggers on the money path**, not by anything
+  AI. The labels §12.4 will train on have to cover resolutions no model saw, or
+  the eventual fraud model learns from a biased sample. Same reasoning as
+  `enqueue_webhooks`: a label that every future code path must remember is a
+  label that will be forgotten.
+- **The dispute statement is wrapped as an untrusted document.** It is written
+  by a member of the public and it is *about* the question we are asking, which
+  makes it the injection surface. `untrusted()` frames it as evidence rather
+  than instructions — and invariant 9 is why a successful injection costs a
+  wasted click rather than money.
+
+The corpus in `_shared/ai-docs.ts` is the operations guide of §11. A passage
+that lives somewhere else is a passage that describes last quarter's product.
+`ai.test.ts` asserts no passage and no prompt uses the regulated word.
 
 ## RLS: read your tenant, write nothing
 
@@ -248,44 +340,90 @@ must run in the transaction that then holds the payout. It can set
 change to the deal. `approve_payout_review` is the only way out, and it takes
 the approver's name because the audit row is about a person's decision.
 
-The payout dispatch cron must call `screen_payout` before it calls the
-provider. That job is not written yet; when it is, that ordering is the point.
+## Sending a payout
+
+`_shared/dispatch.ts` is the single implementation, shared by the
+`payout-dispatch` cron and `payouts/:id/approve-review`, so that approving
+cannot become a route which skips a check the cron makes. Its order is the
+safety argument: **frozen tenant → `screen_payout` → provider → book.**
+
+Provider before booking is deliberate. A transfer that succeeded but was not
+booked is re-sent next pass on the same `idempotency_key`, the provider returns
+the same transfer, and it books then. Booking first would report a seller paid
+who was not.
+
+`held_for_review` is absent from `DISPATCHABLE` and must stay absent — cron may
+never be the thing that lets a held payout through. The approve endpoint also
+**refuses an API key**: invariant 11 wants a person, and a client that could
+approve its own held payouts from its own server has turned the rules into a
+formality.
+
+**How much leaves is not a conversion of `payouts.amount`.** `amountLeaving`
+reads the deal's clearing pool back off the ledger, because `rail_balances`
+derives that pool as `−release + fee + payout` and any other figure leaves a
+permanent residue in `available` — which the reconciliation pass reads as drift,
+freezing the tenant over a rounding error. The two numbers agree only when no
+conversion happened, so a same-currency test cannot catch this;
+`tests/payout-dispatch.test.ts` carries the cross-border case.
+
+Async rails settle later: `FlutterwaveProvider.release` returns `pending` for
+anything not terminal, which becomes `processing` via `mark_payout_processing`
+(migration `20260806000003`). A later pass re-sends on the same idempotency key
+— a poll, not a second transfer — and books when the provider reports it
+settled.
+
+## The auto-release timer
+
+`auto-release` has no release path of its own. It writes the missing
+confirmations with `actor = 'auto'` and lets `confirm_deal` release, so the
+timer goes through the same row lock and the same both-confirmations re-check as
+a human confirmation and cannot drift from it. A side that really confirmed
+keeps its `user` actor, so the audit trail still tells a buyer who agreed from
+one who went quiet.
+
+A frozen tenant is **not** skipped: releasing moves money between our own
+buckets and sends nothing, and the freeze stops the payout in `dispatchPayout`.
+A suspended tenant is skipped. Disputed deals are excluded by the query and
+refused again by `confirm_deal` under the lock.
+
+Two overlapping passes are safe: the second gets `can no longer be confirmed`
+from the lock, which the function reads as "already released" rather than an
+error.
 
 ## Scheduling the cron jobs
 
-There is no migration for this. `pg_cron` does not exist in PGlite, so a
-migration creating schedules would fail the local harness on every run — and
-scheduling is a deploy-environment concern rather than a schema one.
+`scripts/schedule-cron.sql`, run by hand against the linked project. It is
+**not** a migration and must not become one: `pg_cron` does not exist in PGlite,
+so a migration creating schedules would fail the local harness on every run —
+and which environment runs the jobs is a deploy concern rather than a schema
+one. `cron.schedule` replaces a job of the same name, so the script is
+re-runnable.
 
-Against the linked project:
-
-```sql
-create extension if not exists pg_cron;
-create extension if not exists pg_net;
-
-select cron.schedule('payhold-webhooks', '* * * * *', $$
-  select net.http_post(
-    url := 'https://mwnbjjlilqrwdmwutbxr.supabase.co/functions/v1/webhook-dispatch',
-    headers := jsonb_build_object('x-cron-secret', current_setting('payhold.cron_secret'))
-  );
-$$);
-
-select cron.schedule('payhold-reconcile', '0 * * * *', $$
-  select net.http_post(
-    url := 'https://mwnbjjlilqrwdmwutbxr.supabase.co/functions/v1/reconcile',
-    headers := jsonb_build_object('x-cron-secret', current_setting('payhold.cron_secret'))
-  );
-$$);
+```
+psql "$SUPABASE_DB_URL" -f scripts/schedule-cron.sql
 ```
 
 Set the secret once with `alter database postgres set payhold.cron_secret = '…'`,
-matching the `CRON_SECRET` function secret. Keep it out of the migration files.
+matching the `CRON_SECRET` function secret. Keep it out of the script and out of
+git.
+
+The times are staggered, and the order is the point: **reconcile :00 →
+auto-release :10 → payout-dispatch :20.** Reconciliation goes first because
+drift freezes payouts, and a dispatch that ran before it would send money out of
+a balance we already know we cannot explain. Webhook delivery runs every minute,
+independent of all of it — the retry backoff assumes a pass at least that often.
+
+One trap when checking on them: `net.http_post` returns a request id
+immediately, so a `cron.job_run_details` row saying "succeeded" means the
+request was *queued*, not that the function returned 200. The status codes are
+in `net._http_response`.
 
 ## Not built yet
 
-- **Cron jobs: auto-release and clearance → payout dispatch.** The two that
-  actually move money on a timer, and the largest remaining gap. The payout one
-  must call `screen_payout` before it calls the provider. Reminders too.
+- **The reminders cron.** The one scheduled job still missing. It needs a
+  channel to remind people *on* — there is no email path here, and a tenant
+  webhook is a notification to the client's server rather than to a buyer who
+  has gone quiet — so it is a decision before it is a function.
 - **End-user tokens.** Spec §4 has `confirm` taking one, so a buyer can confirm
   without the client's API key. Today `/pay` and `/confirm` are called by the
   client's server on the buyer's behalf.
@@ -296,8 +434,30 @@ matching the `CRON_SECRET` function secret. Keep it out of the migration files.
 - `FlutterwaveProvider`'s live calls are unexercised until real keys are
   connected — every test to date runs against `FakeProvider` or PGlite.
 - Seed: AutoHire as tenant #1.
-- The dashboard still runs on its mock; `HttpClient` is one file plus one line
-  in `src/api/index.ts`.
+- **Invitations.** `POST /account/signup` creates a company and its owner;
+  there is no path for a second person to join one that exists. `tenant_users`
+  already carries `staff` and `viewer`, so this is an endpoint and an email,
+  not a schema change.
+- **Password reset.** GoTrue does it, and it needs the same SMTP sender email
+  confirmation is waiting on.
+- The dashboard still runs on its mock, except for Intelligence: `AiHttpClient`
+  (`src/api/http-ai.ts`) is the first slice of `HttpClient` and covers the eight
+  AI methods behind `VITE_PAYHOLD_AI_LIVE`. The rest is still one file plus one
+  line in `src/api/index.ts`. Its sign-in is already real code against
+  `functions/account/` — `src/auth/supabase.ts` — behind the same env switch.
+- **Dispute evidence.** `disputes` carries a reason and nothing else: no
+  evidence table, no counter-statement column. The dashboard mock models both,
+  and §12.2 says the assistant reads them, so `disputeCaseFile` is thinner than
+  it should be. Adding those columns is the next thing that improves a draft,
+  and it bumps `dispute-assistant@1`.
+- **Shadow mode.** The working agreement says a new prompt ships with its
+  suggestions logged and not shown, compared against the humans' actual
+  decisions, then enabled per tenant. `ai_suggestions` records everything
+  needed for that comparison; what is missing is the flag that hides a draft
+  from the queue while it accumulates.
+- **Live model calls are unexercised**, the same way Flutterwave's are. Every
+  test runs against the validators, the corpus and PGlite; nothing in CI calls
+  Claude, and nothing should.
 
 The acceptance spec for all of it is
 `payhold-dashboard/src/api/mock/engine.test.ts` — reproduce every one of those

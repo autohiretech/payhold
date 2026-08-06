@@ -181,6 +181,8 @@ export interface Payout {
   /** Populated on `failed`; surfaced in the dashboard for triage. */
   failure_reason: string | null
   attempts: number
+  /** The provider's transfer reference, set once it has one. */
+  provider_ref?: string | null
   /** When a risk rule stopped it. The signals that did are in `risk_signals`. */
   review_held_at: Timestamp | null
   /** Who let it through. A rule can hold a payout; only a person releases one. */

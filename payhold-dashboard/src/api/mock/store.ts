@@ -7,6 +7,7 @@
  * migrated.
  */
 
+import type { TenantRole } from '@/auth/types'
 import type {
   AiChatMessage,
   AiSuggestion,
@@ -40,16 +41,48 @@ import type {
 // 8: signed outbound webhook deliveries, deterministic risk signals, and
 //    reconciliation that compares against a provider balance instead of being
 //    handed an answer. Payouts gained review fields, alerts gained a rail.
-export const SCHEMA_VERSION = 8
+// 9: accounts. The dashboard is behind a sign-in, so the mock needs the thing
+//    a session resolves to — `tenant_users` in Postgres.
+export const SCHEMA_VERSION = 9
 const STORAGE_KEY = 'payhold.mock.v1'
+
+/**
+ * A dashboard login. Stands in for a Supabase Auth user plus its `tenant_users`
+ * row — which is why the tenant is on it: signing in is what decides whose
+ * deals you are looking at, exactly as an API key does for a client's server.
+ *
+ * The password digest here is a **simulation**. Real accounts live in Supabase
+ * Auth, which hashes with bcrypt and which no browser code ever sees; this
+ * exists so a build running against the mock still has a sign-in that can be
+ * wrong. Nothing in localStorage is a security boundary.
+ */
+export interface MockAccount {
+  id: string
+  email: string
+  full_name?: string
+  password_hash: string
+  password_salt: string
+  tenant_id: string
+  role: TenantRole
+  created_at: string
+  last_seen_at: string | null
+}
 
 export interface MockDb {
   version: number
   /** Milliseconds the simulated clock runs ahead of the real one. */
   clock_offset_ms: number
-  /** The tenant the dashboard is currently acting as. */
+  /**
+   * The tenant the dashboard is currently acting as.
+   *
+   * Signing in sets it, so it is a consequence of who is at the keyboard
+   * rather than a global the screens choose. The dev panel's tenant switch is
+   * the one exception, and it is dev-only.
+   */
   current_tenant_id: string
   tenants: Tenant[]
+  /** Dashboard logins. See `MockAccount` — the digests are a simulation. */
+  accounts: MockAccount[]
   settings: TenantSettings[]
   sellers: Seller[]
   deals: Deal[]
@@ -105,6 +138,50 @@ export interface MockDb {
 
 let db: MockDb | null = null
 
+/**
+ * Every field a loaded store must actually have.
+ *
+ * Typed as `Record<keyof MockDb, true>` so adding a field to `MockDb` without
+ * adding it here is a compile error — which is the point. The version number
+ * alone is not a good enough guard: it only works if everyone who changes the
+ * shape remembers to bump it, and the failure when someone does not is a
+ * `TypeError` deep inside a screen, days later, on one person's machine.
+ * Two branches of work that each bump to the same number do it to each other
+ * without anyone forgetting anything.
+ */
+const REQUIRED_KEYS: Record<keyof MockDb, true> = {
+  version: true,
+  clock_offset_ms: true,
+  current_tenant_id: true,
+  tenants: true,
+  accounts: true,
+  settings: true,
+  sellers: true,
+  deals: true,
+  ledger: true,
+  payouts: true,
+  disputes: true,
+  api_keys: true,
+  provider_accounts: true,
+  webhook_endpoints: true,
+  webhook_deliveries: true,
+  audit: true,
+  alerts: true,
+  risk_signals: true,
+  ai_suggestions: true,
+  ai_chat: true,
+  deal_outcomes: true,
+  fail_next_payout: true,
+  fail_next_webhook: true,
+  provider_drift: true,
+  id_counter: true,
+}
+
+function isUsable(parsed: Partial<MockDb>): boolean {
+  if (parsed.version !== SCHEMA_VERSION) return false
+  return Object.keys(REQUIRED_KEYS).every((key) => key in parsed)
+}
+
 export function loadDb(seed: () => MockDb): MockDb {
   if (db) return db
 
@@ -112,7 +189,7 @@ export function loadDb(seed: () => MockDb): MockDb {
     const raw = localStorage.getItem(STORAGE_KEY)
     if (raw) {
       const parsed = JSON.parse(raw) as MockDb
-      if (parsed.version === SCHEMA_VERSION) {
+      if (isUsable(parsed)) {
         db = parsed
         return db
       }

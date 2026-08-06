@@ -341,3 +341,33 @@ export function PageHeader({
 export function Mono({ children }: { children: ReactNode }) {
   return <span className="font-mono text-xs text-fg-muted">{children}</span>
 }
+
+/**
+ * The padlock mark. Defined once here because it now appears in two places
+ * that never see each other — the sidebar of the signed-in app, and the
+ * sign-in screen in front of it.
+ */
+export function LogoMark({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" className={cx('size-5', className)} aria-hidden="true">
+      <rect
+        x="3.5"
+        y="10"
+        width="17"
+        height="10.5"
+        rx="2.5"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.9"
+      />
+      <path
+        d="M7.75 10V7.25a4.25 4.25 0 0 1 8.5 0V10"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.9"
+        strokeLinecap="round"
+      />
+      <circle cx="12" cy="15.25" r="1.55" fill="currentColor" />
+    </svg>
+  )
+}

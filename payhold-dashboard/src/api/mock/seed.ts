@@ -47,10 +47,40 @@ import {
   PRE_HIRE_CHECKLIST,
 } from './evidence-photos'
 import { collectionRails, defaultProviderFor, providerFor } from '@/lib/rails'
+import { makeAccount } from './accounts'
 import { SCHEMA_VERSION, addDays, type MockDb } from './store'
 
 const AUTOHIRE = 'ten_0001'
 const EQUIPCO = 'ten_0002'
+
+/**
+ * The fixture logins, and the only credentials in this repository.
+ *
+ * They are printed on the sign-in screen of a mock build on purpose: that build
+ * is a simulation with no backend behind it, and hiding the password to a
+ * browser-side fixture would be security theatre with a support cost. They are
+ * meaningless against a real deployment, where accounts live in Supabase Auth
+ * and none of this file runs.
+ *
+ * Both are `owner` — the fixtures include connecting rails and clearing a held
+ * payout, and a `viewer` could do neither.
+ */
+export const DEMO_LOGINS = [
+  {
+    email: 'owner@autohire.example',
+    password: 'payhold-demo-2026',
+    company: 'AutoHire',
+    full_name: 'Aline Uwase',
+    tenant_id: AUTOHIRE,
+  },
+  {
+    email: 'owner@rwanda-equipment.example',
+    password: 'payhold-demo-2026',
+    company: 'Rwanda Equipment Co',
+    full_name: 'Jean-Paul Habimana',
+    tenant_id: EQUIPCO,
+  },
+]
 
 export function seedDb(): MockDb {
   let counter = 0
@@ -1051,11 +1081,26 @@ export function seedDb(): MockDb {
     [`${EQUIPCO}:flutterwave:RWF`]: 25_000,
   }
 
+  // One owner per fixture company. Without these the demo would be reachable
+  // only by signing up, and a fresh signup gets an empty tenant — so there
+  // would be no way to see the fixtures the rest of this file exists for.
+  const accounts = DEMO_LOGINS.map((login, i) =>
+    makeAccount(
+      id('acct'),
+      login.email,
+      login.password,
+      login.tenant_id,
+      ago(i === 0 ? 210 : 46),
+      login.full_name,
+    ),
+  )
+
   return {
     version: SCHEMA_VERSION,
     clock_offset_ms: 0,
     current_tenant_id: AUTOHIRE,
     tenants,
+    accounts,
     settings,
     sellers,
     deals,

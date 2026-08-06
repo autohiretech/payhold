@@ -13,11 +13,16 @@ There is no backend yet. `src/api/mock/` implements the entire v1 contract as a
 real state machine in the browser, persisted to localStorage.
 
 ```
-npm run dev        # http://localhost:5173
+npm run dev        # http://localhost:5173 — sign in first, see below
 npm test           # engine invariant tests
 npm run typecheck
 npm run build
 ```
+
+The dashboard is behind a sign-in. Against the mock, use one of the fixture
+logins printed on the sign-in screen (`owner@autohire.example` /
+`payhold-demo-2026`), or create an account — which gets you an empty company,
+the way a real signup does. See **Signing in** below.
 
 The floating **Simulate** button (dev only) is the control panel: fund a deal,
 advance the clock, run cron, force a payout failure, inject ledger drift, switch
@@ -44,6 +49,12 @@ One-time setup, none of which can be done from here:
 Until those exist the workflow builds and tests and skips the publish, rather
 than failing.
 
+`.env.example` is the whole configuration surface, and all of it is public by
+design. Pointing a build at the real backend means setting `VITE_SUPABASE_URL`
+and `VITE_SUPABASE_ANON_KEY` at build time — as repository *variables*, not
+secrets, since they end up in the bundle either way. The service-role key has
+no `VITE_` name it could hide behind and must never appear here.
+
 `public/_redirects` is what makes client-side routing work: without it a buyer
 opening `/pay/:id` from an email gets Cloudflare's 404, because there is no
 file at that path. `public/_headers` denies framing — a payment page inside
@@ -53,7 +64,60 @@ someone else's iframe is the setup for a clickjacked confirmation.
 a deployed build is a browser-side simulation with fixture deals in
 localStorage: it moves no money and talks to no backend. That is fine for a
 demo and wrong for anything else, and the fix is `HttpClient` plus the one line
-that file was written for.
+that file was written for. The sign-in in front of it is simulated for the same
+reason and by the same switch — see **Signing in**.
+
+## Signing in
+
+**The dashboard is behind a login.** One gate — `RequireAuth` wrapping the one
+route that has dashboard chrome, so a screen added under it cannot forget to be
+protected. The hosted buyer and seller pages (`/pay/:id`, `/status/:id`) are
+deliberately outside it: someone opening a payment link from an email has no
+PayHold account and must never be asked for one.
+
+`src/auth/` is a second seam, shaped like the API one:
+
+```
+src/auth/
+├── types.ts         AuthBackend, AuthAccount, MIN_PASSWORD_LENGTH
+├── index.ts         exports `auth`; ONE line picks mock vs real
+├── mock.ts          browser-simulated accounts, over the mock store
+├── supabase.ts      real Supabase Auth + the `account` Edge Function
+├── password.ts      digests for the mock ONLY — see the header comment
+└── AuthProvider.tsx context, `useAuth`, `RequireAuth`
+```
+
+Both seams read the same environment. `VITE_SUPABASE_URL` +
+`VITE_SUPABASE_ANON_KEY` set → real sessions; unset → the simulation. They must
+move together with `HttpClient`: a real session in front of a browser-side
+ledger is a lie about which one you are looking at.
+
+A session resolves to exactly **one tenant**, and signing in is what sets it —
+`current_tenant_id` in the mock, `tenant_users` in Postgres. There is no
+"account with no company": a user that authenticates but has no membership is
+signed straight back out, which is what `/account/me` enforces server-side.
+
+Two things the mock is careful not to fake:
+
+- **Signing up creates an empty company** — no deals, no sellers, no connected
+  rails, exactly what `POST /account/signup` produces. Handing a new account
+  the fixtures would teach the wrong lesson about tenant isolation.
+- **Only `account.created` is audited.** The real backend cannot audit a
+  sign-in; GoTrue handles it and never tells us.
+
+`src/auth/password.ts` is a salted, iterated SHA-256 over the same synchronous
+primitive `lib/hmac.ts` already carries. It is a **simulation**, not a security
+control — real passwords go to Supabase Auth and are bcrypt-hashed there, and
+nothing in `src/` runs in that configuration. The alternative was a fixture file
+with a plaintext password in it and a login screen nobody believes.
+
+The demo build prints its fixture logins on the sign-in screen (`DEMO_LOGINS`
+in `src/api/mock/seed.ts`). That build is a browser simulation with no backend
+behind it; hiding the password to a localStorage fixture would be theatre with
+a support cost. They mean nothing against a real deployment.
+
+`src/auth/mock.test.ts` is the acceptance spec for the `account` Edge Function,
+the same way `engine.test.ts` is for the money paths.
 
 ## The seam
 
@@ -62,12 +126,30 @@ src/api/
 ├── types.ts     the v1 domain types — copy verbatim into payhold-backend
 ├── client.ts    PayHoldClient interface — what every screen codes against
 ├── index.ts     exports `api`; ONE line changes when the backend lands
+├── http-ai.ts   the first slice of HttpClient — Intelligence, for real
 └── mock/        store (localStorage + simulated clock), seed, engine, ai,
-                 webhooks, risk, client
+                 webhooks, risk, accounts, client
 ```
 
 Screens import `api` from `@/api` and nothing else. When `HttpClient` exists,
 `src/api/index.ts` picks it based on an env flag and no screen changes.
+
+**The backend is arriving in slices, and the first one is here.**
+`AiHttpClient` is a decorator: it takes the mock and overrides the eight
+Intelligence methods with calls to the real Edge Functions, leaving every other
+screen on the simulation. `VITE_PAYHOLD_AI_LIVE=1`, alongside the Supabase pair,
+turns it on.
+
+That flag is deliberately *not* the Supabase pair. Real sessions and a real
+ledger move together; real drafts over mock deals do not work at all, because
+the model would be asked about a dispute that exists in this browser and in no
+database. Switching it on is a claim that the backend holds your tenant's data,
+and the dashboard cannot check that for you — so the default stays off and the
+demo build stays honest.
+
+Which half you are looking at is worth being able to tell at a glance: a real
+draft cites `audit_log` uuids and takes a second to arrive; the mock's is
+instant and cites `aud_00xx`.
 
 `SimulationApi` (the `sim` property) exists only on the mock. Guard any use of
 it with `isSimulated(api)` so it compiles away against the real client.
@@ -97,8 +179,14 @@ backend written most recently:
 
 `src/api/mock/ai.ts` is to the assistant what `FakeProvider` is to the rails: a
 deterministic stand-in so demo mode with zero keys works end to end. Same
-inputs, same draft, no network. The real Edge Function assembles the same
-*inputs* and returns the same *shapes*, so no screen changes when it lands.
+inputs, same draft, no network.
+
+**The real one now exists** — `payhold-backend/functions/ai-dispute`,
+`ai-risk-narrator`, `ai-support`, `ai-decisions` — and it assembles the same
+inputs and returns the same shapes, which is why no screen changed when it
+landed. `types.ts` is what holds the two together: the backend's validators
+mirror `DisputeSuggestionOutput` and `RiskSummaryOutput` field for field, and a
+field added on one side only is a screen that renders nothing.
 
 The one rule everything is arranged around is invariant 9 — **it advises, a
 person decides**:
@@ -174,9 +262,24 @@ spec §12.2 says it reads.
 `deal_outcomes` is written from the money path in `engine.ts`, not from the AI
 code, so the labels come from every resolution including the ones no model saw
 — a training set of only AI-assisted cases would be biased from the first row.
+The backend does the same thing by triggers on `deals` and `disputes` rather
+than by lines inside the money functions, for the reason `enqueue_webhooks` is
+a trigger: a label every future code path must remember is one that gets
+forgotten.
+
 `risk_signals` (spec §12.3) is **not** mocked: the narrator recomputes signals
 per request and they are captured in the suggestion's `output` and
-`input_hash`. The backend must persist them at decision time.
+`input_hash`. The backend persists them at screening time instead —
+`screen_payout` writes them whether or not the rules are switched on — and
+hands the stored rows to the narrator as findings to explain rather than to
+re-derive.
+
+Two differences to expect when the live flag is on. `input_hash` is a full
+sha-256 there against this file's FNV-1a, because a hash that has to survive an
+audit is not the place for a short one. And a real dispute draft is thinner than
+the mock's: the backend's `disputes` table has a reason and no evidence rows
+yet, so the model weighs the opening statement, the timeline and the seller's
+record. That gap is listed in the backend's *Not built yet*.
 
 ## Outbound webhooks and risk rules
 

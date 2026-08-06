@@ -115,6 +115,11 @@ hashed at rest (compare by hash, never store plaintext). PayHold never stores
 raw card numbers or full MoMo numbers — provider tokenization only. 3DS is
 requested on all card charges.
 
+Dashboard passwords are Supabase Auth's and are never stored, logged or read
+back by anything in this repository. Minimum twelve characters, enforced in
+`functions/account/` and in `config.toml` — a dashboard session reads every deal
+and payout a company has.
+
 ## Provider interface
 
 One interface, all rails behind it:
@@ -166,7 +171,20 @@ Auth: `X-Api-Key`, hashed at rest, rate-limited per key.
 | `GET /v1/webhook-deliveries` | Every attempt, with status and signature — the answer to "did you tell us?" |
 | `POST /v1/payouts/:id/approve-review` | Clear a risk hold. Person-only, audited against them |
 | `GET /v1/risk-signals` | What the deterministic rules noticed |
+| `POST /ai-dispute` `/ai-risk-narrator` `/ai-support` | Draft, brief, answer. Advisory; each writes a suggestion and nothing else |
+| `POST /ai-decisions` | A person approves or rejects a draft. The only path from model output to money |
 | `/webhooks/flutterwave/:tenant` `/webhooks/stripe/:tenant` | Inbound provider webhooks |
+
+**Dashboard access is separate from all of that.** A company signs up, and its
+people sign in with an email and password held by Supabase Auth — not an API
+key, which is a server credential and belongs on a server. `POST /account/signup`
+creates the company and its first `owner`; `GET /account/me` is what turns a
+session into a tenant and a role. Signing in itself never touches our code: the
+dashboard exchanges the password with Supabase Auth directly.
+
+The dashboard is behind that gate in full. The hosted buyer and seller pages
+(`/pay/:id`, `/status/:id`) are not, and must never be — someone opening a
+payment link from an email has no PayHold account.
 
 **A client site must never hardcode a payment method.** Which wallets exist in
 Uganda, whether Nigerian cards take Verve, which markets can be paid into and
@@ -227,6 +245,13 @@ deal_outcomes(id, tenant_id, deal_id, outcome, reason_code, notes,
 risk_signals(id, tenant_id, deal_id, seller_id, signal, value jsonb, created_at)
 ```
 
+**Built** — `payhold-backend/supabase/migrations/20260806000004_intelligence.sql`
+and `functions/ai-*`. Invariant 9 is enforced by a Postgres role rather than by
+convention: the drafting functions connect as `payhold_ai`, which holds no
+execute on any money function, and `decide_ai_suggestion` — locked, requiring an
+approver's name — is the single bridge across. `deal_outcomes` is written by
+triggers on the money path so the labels cover resolutions no model saw.
+
 Prompts see one tenant's data only. No raw card or full MoMo numbers in these
 tables. The language rule binds model output too.
 
@@ -253,11 +278,18 @@ summarises, it never holds.
 
 | Job | Function |
 |---|---|
-| Auto-release timer | still to build |
-| Clearance → payout dispatch | still to build; must call `screen_payout` before transferring |
-| Reminders | still to build |
+| Auto-release timer | `auto-release` ✅ |
+| Clearance → payout dispatch | `payout-dispatch` ✅ — screens before it transfers |
+| Reminders | still to build; needs a channel decided first |
 | Outbound webhook delivery | `webhook-dispatch` ✅ |
 | Ledger-vs-provider reconciliation | `reconcile` ✅ |
+
+Written is not running. The schedules live in
+`payhold-backend/scripts/schedule-cron.sql` and are applied by hand, once, per
+environment — a deployed function nothing invokes is a job that silently never
+runs. They are staggered deliberately: **reconcile → auto-release →
+payout-dispatch**, because drift freezes payouts and a dispatch that went first
+would send money out of a balance we already know we cannot explain.
 
 Reconciliation compares **per rail**, not per currency — you cannot ask two
 providers about one number. Any drift **freezes that tenant's payouts**
@@ -272,6 +304,13 @@ without that secret set refuses to run them.
 Full sandbox walkthrough, all of it: pay (test card + test MoMo) → held →
 confirm ×2 → release → clearance → payout; refund path; timer path; and a
 forged-webhook test that **must** return 401.
+
+The way in gets walked too, because it is now the front door: sign up → land in
+an empty company → sign out → sign back in → a dashboard call with no bearer
+token **must** return 401, and one carrying a session belonging to another
+company must return that company's nothing rather than this one's rows. RLS is
+only proven against the real project (PGlite shims `auth.uid()`), so this is
+where that check lives.
 
 ## Working agreements
 
