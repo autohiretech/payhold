@@ -24,8 +24,18 @@ PayHold/
 └── payhold-dashboard/   React + Vite + Tailwind on Cloudflare Pages  ✅
 ```
 
-Two separate repos, deployed independently. The dashboard is a *client of the
-public API* — it holds no secrets and has no direct database write access.
+One repository, two deploy targets, independent of each other:
+
+| | Where | How |
+|---|---|---|
+| `payhold-dashboard` | Cloudflare Pages | `.github/workflows/deploy-dashboard.yml`, on push to main |
+| `payhold-backend` | Supabase (`mwnbjjlilqrwdmwutbxr`) | `.github/workflows/deploy-backend.yml`; migrations by hand |
+
+The backend does not go on Cloudflare and cannot: the money engine is SQL
+running inside Postgres transactions, and Workers has no equivalent.
+
+The dashboard is a *client of the public API* — it holds no secrets and has no
+direct database write access.
 
 **We built frontend-first.** The dashboard runs against a mock backend
 (`payhold-dashboard/src/api/mock/`) that implements the full v1 contract as a

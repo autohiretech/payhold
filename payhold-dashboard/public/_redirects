@@ -1,0 +1,11 @@
+# Client-side routing.
+#
+# React Router owns every path below /. Without this, Cloudflare Pages looks
+# for a file at /deals/abc123, does not find one, and returns its own 404 — so
+# the app works when you click through it and breaks the moment anyone
+# refreshes a page or opens a link you sent them. Buyers arrive on /pay/:id
+# from an email, which is exactly that case.
+#
+# 200 rather than 301: the URL stays as the buyer sees it, and the router
+# reads it.
+/*    /index.html   200

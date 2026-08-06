@@ -23,6 +23,38 @@ The floating **Simulate** button (dev only) is the control panel: fund a deal,
 advance the clock, run cron, force a payout failure, inject ledger drift, switch
 tenant, reset fixtures. Everything a provider webhook or cron job would do.
 
+## Deploying
+
+Cloudflare Pages, published by `.github/workflows/deploy-dashboard.yml` on a
+push to `main` that touches this directory. Tests and typecheck run first and
+the publish depends on them — which is the reason to use Actions rather than
+Cloudflare's own Git integration, since that builds whatever is on main whether
+or not it works.
+
+One-time setup, none of which can be done from here:
+
+1. **Create the Pages project.** Cloudflare dashboard → Workers & Pages →
+   Create → Pages → *Direct Upload*, named `payhold-dashboard`. Direct upload,
+   not Git — the workflow uploads the build, so connecting Git as well would
+   give you two pipelines racing to publish.
+2. **Create an API token** with the *Cloudflare Pages: Edit* permission.
+3. **Add two GitHub secrets** under Settings → Secrets and variables → Actions:
+   `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID`.
+
+Until those exist the workflow builds and tests and skips the publish, rather
+than failing.
+
+`public/_redirects` is what makes client-side routing work: without it a buyer
+opening `/pay/:id` from an email gets Cloudflare's 404, because there is no
+file at that path. `public/_headers` denies framing — a payment page inside
+someone else's iframe is the setup for a clickjacked confirmation.
+
+**What ships today is the mock.** `src/api/index.ts` hardwires `MockClient`, so
+a deployed build is a browser-side simulation with fixture deals in
+localStorage: it moves no money and talks to no backend. That is fine for a
+demo and wrong for anything else, and the fix is `HttpClient` plus the one line
+that file was written for.
+
 ## The seam
 
 ```

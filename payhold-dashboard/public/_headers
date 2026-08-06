@@ -1,0 +1,23 @@
+# Response headers for every page Cloudflare Pages serves.
+#
+# This site shows deal amounts and takes buyers to a payment page, so the
+# headers matter more than they would on a brochure site.
+
+/*
+  # No other origin may frame this. A payment page inside someone else's
+  # iframe is the setup for a clickjacked confirmation.
+  X-Frame-Options: DENY
+  # Same rule, the modern spelling. Both, because older browsers only read one.
+  Content-Security-Policy: frame-ancestors 'none'
+  # Do not let a browser second-guess a response's type.
+  X-Content-Type-Options: nosniff
+  # A deal id in a path is not something to hand to a third-party site the
+  # buyer clicks through to.
+  Referrer-Policy: strict-origin-when-cross-origin
+  # This app asks for none of these.
+  Permissions-Policy: geolocation=(), microphone=(), camera=(), payment=()
+
+# Vite fingerprints these, so they can be cached forever. Everything else
+# stays revalidated, or a released deal keeps showing as held.
+/assets/*
+  Cache-Control: public, max-age=31536000, immutable

@@ -21,6 +21,29 @@ npx supabase functions deploy deals payment-options sellers balance \
 
 `deno` must be on `PATH` (`~/.deno/bin` on this machine).
 
+## Deploying
+
+`.github/workflows/deploy-backend.yml`. **Supabase, not Cloudflare** — the
+money engine is SQL running inside Postgres transactions with row locks, and
+RLS is what keeps one tenant out of another's rows. Workers has neither.
+
+Functions redeploy on a push to `main` that touches `supabase/functions/`, but
+only after the SQL and Deno suites pass. All nine deploy together so a change
+in `_shared/` cannot land in one function and not another.
+
+**Migrations do not run on push.** `db push` is forward-only and runs against
+the database holding real money; on every merge, that is how a lock on `deals`
+arrives during business hours. Run the workflow by hand with the `migrate`
+input, having read `supabase migration list` in the job output first.
+
+GitHub secrets: `SUPABASE_ACCESS_TOKEN`, `SUPABASE_PROJECT_REF`
+(`mwnbjjlilqrwdmwutbxr`), and `SUPABASE_DB_PASSWORD` for migrations only.
+
+The **function** secrets stay out of GitHub entirely — set once with
+`npx supabase secrets set`. `CREDENTIALS_KEY` decrypts every tenant's provider
+credentials and every webhook signing secret; it has no business in a CI
+environment or a build log.
+
 ## The v1 endpoints
 
 | Function | Serves |

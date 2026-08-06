@@ -1,0 +1,134 @@
+# The backend → Supabase. Not Cloudflare.
+#
+# The money engine is SQL — `release_deal`, `fund_deal` and the ledger run
+# inside Postgres transactions with row locks, and RLS is what stops one
+# tenant reading another's rows. None of that has an equivalent on Workers, so
+# the backend deploys where its database is.
+#
+# Secrets this needs:
+#   SUPABASE_ACCESS_TOKEN   a personal access token, from the Supabase dashboard
+#   SUPABASE_PROJECT_REF    mwnbjjlilqrwdmwutbxr
+#   SUPABASE_DB_PASSWORD    only used by the migration job
+#
+# The function secrets themselves — CREDENTIALS_KEY, CRON_SECRET,
+# DASHBOARD_ORIGIN, PUBLIC_URL — are set once with `supabase secrets set` and
+# are deliberately NOT in this file or in GitHub. CREDENTIALS_KEY decrypts every
+# tenant's provider credentials; it does not belong in a CI log.
+
+name: Deploy backend
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'payhold-backend/supabase/functions/**'
+      - '.github/workflows/deploy-backend.yml'
+  workflow_dispatch:
+    inputs:
+      migrate:
+        description: 'Also apply pending migrations to the live database'
+        type: boolean
+        default: false
+
+defaults:
+  run:
+    working-directory: payhold-backend
+
+concurrency:
+  group: deploy-backend
+  cancel-in-progress: false
+
+jobs:
+  # The gate. Every invariant the money engine claims, checked against a real
+  # Postgres before anything is deployed.
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: payhold-backend/package-lock.json
+
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      - run: npm ci
+
+      - name: Typecheck the Edge Functions
+        run: npm run typecheck
+
+      - name: Schema and money invariants (PGlite)
+        run: npm run test:sql
+
+      - name: Edge Function tests
+        run: npm run test:functions
+
+  functions:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: supabase/setup-cli@v1
+        with:
+          version: latest
+
+      # Skipped, not failed, until the token exists — same reasoning as the
+      # dashboard workflow.
+      - name: Check Supabase is configured
+        id: sb
+        env:
+          TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+        run: |
+          if [ -n "$TOKEN" ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::SUPABASE_ACCESS_TOKEN is not set — tested, not deployed."
+          fi
+
+      # Deployed together so a shared change in `_shared/` cannot land in one
+      # function and not another.
+      - name: Deploy Edge Functions
+        if: steps.sb.outputs.ready == 'true'
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+        run: |
+          supabase functions deploy \
+            deals payment-options sellers balance webhook-endpoints \
+            flutterwave-webhook provider-accounts webhook-dispatch reconcile \
+            --project-ref "${{ secrets.SUPABASE_PROJECT_REF }}"
+
+  # Migrations are deliberately NOT on the push trigger.
+  #
+  # `db push` is forward-only and runs against the live database — the one
+  # holding real money. Running it automatically on every merge is how a lock
+  # on `deals` arrives during business hours, or a rename lands that nobody
+  # meant to ship today. Trigger this by hand, having read the diff.
+  migrate:
+    needs: test
+    if: github.event_name == 'workflow_dispatch' && inputs.migrate
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: supabase/setup-cli@v1
+        with:
+          version: latest
+
+      - name: Show what would be applied
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+        run: |
+          supabase link --project-ref "${{ secrets.SUPABASE_PROJECT_REF }}"
+          supabase migration list
+
+      - name: Apply migrations
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+        run: supabase db push

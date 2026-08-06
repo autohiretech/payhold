@@ -1,0 +1,86 @@
+# The dashboard → Cloudflare Pages.
+#
+# Tests and typecheck run first and the deploy depends on them. That ordering
+# is the point of having this in CI at all: the alternative is Cloudflare's own
+# Git integration, which builds whatever is on main whether or not it works.
+#
+# Secrets this needs, set under Settings → Secrets and variables → Actions:
+#   CLOUDFLARE_API_TOKEN    a token with the "Cloudflare Pages: Edit" permission
+#   CLOUDFLARE_ACCOUNT_ID   from the right-hand side of any Cloudflare dashboard page
+#
+# The Pages project must exist first — see "Deploying" in payhold-dashboard/CLAUDE.md.
+
+name: Deploy dashboard
+
+on:
+  push:
+    branches: [main]
+    # Only when the dashboard actually changed. A backend-only commit has no
+    # business republishing the front end.
+    paths:
+      - 'payhold-dashboard/**'
+      - '.github/workflows/deploy-dashboard.yml'
+  # So a deploy can be re-run without an empty commit.
+  workflow_dispatch:
+
+defaults:
+  run:
+    working-directory: payhold-dashboard
+
+# One deploy at a time. Two overlapping runs would race to publish, and the
+# slower one wins — which is the older one.
+concurrency:
+  group: deploy-dashboard
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: payhold-dashboard/package-lock.json
+
+      # `ci` not `install`: it installs exactly the lockfile and fails if
+      # package.json and the lock disagree, which is what you want deciding
+      # whether to publish.
+      - run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+      # Skipped, not failed, until the secrets exist. This workflow lands on
+      # main before the Cloudflare project does, and a red X on a commit that
+      # is fine teaches people to ignore red Xs.
+      - name: Check Cloudflare is configured
+        id: cf
+        env:
+          TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          if [ -n "$TOKEN" ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::CLOUDFLARE_API_TOKEN is not set — built and tested, not published."
+          fi
+
+      - name: Publish to Cloudflare Pages
+        if: steps.cf.outputs.ready == 'true'
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: payhold-dashboard
+          command: pages deploy dist --project-name=payhold-dashboard --branch=main
