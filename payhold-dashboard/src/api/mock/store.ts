@@ -44,7 +44,14 @@ import type {
 //    handed an answer. Payouts gained review fields, alerts gained a rail.
 // 9: accounts. The dashboard is behind a sign-in, so the mock needs the thing
 //    a session resolves to — `tenant_users` in Postgres.
-export const SCHEMA_VERSION = 10
+// 10: request_context — where a payment was made from.
+// 11: the seed screens its due payouts through the real risk rules, so a held
+//    payout and its signal exist from the first load. A bump is what makes that
+//    reach anybody: the fixtures changed while the *shape* did not, so a saved
+//    database from version 10 is perfectly loadable and would keep showing an
+//    empty Fraud screen forever. Stale state is discarded and re-seeded — a
+//    demo nobody can see is the same as a demo that does not work.
+export const SCHEMA_VERSION = 11
 const STORAGE_KEY = 'payhold.mock.v1'
 
 /**
