@@ -47,7 +47,7 @@ describe('reading payment origins', () => {
 
   it('filters to one deal when asked', async () => {
     const all = await api.listRequestContext()
-    const dealId = all[0].deal_id
+    const dealId = all[0]!.deal_id
 
     const forDeal = await api.listRequestContext(dealId)
     expect(forDeal.length).toBeGreaterThan(0)
@@ -108,7 +108,7 @@ describe('the mock cannot write one', () => {
 
     await api.listRequestContext()
 
-    const after = loadDb()
+    const after = loadDb(seedDb)
     expect(
       JSON.stringify({
         ledger: after.ledger,

@@ -49,7 +49,8 @@ import {
 } from './evidence-photos'
 import { collectionRails, defaultProviderFor, providerFor } from '@/lib/rails'
 import { makeAccount } from './accounts'
-import { SCHEMA_VERSION, addDays, type MockDb } from './store'
+import { payoutFindings, recordFindings } from './risk'
+import { SCHEMA_VERSION, addDays, nextId, type MockDb } from './store'
 
 const AUTOHIRE = 'ten_0001'
 const EQUIPCO = 'ten_0002'
@@ -1149,7 +1150,7 @@ export function seedDb(): MockDb {
     })
   }
 
-  return {
+  const db: MockDb = {
     version: SCHEMA_VERSION,
     clock_offset_ms: 0,
     current_tenant_id: AUTOHIRE,
@@ -1176,5 +1177,72 @@ export function seedDb(): MockDb {
     fail_next_webhook: false,
     provider_drift,
     id_counter: counter,
+  }
+
+  screenSeededPayouts(db)
+
+  return db
+}
+
+/**
+ * Run the deterministic rules over the payouts that have come due and not gone
+ * out, the way the dispatcher does when it picks them up.
+ *
+ * The fixtures could have carried a hand-written hold and a hand-written
+ * signal, and that would have been a lie in two directions: a demo whose fraud
+ * screen shows a rule the code would not have fired, and a wording that drifts
+ * from `risk.ts` the first time somebody edits an explanation. So this calls
+ * the real rules and records what they actually say — the same reason the
+ * seeded AI drafts are produced by running `composeDisputeDraft` rather than by
+ * copying its output.
+ *
+ * Two departures from `screenPayout`, both deliberate. Nothing is queued for
+ * delivery, because the seeded history predates the delivery log the same way
+ * the rest of it does — `webhook_deliveries` starts empty on purpose. And the
+ * hold is stamped at the payout's due date rather than at seed time, because
+ * that is when the dispatcher would have looked at it.
+ */
+function screenSeededPayouts(db: MockDb): void {
+  for (const payout of db.payouts) {
+    // Only what the dispatcher would have reached: due, and still unsent.
+    if (payout.status !== 'scheduled') continue
+    if (new Date(payout.scheduled_for) > new Date()) continue
+
+    const cfg = db.settings.find((s) => s.tenant_id === payout.tenant_id)
+    if (!cfg) continue
+
+    const findings = payoutFindings(db, payout, cfg)
+    if (findings.length === 0) continue
+
+    // Recorded whether or not the rules are switched on. The setting governs
+    // holding, not noticing.
+    const signals = recordFindings(
+      db,
+      payout.tenant_id,
+      payout.deal_id,
+      payout.seller_id,
+      findings,
+    )
+    for (const signal of signals) signal.created_at = payout.scheduled_for
+
+    const blocking = findings.filter((f) => f.severity === 'review')
+    if (!cfg.risk_rules_enabled || blocking.length === 0) continue
+
+    payout.status = 'held_for_review'
+    payout.review_held_at = payout.scheduled_for
+
+    db.audit.push({
+      id: nextId('aud'),
+      tenant_id: payout.tenant_id,
+      deal_id: payout.deal_id,
+      actor: 'system',
+      action: 'payout.held_for_review',
+      details: {
+        payout_id: payout.id,
+        signals: blocking.map((f) => f.signal),
+        reasons: blocking.map((f) => f.explanation),
+      },
+      created_at: payout.scheduled_for,
+    })
   }
 }

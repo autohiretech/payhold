@@ -11,6 +11,7 @@ import { DisputesPage } from '@/screens/Disputes'
 import { FraudPage } from '@/screens/Fraud'
 import { IntelligencePage } from '@/screens/Intelligence'
 import { SellersPage } from '@/screens/Sellers'
+import { SellerDetailPage } from '@/screens/SellerDetail'
 import { RailsPage } from '@/screens/Rails'
 import { SettingsPage } from '@/screens/Settings'
 import { ApiKeysPage } from '@/screens/ApiKeys'
@@ -46,6 +47,7 @@ export const routes: RouteObject[] = [
       { path: 'intelligence', element: <IntelligencePage /> },
       { path: 'fraud', element: <FraudPage /> },
       { path: 'sellers', element: <SellersPage /> },
+      { path: 'sellers/:id', element: <SellerDetailPage /> },
       { path: 'rails', element: <RailsPage /> },
       { path: 'settings', element: <SettingsPage /> },
       { path: 'api-keys', element: <ApiKeysPage /> },

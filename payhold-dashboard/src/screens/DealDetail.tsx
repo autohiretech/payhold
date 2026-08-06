@@ -205,7 +205,19 @@ export function DealDetailPage() {
             </dl>
 
             <dl className="mt-4 space-y-2 border-t border-line pt-3 text-sm">
-              <Row label="Seller" value={seller?.name ?? d.seller_id} muted />
+              <Row
+                label="Seller"
+                value={
+                  seller ? (
+                    <Link className="text-brand hover:underline" to={`/sellers/${seller.id}`}>
+                      {seller.name}
+                    </Link>
+                  ) : (
+                    d.seller_id
+                  )
+                }
+                muted
+              />
               <Row label="Payout to" value={seller?.masked_destination ?? '—'} muted />
               <Row
                 label="Paid with"
@@ -256,7 +268,7 @@ function Row({
   strong,
 }: {
   label: string
-  value: string
+  value: React.ReactNode
   muted?: boolean
   strong?: boolean
 }) {

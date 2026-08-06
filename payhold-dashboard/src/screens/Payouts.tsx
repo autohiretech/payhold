@@ -133,7 +133,18 @@ export function PayoutsPage() {
 
                 return [
                   <tr key={p.id} className="hover:bg-surface-2">
-                    <Td className="font-medium">{seller?.name ?? p.seller_id}</Td>
+                    <Td className="font-medium">
+                      {seller ? (
+                        <Link
+                          className="text-brand hover:underline"
+                          to={`/sellers/${seller.id}`}
+                        >
+                          {seller.name}
+                        </Link>
+                      ) : (
+                        <Mono>{p.seller_id}</Mono>
+                      )}
+                    </Td>
                     <Td className="text-fg-muted">
                       {seller?.masked_destination ?? '—'}
                     </Td>

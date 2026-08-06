@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { Link } from 'react-router-dom'
 import { api, type Country, type Currency, type PayoutProvider } from '@/api'
 import { ProviderChip } from '@/components/rails'
 import {
@@ -103,7 +104,11 @@ export function SellersPage() {
                 const route = payoutRoute(s.country, s.payout_currency)
                 return (
                   <tr key={s.id} className="hover:bg-surface-2">
-                    <Td className="font-medium">{s.name}</Td>
+                    <Td className="font-medium">
+                      <Link className="text-brand hover:underline" to={`/sellers/${s.id}`}>
+                        {s.name}
+                      </Link>
+                    </Td>
                     <Td className="text-fg-muted">
                       {countryFlag(s.country)} {countryName(s.country)}
                     </Td>

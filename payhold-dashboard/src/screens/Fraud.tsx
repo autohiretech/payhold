@@ -353,6 +353,7 @@ export function FraudPage() {
                 <Th>Address</Th>
                 <Th>How we know</Th>
                 <Th>Deal</Th>
+                <Th>Buyer</Th>
                 <Th>Event</Th>
                 <Th>When</Th>
               </tr>
@@ -378,11 +379,14 @@ export function FraudPage() {
                   </Td>
                   <Td>
                     <Link className="text-brand hover:underline" to={`/deals/${row.deal_id}`}>
-                      <Mono>{dealRef(row.deal_id)}</Mono>
+                      <Mono>{row.deal_id}</Mono>
                     </Link>
                   </Td>
+                  <Td className="text-fg-muted">
+                    <Mono>{buyerRef(row.deal_id) ?? '—'}</Mono>
+                  </Td>
                   <Td>{EVENT_LABEL[row.event] ?? row.event}</Td>
-                  <Td>{formatDateTime(row.created_at)}</Td>
+                  <Td className="text-fg-muted">{formatDateTime(row.created_at)}</Td>
                 </tr>
               ))}
             </tbody>
@@ -408,11 +412,46 @@ export function FraudPage() {
           wait while a person looks.
         </p>
         <p>
+          <span className="font-semibold text-fg">
+            The assistant reads this screen and cannot act on it.
+          </span>{' '}
+          “Brief me” asks it to summarise who is about to be paid — how long the
+          seller has been registered, what they have been paid before, whether a
+          dispute has gone against them. It is the only kind of help a model is
+          allowed to give here: a hold is arithmetic over this account's own
+          tables, which is what lets a rule stop something at all, and a summary
+          you can check beats a score you cannot. Nothing the assistant writes
+          holds, clears, releases or sends.
+        </p>
+        <p>
           Payment origins are personal data, kept indefinitely so a fraud model
           trained on this account's own history has something to learn from.
         </p>
       </div>
     </>
+  )
+}
+
+/**
+ * A named counterparty, opened rather than read.
+ *
+ * A fraud screen's whole job is to put a person in front of somebody, so a name
+ * here is never plain text: it goes to that seller's record — their market,
+ * their destination, every deal and payout they have had, and every signal
+ * their name is on.
+ */
+function SellerLink({
+  seller,
+  fallback,
+}: {
+  seller: { id: string; name: string } | undefined
+  fallback: string
+}) {
+  if (!seller) return <span className="text-fg-muted">{fallback}</span>
+  return (
+    <Link className="text-brand hover:underline" to={`/sellers/${seller.id}`}>
+      {seller.name}
+    </Link>
   )
 }
 
