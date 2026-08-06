@@ -250,12 +250,19 @@ export function recordFindings(
   dealId: string,
   sellerId: string | null,
   findings: RiskFinding[],
+  /**
+   * Where ids and timestamps come from. The defaults are the live store and
+   * the simulated clock; the seed overrides both, because it screens its own
+   * fixtures before the store has a database and dates them when the
+   * dispatcher would have looked rather than when the browser first loaded.
+   */
+  stamp: { id?: () => string; at?: string } = {},
 ): RiskSignal[] {
-  const created = nowIso()
+  const created = stamp.at ?? nowIso()
 
   return findings.map((finding) => {
     const signal: RiskSignal = {
-      id: nextId('risk'),
+      id: stamp.id ? stamp.id() : nextId('risk'),
       tenant_id: tenantId,
       deal_id: dealId,
       seller_id: sellerId,

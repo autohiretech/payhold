@@ -297,9 +297,19 @@ export function advanceClock(hours: number): void {
 
 /** Readable, prefixed, stable ids — `deal_a3f`, `po_120`. */
 export function nextId(prefix: string): string {
-  const d = getDb()
-  d.id_counter += 1
-  return `${prefix}_${d.id_counter.toString(36).padStart(4, '0')}`
+  return mintId(getDb(), prefix)
+}
+
+/**
+ * The same counter, against a database handed in rather than the loaded one.
+ *
+ * The seed needs this: it runs the real risk rules over its own fixtures before
+ * the store has a database to look up, and an id minted from a different
+ * counter would collide with one minted later from this one.
+ */
+export function mintId(db: MockDb, prefix: string): string {
+  db.id_counter += 1
+  return `${prefix}_${db.id_counter.toString(36).padStart(4, '0')}`
 }
 
 // ---------------------------------------------------------------------------

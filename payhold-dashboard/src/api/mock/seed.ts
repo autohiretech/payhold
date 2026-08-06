@@ -50,7 +50,7 @@ import {
 import { collectionRails, defaultProviderFor, providerFor } from '@/lib/rails'
 import { makeAccount } from './accounts'
 import { payoutFindings, recordFindings } from './risk'
-import { SCHEMA_VERSION, addDays, nextId, type MockDb } from './store'
+import { SCHEMA_VERSION, addDays, mintId, type MockDb } from './store'
 
 const AUTOHIRE = 'ten_0001'
 const EQUIPCO = 'ten_0002'
@@ -201,6 +201,25 @@ export function seedDb(): MockDb {
       beneficiary_token: 'ben_fw_4ke82',
       masked_destination: 'M-Pesa •••• 5540',
       created_at: ago(52),
+    },
+    /**
+     * Registered a day before taking a booking, and now due their first payout.
+     * That combination is the new-seller rule's whole subject, and without
+     * somebody it applies to the Fraud screen has nothing to show and no way to
+     * be checked. Nothing is wrong with them — most sellers who register on a
+     * Tuesday are exactly who they say they are — which is the point: the rule
+     * makes them wait for a person, and it may do nothing else.
+     */
+    {
+      id: 'sel_0007',
+      tenant_id: AUTOHIRE,
+      name: 'Théoneste Ndayisaba',
+      country: 'RW',
+      payout_currency: 'RWF',
+      payout_provider: 'flutterwave_momo',
+      beneficiary_token: 'ben_fw_9tn07',
+      masked_destination: 'MTN •••• 3157',
+      created_at: ago(14),
     },
     {
       id: 'sel_0005',
@@ -411,6 +430,21 @@ export function seedDb(): MockDb {
     },
 
     // --- Cleared, payout scheduled or failed -------------------------------
+    //
+    // The first of these is what the Fraud screen is for: cleared, due, and
+    // stopped by a rule rather than sent. It is a real hold produced by the
+    // real rules at seed time — see `screenSeededPayouts` — so the explanation
+    // on the screen is the one `risk.ts` writes today, not a copy of it.
+    {
+      tenant_id: AUTOHIRE,
+      seller_id: 'sel_0007',
+      buyer_ref: 'bk_9a52',
+      description: 'Hilux double cab — 4 days, Nyungwe',
+      amount: 38_000_00,
+      status: 'released',
+      created: 13,
+      confirmed: ['buyer', 'seller'],
+    },
     {
       tenant_id: AUTOHIRE,
       seller_id: 'sel_0003',
@@ -1216,14 +1250,10 @@ function screenSeededPayouts(db: MockDb): void {
 
     // Recorded whether or not the rules are switched on. The setting governs
     // holding, not noticing.
-    const signals = recordFindings(
-      db,
-      payout.tenant_id,
-      payout.deal_id,
-      payout.seller_id,
-      findings,
-    )
-    for (const signal of signals) signal.created_at = payout.scheduled_for
+    recordFindings(db, payout.tenant_id, payout.deal_id, payout.seller_id, findings, {
+      id: () => mintId(db, 'risk'),
+      at: payout.scheduled_for,
+    })
 
     const blocking = findings.filter((f) => f.severity === 'review')
     if (!cfg.risk_rules_enabled || blocking.length === 0) continue
@@ -1232,7 +1262,7 @@ function screenSeededPayouts(db: MockDb): void {
     payout.review_held_at = payout.scheduled_for
 
     db.audit.push({
-      id: nextId('aud'),
+      id: mintId(db, 'aud'),
       tenant_id: payout.tenant_id,
       deal_id: payout.deal_id,
       actor: 'system',

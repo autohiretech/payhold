@@ -274,6 +274,13 @@ The rules are arithmetic over our own tables, which is exactly what lets them
 act at all under invariant 9. The AI risk *narrator* is a separate thing: it
 summarises, it never holds.
 
+The narrator reads this screen and cannot act on it. A held payout offers "brief
+me", which drafts the §12.2 summary of the counterparties and writes a
+suggestion; it holds, clears, releases and sends nothing, and the approval stays
+on the Payouts screen against a named person. A hold is arithmetic over our own
+tables, which is what lets a rule stop anything under invariant 9 — a summary
+you can check is the only thing a model may add to that.
+
 **Where a payment came from** is recorded in `request_context` — an address, a
 provenance (`provider` / `hosted_page` / `client_attested`) and the event it was
 seen at. Observation only: no rule reads it, and capture cannot fail a payment.
@@ -286,7 +293,9 @@ usually a carrier rather than a person — IP is worth having for geo-mismatch a
 cross-tenant reuse, not as a verdict. And it is the first personal data PayHold
 stores, kept indefinitely by decision so §12.4 has history to train on, which
 carries a stated purpose and a deletion path as obligations rather than
-options. The `Fraud` screen is where a person reads it; the AI role cannot.
+options. The `Fraud` screen is where a person reads it; the AI role cannot. Every
+name on that screen opens the counterparty behind it — a hold is a question
+about a seller, and nobody should have to decide it from a string.
 
 ## Cron jobs
 

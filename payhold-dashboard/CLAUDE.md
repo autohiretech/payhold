@@ -313,6 +313,58 @@ origin. In the real system the only writers are the `/pay` handler and the
 provider webhook; a mock that let a screen invent an address would be teaching a
 capability the backend deliberately withheld.
 
+**The AI on this screen is the risk narrator, and it is on the reading side of
+the line.** "Brief me" on a held payout drafts a summary of the counterparties —
+how long the seller has been registered, what they have been paid before,
+whether a dispute has gone against them — through the same `draftRiskSummary`
+the Payouts screen calls. It writes a suggestion and touches no money, which is
+invariant 9 and also the reason it is safe to put on a fraud screen at all:
+holding is arithmetic over our own tables, so a rule can be reproduced and
+argued with, and that is exactly what a model cannot offer. The four controls in
+the footer are still four — the narrator is not a fifth, and clearing the hold
+stays on Payouts where the approval is recorded against a person.
+
+**Held for review means `held_for_review`, not `frozen`.** They are different
+stops with different remedies: one payout waiting on one person, versus the
+whole account stopped by reconciliation. The account-wide freeze is a banner on
+this screen rather than rows in the table, the same way Payouts shows it.
+
+**Every name is a link.** A fraud screen exists to put a person in front of
+somebody, so seller names go to `/sellers/:id` and each table carries the deal's
+`buyer_ref` beside it. `buyer_ref` is the client's own identifier and the only
+buyer-side handle PayHold has — we store no buyer PII — which is why the same
+buyer appearing twice is something an operator can see and we cannot name.
+
+## The seller page
+
+`src/screens/SellerDetail.tsx` is one counterparty and everything this account
+knows about them: destination and route, every deal, every payout, every signal
+their name is on, and where their buyers paid from. It is a record and not a
+verdict — nothing on it scores anybody, and it carries no action, because
+clearing a hold belongs on Payouts where the approval is recorded.
+
+The column worth keeping is **age at creation**, shown per deal rather than as
+one "registered" date. That is the figure the new-seller rule fires on, and
+`risk.ts` measures it at the deal's creation for a reason the page repeats: with
+a seven-day clearance window every seller is a week old by the time their first
+payout comes due, so measuring at payout time would make the rule unfireable.
+
+## Seeded risk fixtures
+
+The seed screens its due payouts through the real rules on the way out
+(`screenSeededPayouts`), rather than shipping a hand-written hold. A fixture
+hold would be wrong in two directions at once: a demo showing a rule the code
+would not have fired, and wording that drifts from `risk.ts` the first time
+somebody edits an explanation. `seed-risk.test.ts` pins both halves — the hold
+is a real one, and re-deriving the findings reproduces the stored explanations.
+
+`sel_0007` exists for this: registered a day before taking a booking, now due a
+first payout, which is the new-seller rule's whole subject. Nothing is wrong
+with them, and that is the point — the rule makes them wait for a person and may
+do nothing else. Two departures from the dispatcher's `screenPayout`: the seed
+queues no webhook delivery (`webhook_deliveries` starts empty by design), and it
+stamps the hold at the payout's due date rather than at seed time.
+
 ## Outbound webhooks and risk rules
 
 `src/lib/hmac.ts` is a real synchronous HMAC-SHA256, not a stand-in. A mock
