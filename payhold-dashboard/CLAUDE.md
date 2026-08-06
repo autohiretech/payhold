@@ -281,6 +281,38 @@ the mock's: the backend's `disputes` table has a reason and no evidence rows
 yet, so the model weighs the opening statement, the timeline and the seller's
 record. That gap is listed in the backend's *Not built yet*.
 
+## The Fraud screen
+
+`src/screens/Fraud.tsx` is where a person reads what the controls noticed. It is
+ordered by how much a row deserves to be believed, top to bottom, and that
+ordering is the design:
+
+1. **Held for review** — the only rows with somebody waiting on the other end.
+2. **What the rules noticed** — signals, recorded whether or not the rules are
+   switched on, because the setting governs holding and not noticing.
+3. **Where payments came from** — `request_context`, last on purpose. An IP
+   table at the top of a fraud screen invites people to read addresses as
+   accusations, and these addresses are the newest and weakest evidence on the
+   page.
+
+Every origin row carries its provenance as words rather than a colour —
+"Provider saw it", "Our page saw it", "Client told us" — because the difference
+between an observation and a claim is the whole point, and nobody should have to
+learn a palette to notice that one of the three is something a client typed.
+
+Two things the copy is doing deliberately. A repeated address is annotated
+("seen on 3 payments") and **not** flagged: mobile money in Rwanda and Kenya
+runs behind carrier-grade NAT, so a shared address is usually a carrier rather
+than a person, and a screen that cried wolf on that would be wrong about most of
+this account's honest traffic. And the footer names the three controls that
+never appear here — 3D Secure, tokenisation, Radar — because a fraud screen that
+lists only what it can show implies the other three do not exist.
+
+`request-context.test.ts` asserts the mock exposes no method that *writes* an
+origin. In the real system the only writers are the `/pay` handler and the
+provider webhook; a mock that let a screen invent an address would be teaching a
+capability the backend deliberately withheld.
+
 ## Outbound webhooks and risk rules
 
 `src/lib/hmac.ts` is a real synchronous HMAC-SHA256, not a stand-in. A mock

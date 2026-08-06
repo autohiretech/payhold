@@ -28,6 +28,7 @@ import { releaseFigures } from '../_shared/figures.ts'
 import { convertOrThrow, presentmentCurrencyFor } from '../_shared/fx.ts'
 import { handler, json, readJson, required } from '../_shared/http.ts'
 import { loadProvider } from '../_shared/load-provider.ts'
+import { payContext, recordContext } from '../_shared/request-context.ts'
 import {
   countryInfo,
   currenciesFor,
@@ -242,7 +243,16 @@ async function pay(
   caller: Caller,
   id: string,
 ): Promise<Response> {
-  const body = await readJson<{ method: PaymentMethod; network?: string }>(req)
+  const body = await readJson<{
+    method: PaymentMethod
+    network?: string
+    /**
+     * The buyer's address, where the client collects it themselves — spec §6.
+     * Optional, unverifiable, and recorded as `client_attested` so nothing
+     * downstream mistakes it for something a provider saw.
+     */
+    buyer_ip?: string
+  }>(req)
   required(body as unknown as Record<string, unknown>, 'method')
 
   const deal = await getDeal(db, caller, id)
@@ -292,6 +302,35 @@ async function pay(
     p_action: 'deal.payment_started',
     p_details: { provider: rail, method: body.method, network: body.network ?? null },
   })
+
+  // Where this payment is being made from. Observation only — no rule reads it
+  // yet, and none of it can fail the charge (see `recordContext`).
+  const context = payContext(req, body)
+
+  if (context.attested) {
+    await recordContext(db, {
+      deal_id: deal.id,
+      source: 'client_attested',
+      event: 'pay_started',
+      ip: context.attested,
+      user_agent: context.userAgent,
+    })
+  }
+
+  // The observed address is only the buyer's when the request came from a
+  // browser rather than from a client's server. With an API key present it is
+  // the integration's own host — interesting in its own right, but it is not
+  // the buyer, and filing it as though it were would poison every rule that
+  // later reads this column.
+  if (context.observed && caller.kind !== 'api_key') {
+    await recordContext(db, {
+      deal_id: deal.id,
+      source: 'hosted_page',
+      event: 'pay_started',
+      ip: context.observed,
+      user_agent: context.userAgent,
+    })
+  }
 
   return json(req, {
     payment_link: charge.payment_link,

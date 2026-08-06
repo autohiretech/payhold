@@ -274,6 +274,20 @@ The rules are arithmetic over our own tables, which is exactly what lets them
 act at all under invariant 9. The AI risk *narrator* is a separate thing: it
 summarises, it never holds.
 
+**Where a payment came from** is recorded in `request_context` — an address, a
+provenance (`provider` / `hosted_page` / `client_attested`) and the event it was
+seen at. Observation only: no rule reads it, and capture cannot fail a payment.
+The three sources are kept apart because a client can tell us anything and a
+provider is reporting what it saw.
+
+Two things bind anyone writing a rule against it. In the launch markets most
+buyers pay by mobile money from behind carrier-grade NAT, so a shared address is
+usually a carrier rather than a person — IP is worth having for geo-mismatch and
+cross-tenant reuse, not as a verdict. And it is the first personal data PayHold
+stores, kept indefinitely by decision so §12.4 has history to train on, which
+carries a stated purpose and a deletion path as obligations rather than
+options. The `Fraud` screen is where a person reads it; the AI role cannot.
+
 ## Cron jobs
 
 | Job | Function |

@@ -20,6 +20,7 @@ import type {
   Payout,
   ProviderAccount,
   ReconciliationAlert,
+  RequestContext,
   RiskSignal,
   Seller,
   Tenant,
@@ -43,7 +44,7 @@ import type {
 //    handed an answer. Payouts gained review fields, alerts gained a rail.
 // 9: accounts. The dashboard is behind a sign-in, so the mock needs the thing
 //    a session resolves to — `tenant_users` in Postgres.
-export const SCHEMA_VERSION = 9
+export const SCHEMA_VERSION = 10
 const STORAGE_KEY = 'payhold.mock.v1'
 
 /**
@@ -109,6 +110,11 @@ export interface MockDb {
   /** Deterministic rule output — spec §12.3's `risk_signals`. */
   risk_signals: RiskSignal[]
   /**
+   * Where payments were made from — spec §6. Observation only; nothing in the
+   * engine reads it, which is exactly the state the real table is in.
+   */
+  request_context: RequestContext[]
+  /**
    * Intelligence. Kept beside the money tables rather than inside them on
    * purpose: a suggestion is a note about a deal, never part of its state, and
    * dropping all three tables would change nothing about what a deal does.
@@ -168,6 +174,7 @@ const REQUIRED_KEYS: Record<keyof MockDb, true> = {
   audit: true,
   alerts: true,
   risk_signals: true,
+  request_context: true,
   ai_suggestions: true,
   ai_chat: true,
   deal_outcomes: true,

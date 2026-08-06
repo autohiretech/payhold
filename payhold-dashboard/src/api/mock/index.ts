@@ -47,6 +47,7 @@ import {
   type RailStatus,
   type RailBalance,
   type ReconciliationAlert,
+  type RequestContext,
   type RiskSignal,
   type Seller,
   type Tenant,
@@ -408,6 +409,20 @@ export class MockClient implements PayHoldClient {
       .filter((s) => !dealId || s.deal_id === dealId)
       .sort((a, b) => b.created_at.localeCompare(a.created_at))
     return delay(clone(signals))
+  }
+
+  /**
+   * Where payments were made from. Read-only here as it is in the backend —
+   * there is no mock method that writes one, because nothing in the engine
+   * should be able to.
+   */
+  async listRequestContext(dealId?: string): Promise<RequestContext[]> {
+    const db = getDb()
+    const rows = db.request_context
+      .filter((c) => c.tenant_id === db.current_tenant_id)
+      .filter((c) => !dealId || c.deal_id === dealId)
+      .sort((a, b) => b.created_at.localeCompare(a.created_at))
+    return delay(clone(rows))
   }
 
   // -- Disputes ------------------------------------------------------------

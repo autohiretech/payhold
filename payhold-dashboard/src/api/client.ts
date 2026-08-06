@@ -39,6 +39,7 @@ import type {
   RailBalance,
   RailStatus,
   ReconciliationAlert,
+  RequestContext,
   RiskSignal,
   Seller,
   Tenant,
@@ -94,6 +95,11 @@ export interface PayHoldClient {
   approvePayoutReview(id: string, approvedBy: string): Promise<Payout>
   /** What the deterministic rules noticed, whether or not they held anything. */
   listRiskSignals(dealId?: string): Promise<RiskSignal[]>
+  /**
+   * Where payments were made from — the observation a signal is checked
+   * against. Read-only; there is no method that writes one.
+   */
+  listRequestContext(dealId?: string): Promise<RequestContext[]>
 
   // -- Disputes ------------------------------------------------------------
   listDisputes(): Promise<Dispute[]>

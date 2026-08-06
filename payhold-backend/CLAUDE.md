@@ -63,7 +63,7 @@ environment or a build log.
 | `flutterwave-webhook` | inbound, at `/flutterwave-webhook/:tenant` |
 | `provider-accounts` | bring-your-own-keys |
 | `payouts` | list, get with signals, `/approve-review`, `/retry` |
-| `risk-signals` | what the deterministic rules noticed, filterable |
+| `risk-signals` | what the deterministic rules noticed, filterable; `?context=1` for where payments came from |
 | `webhook-dispatch`, `reconcile`, `auto-release`, `payout-dispatch` | cron only, `CRON_SECRET` |
 | `ai-dispute`, `ai-risk-narrator`, `ai-support` | draft a resolution, brief a payout, answer a question. These run as `payhold_ai` and never hold the service role |
 | `ai-decisions` | approve or reject a draft; `?usage=1`, `?outcomes=1`. The one AI-adjacent function that *does* hold the service role, because approving is what moves money |

@@ -8,6 +8,7 @@ import { DealsPage } from '@/screens/Deals'
 import { DealDetailPage } from '@/screens/DealDetail'
 import { PayoutsPage } from '@/screens/Payouts'
 import { DisputesPage } from '@/screens/Disputes'
+import { FraudPage } from '@/screens/Fraud'
 import { IntelligencePage } from '@/screens/Intelligence'
 import { SellersPage } from '@/screens/Sellers'
 import { RailsPage } from '@/screens/Rails'
@@ -43,6 +44,7 @@ export const routes: RouteObject[] = [
       { path: 'payouts', element: <PayoutsPage /> },
       { path: 'disputes', element: <DisputesPage /> },
       { path: 'intelligence', element: <IntelligencePage /> },
+      { path: 'fraud', element: <FraudPage /> },
       { path: 'sellers', element: <SellersPage /> },
       { path: 'rails', element: <RailsPage /> },
       { path: 'settings', element: <SettingsPage /> },

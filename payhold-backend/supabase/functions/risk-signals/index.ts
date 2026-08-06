@@ -5,6 +5,7 @@
  *   GET /risk-signals?deal_id=…          for one deal
  *   GET /risk-signals?seller_id=…        everything recorded against a seller
  *   GET /risk-signals?severity=review    only the ones that stopped something
+ *   GET /risk-signals?context=1          where payments were made from
  *
  * Read-only, and there is no endpoint that writes one. Signals are recorded by
  * `screen_payout` inside the transaction that screens a payout, whether or not
@@ -25,6 +26,9 @@ import { PayHoldError } from '../_shared/types.ts'
 const SIGNAL_COLUMNS =
   'id, tenant_id, deal_id, seller_id, signal, severity, value, explanation, created_at'
 
+const CONTEXT_COLUMNS =
+  'id, tenant_id, deal_id, source, event, ip, ip_country, user_agent, created_at'
+
 Deno.serve(handler(async (req) => {
   if (req.method !== 'GET') {
     throw new PayHoldError('policy_violation', `${req.method} is not supported here`)
@@ -33,6 +37,28 @@ Deno.serve(handler(async (req) => {
   const db = serviceClient()
   const caller = await resolveCaller(db, req)
   const params = new URL(req.url).searchParams
+
+  // Served from here rather than from a function of its own because it answers
+  // the same question from the other end: a signal is what a rule concluded,
+  // and this is the raw observation an operator checks it against. Same screen,
+  // same tenant scope, same read-only posture — there is no endpoint that
+  // writes either one.
+  if (params.get('context')) {
+    let contextQuery = db
+      .from('request_context')
+      .select(CONTEXT_COLUMNS)
+      .eq('tenant_id', caller.tenant_id)
+      .order('created_at', { ascending: false })
+      .limit(Math.min(Number(params.get('limit') ?? 200), 1_000))
+
+    const forDeal = params.get('deal_id')
+    if (forDeal) contextQuery = contextQuery.eq('deal_id', forDeal)
+
+    const { data, error } = await contextQuery
+    if (error) throw new Error(`request context lookup failed: ${error.message}`)
+
+    return json(req, { request_context: data ?? [] })
+  }
 
   let query = db
     .from('risk_signals')

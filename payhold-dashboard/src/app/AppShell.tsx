@@ -12,6 +12,7 @@ const NAV = [
   { to: '/payouts', label: 'Payouts', icon: IconPayouts },
   { to: '/disputes', label: 'Disputes', icon: IconDisputes },
   { to: '/intelligence', label: 'Intelligence', icon: IconIntelligence },
+  { to: '/fraud', label: 'Fraud', icon: IconFraud },
   { to: '/sellers', label: 'Sellers', icon: IconSellers },
   { to: '/rails', label: 'Payment rails', icon: IconRails },
 ]
@@ -236,6 +237,17 @@ function IconIntelligence() {
     <>
       <path d="M12 3.5 13.6 8.4 18.5 10 13.6 11.6 12 16.5 10.4 11.6 5.5 10 10.4 8.4z" />
       <path d="M18 16.5l.7 2 2 .7-2 .7-.7 2-.7-2-2-.7 2-.7z" />
+    </>,
+  )
+}
+
+/** A shield: the controls guard, they do not accuse. */
+function IconFraud() {
+  return icon(
+    <>
+      <path d="M12 3.5 19 6v5.5c0 4-2.9 7.4-7 8.9-4.1-1.5-7-4.9-7-8.9V6z" />
+      <path d="M12 9v3.5" />
+      <path d="M12 15.5h.01" />
     </>,
   )
 }

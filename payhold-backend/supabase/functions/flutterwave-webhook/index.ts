@@ -28,6 +28,7 @@ import { serviceClient } from '../_shared/auth.ts'
 import { convert } from '../_shared/fx.ts'
 import { handler, json } from '../_shared/http.ts'
 import { loadProvider } from '../_shared/load-provider.ts'
+import { normaliseIp, recordContext } from '../_shared/request-context.ts'
 import { loadSettings } from '../_shared/settings.ts'
 import { PayHoldError, type PaymentMethod } from '../_shared/types.ts'
 
@@ -238,6 +239,30 @@ Deno.serve(handler(async (req) => {
     p_verified_currency: verified.currency,
     p_fx_rate: lockedRate,
     p_auto_release_days: settings.auto_release_days,
+  })
+
+  // Where the buyer paid from, as Flutterwave saw it — the strongest of the
+  // three sources in §6, because it is the provider's own observation against a
+  // transaction we have just re-verified rather than anything a client told us.
+  // Recorded whether or not `fund_deal` succeeded: a charge that landed on a
+  // mismatched amount is disputed, and that is precisely a case where an
+  // operator wants to know where it came from.
+  const customer = (event.data ?? {}) as {
+    ip?: string
+    customer?: { ip?: string }
+    device_fingerprint?: string
+  }
+
+  await recordContext(db, {
+    deal_id: deal.id,
+    source: 'provider',
+    event: 'charge_confirmed',
+    ip: normaliseIp(customer.ip ?? customer.customer?.ip ?? ''),
+    // Flutterwave reports no country on the charge, and this is not the place
+    // to guess one from an address — a wrong country is worse than none when it
+    // is about to flag somebody.
+    ip_country: null,
+    user_agent: customer.device_fingerprint ?? null,
   })
 
   await db

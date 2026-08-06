@@ -214,6 +214,47 @@ export type RiskSignalKind =
 /** `review` holds the payout. `info` is context for whoever looks. */
 export type RiskSeverity = 'info' | 'review'
 
+/**
+ * How much an address is worth believing.
+ *
+ * The three are not interchangeable and the screen says so out loud: a client
+ * can tell us anything, a provider is reporting what it saw. Anything that
+ * ever reads `ip` has to read this beside it.
+ */
+export type RequestContextSource =
+  /** Flutterwave or Stripe reported it on the charge. Their observation. */
+  | 'provider'
+  /** Our own /pay/:id page saw the connection. */
+  | 'hosted_page'
+  /** The client's server passed `buyer_ip`. Unverifiable by construction. */
+  | 'client_attested'
+
+/**
+ * Where a payment was made from — spec §6.
+ *
+ * Observation only. No rule reads this yet and no verdict is stored on it;
+ * it is the raw material an operator checks a signal against, and the history
+ * the fraud model of §12.4 will eventually train on.
+ *
+ * **This is personal data** — the first PayHold stores. It is kept indefinitely
+ * as a deliberate decision, which is a position that comes with a stated
+ * purpose and a deletion path rather than one that comes for free.
+ */
+export interface RequestContext {
+  id: string
+  tenant_id: string
+  deal_id: string
+  source: RequestContextSource
+  /** `pay_started`, `charge_confirmed`, `confirmation`. */
+  event: string
+  /** Null when the source reported none — common, and not itself suspicious. */
+  ip: string | null
+  /** Provider-reported only. Never inferred from the address. */
+  ip_country: Country | null
+  user_agent: string | null
+  created_at: Timestamp
+}
+
 export interface RiskSignal {
   id: string
   tenant_id: string

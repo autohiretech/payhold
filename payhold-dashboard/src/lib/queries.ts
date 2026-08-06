@@ -28,6 +28,7 @@ export const keys = {
   webhookDeliveries: (filter?: WebhookDeliveryFilter) =>
     ['webhook-deliveries', filter ?? {}] as const,
   riskSignals: (dealId?: string) => ['risk-signals', dealId ?? 'all'] as const,
+  requestContext: (dealId?: string) => ['request-context', dealId ?? 'all'] as const,
   audit: (dealId?: string) => ['audit', dealId ?? 'all'] as const,
   aiSuggestions: (dealId?: string) => ['ai-suggestions', dealId ?? 'all'] as const,
   aiChat: ['ai-chat'] as const,
@@ -96,6 +97,13 @@ export const useRiskSignals = (dealId?: string) =>
   useQuery({
     queryKey: keys.riskSignals(dealId),
     queryFn: () => api.listRiskSignals(dealId),
+  })
+
+/** Where payments were made from — the observation behind a signal. */
+export const useRequestContext = (dealId?: string) =>
+  useQuery({
+    queryKey: keys.requestContext(dealId),
+    queryFn: () => api.listRequestContext(dealId),
   })
 
 // -- Intelligence -----------------------------------------------------------

@@ -30,6 +30,7 @@ import type {
   Provider,
   ProviderAccount,
   ReconciliationAlert,
+  RequestContext,
   Seller,
   Tenant,
   TenantSettings,
@@ -1095,6 +1096,59 @@ export function seedDb(): MockDb {
     ),
   )
 
+  /**
+   * Where each funded deal was paid from — spec §6.
+   *
+   * Derived from the deals rather than hand-listed, so the Fraud screen always
+   * has something to show and a fixture can never point at a deal that was
+   * renamed out from under it.
+   *
+   * Three things are encoded on purpose, because they are the three shapes an
+   * operator has to learn to read:
+   *
+   *   1. **A shared address is usually innocent here.** Several unrelated MTN
+   *      buyers land on 41.186.0.x, because Rwandan mobile money sits behind
+   *      carrier-grade NAT. A screen that highlighted that as suspicious would
+   *      cry wolf on most of this account's honest traffic.
+   *   2. **Provenance changes the weight.** The Stripe tourist's address is
+   *      provider-reported; one deal carries only a client-attested one, which
+   *      is a claim rather than an observation.
+   *   3. **Absence is normal.** Some deals have no address at all — an older
+   *      integration that sends nothing. That is a gap in a report, not a flag.
+   */
+  const request_context: RequestContext[] = []
+
+  const NAT_POOL = ['41.186.0.42', '41.186.0.42', '41.186.0.51', '105.178.12.9']
+  let natIndex = 0
+
+  for (const deal of deals) {
+    if (deal.status === 'created') continue
+
+    // One deal deliberately has nothing recorded against it.
+    if (deal.buyer_ref === 'bk_9b92') continue
+
+    const attested = deal.buyer_ref === 'bk_9c07'
+    const foreignCard = deal.provider === 'stripe'
+    const ip = foreignCard
+      ? '81.2.69.144'
+      : (NAT_POOL[natIndex++ % NAT_POOL.length] as string)
+
+    request_context.push({
+      id: id('rqc'),
+      tenant_id: deal.tenant_id,
+      deal_id: deal.id,
+      source: attested ? 'client_attested' : 'provider',
+      event: attested ? 'pay_started' : 'charge_confirmed',
+      ip,
+      // Only the provider reports one, and only where it has one to report.
+      ip_country: attested ? null : foreignCard ? 'GB' : 'RW',
+      user_agent: foreignCard
+        ? 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15'
+        : 'Mozilla/5.0 (Linux; Android 13; TECNO KI5k) AppleWebKit/537.36',
+      created_at: deal.created_at,
+    })
+  }
+
   return {
     version: SCHEMA_VERSION,
     clock_offset_ms: 0,
@@ -1114,6 +1168,7 @@ export function seedDb(): MockDb {
     audit,
     alerts,
     risk_signals: [],
+    request_context,
     ai_suggestions,
     ai_chat,
     deal_outcomes,
