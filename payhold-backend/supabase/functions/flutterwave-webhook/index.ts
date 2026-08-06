@@ -31,6 +31,9 @@ import { loadProvider } from '../_shared/load-provider.ts'
 import { loadSettings } from '../_shared/settings.ts'
 import { PayHoldError, type PaymentMethod } from '../_shared/types.ts'
 
+/** A path segment that is not a uuid cannot be a tenant, and must not reach a query. */
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
 /** What Flutterwave sends. Only the fields we route on — never the amounts. */
 interface FlutterwaveEvent {
   event?: string
@@ -126,15 +129,32 @@ Deno.serve(handler(async (req) => {
     throw new PayHoldError('policy_violation', 'Event carries no id or tx_ref')
   }
 
-  const { provider, connected } = await loadProvider(db, tenantId, 'flutterwave')
+  // The tenant has to exist before anything can reference it. `provider_events`
+  // has a foreign key to `tenants`, so a forged webhook aimed at a made-up
+  // tenant would otherwise die on that constraint and surface as a 500 — where
+  // §9's launch gate requires a flat 401.
+  //
+  // The event is still recorded, with a null tenant, because §11.8 triage
+  // depends on this table holding the ones we rejected. The response is
+  // identical to a bad signature: whether a given tenant exists is not
+  // something an unauthenticated caller gets to learn.
+  const known = UUID.test(tenantId)
+    ? (await db.from('tenants').select('id').eq('id', tenantId).maybeSingle()).data
+    : null
+
+  const loaded = known
+    ? await loadProvider(db, tenantId, 'flutterwave')
+    : null
 
   // (3) Signature, against this tenant's own stored hash.
-  const signatureOk = provider.verifySignature(raw, req.headers)
+  const signatureOk = loaded?.provider.verifySignature(raw, req.headers) ?? false
+  const connected = loaded?.connected ?? false
+  const provider = loaded?.provider
 
   // (2) Recorded either way — including the forgeries.
   const seen = await recordEvent(
     db,
-    tenantId,
+    known ? tenantId : null,
     eventId,
     event.event ?? null,
     signatureOk,
@@ -158,7 +178,7 @@ Deno.serve(handler(async (req) => {
   }
 
   // (4) Ask Flutterwave what actually happened. The body above is not evidence.
-  const verified = await provider.verify(txRef)
+  const verified = await provider!.verify(txRef)
 
   if (verified.status !== 'successful') {
     await db

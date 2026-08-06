@@ -412,3 +412,63 @@ enabled = true
 # declarative_schema_path = "./database"
 # JSON string passed through to pg-delta SQL formatting.
 # format_options = "{\"keywordCase\":\"upper\",\"indent\":2,\"maxWidth\":80,\"commaStyle\":\"trailing\"}"
+
+# ---------------------------------------------------------------------------
+# Edge Function auth
+# ---------------------------------------------------------------------------
+#
+# `verify_jwt = false` turns off the PLATFORM GATEWAY's JWT check. It does not
+# make these functions public — every one of them authenticates in its own
+# code, and that is where the real check belongs:
+#
+#   the v1 endpoints   `resolveCaller` — an `X-Api-Key` matched by hash, or a
+#                      dashboard JWT verified with `auth.getUser`
+#   the cron jobs      `requireCronCaller` — CRON_SECRET, compared in
+#                      constant time
+#   the inbound hook   the provider's own signature, then a re-fetch of the
+#                      transaction from their API
+#
+# Three reasons the gateway check has to come off:
+#
+#   1. Flutterwave cannot send a Supabase JWT. With the gateway on, every
+#      inbound payment webhook is rejected before the signature check runs,
+#      and no deal ever reaches funded_held. This one is not a preference.
+#   2. The documented contract is `X-Api-Key` and nothing else (§4). Requiring
+#      a bearer token as well would mean every client sends the anon key
+#      alongside their real credential, which teaches them the anon key is a
+#      credential. It is not.
+#   3. An API key is per-tenant, hashed at rest, revocable and rate-limited.
+#      The anon key is none of those. Authenticating on the weaker of the two
+#      and then ignoring it would be theatre.
+
+[functions.deals]
+verify_jwt = false
+
+[functions.payment-options]
+verify_jwt = false
+
+[functions.sellers]
+verify_jwt = false
+
+[functions.balance]
+verify_jwt = false
+
+[functions.webhook-endpoints]
+verify_jwt = false
+
+[functions.provider-accounts]
+verify_jwt = false
+
+# Authenticated by the provider's signature — `verif-hash`, checked against
+# this tenant's own stored credentials — and then by re-fetching the
+# transaction. A forged webhook still returns 401; `flutterwave.test.ts`
+# covers that, and the launch gate tests it against the live URL.
+[functions.flutterwave-webhook]
+verify_jwt = false
+
+# Authenticated by CRON_SECRET. Not reachable without it.
+[functions.webhook-dispatch]
+verify_jwt = false
+
+[functions.reconcile]
+verify_jwt = false
