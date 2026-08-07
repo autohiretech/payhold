@@ -339,6 +339,8 @@ function releaseDeal(db: MockDb, deal: Deal): Deal {
     failure_reason: null,
     attempts: 0,
     review_held_at: null,
+    review_held_by: null,
+    review_hold_reason: null,
     review_approved_by: null,
     review_approved_at: null,
   })
@@ -688,8 +690,84 @@ export function retryPayout(db: MockDb, payoutId: string): Payout {
 }
 
 /**
- * A person overriding a rule. This is the only way a held payout moves, and it
- * is recorded against them rather than against the system.
+ * A person stopping one payout.
+ *
+ * The narrow counterpart to freezing a tenant. Before this existed, an operator
+ * who noticed something the rules do not model — a phone call, a seller gone
+ * quiet, a booking that reads wrong — could only stop every payout the account
+ * had, which punishes every honest seller to catch one.
+ *
+ * It reuses `held_for_review` rather than inventing a status, because what it
+ * produces is the same thing: one payout waiting on one person, cleared through
+ * the same audited approval. `review_held_by` is what tells the two apart when
+ * somebody reads them back, and it is required for that reason — a stop nobody
+ * signed is a stop nobody can be asked about.
+ *
+ * This does not weaken invariant 11. That invariant limits *rules* to stopping,
+ * because a rule is arithmetic nobody agreed to at the time. A person stopping a
+ * payout fails in the same safe direction with a name attached.
+ */
+export function holdPayout(
+  db: MockDb,
+  payoutId: string,
+  heldBy: string,
+  reason: string,
+): Payout {
+  const payout = db.payouts.find((p) => p.id === payoutId)
+  if (!payout) throw new PayHoldError('not_found', `Payout ${payoutId} not found`)
+
+  if (!heldBy.trim()) {
+    throw new PayHoldError('policy_violation', 'A hold must name the person placing it')
+  }
+  if (!reason.trim()) {
+    throw new PayHoldError('policy_violation', 'A hold must say why')
+  }
+
+  if (payout.status === 'paid') {
+    throw new PayHoldError('invalid_state', 'This payout has already been sent')
+  }
+  // Already with the provider. Recalling an in-flight transfer is a
+  // conversation with Flutterwave, not a row in this table, and a hold that
+  // pretended otherwise would be a lie an operator acts on.
+  if (payout.status === 'processing') {
+    throw new PayHoldError('invalid_state', 'This payout is already with the provider')
+  }
+  if (payout.status === 'held_for_review') {
+    throw new PayHoldError('invalid_state', 'This payout is already held')
+  }
+
+  const previous = payout.status
+  payout.status = 'held_for_review'
+  payout.review_held_at = nowIso()
+  payout.review_held_by = heldBy
+  payout.review_hold_reason = reason.trim()
+  // A previous approval is cleared deliberately: it was a decision about what
+  // the rules found then, and leaving it would show an approver's name beside a
+  // payout they have not approved.
+  payout.review_approved_by = null
+  payout.review_approved_at = null
+
+  audit(db, payout.tenant_id, payout.deal_id, heldBy, 'payout.held_by_person', {
+    payout_id: payout.id,
+    reason: reason.trim(),
+    previous_status: previous,
+  })
+  // The same event a rule hold sends. A client cannot act on the difference —
+  // either way their seller is not being paid today.
+  emitWebhook(db, payout.tenant_id, 'payout.held_for_review', payout.deal_id, {
+    payout_id: payout.id,
+    amount: payout.amount,
+    currency: payout.currency,
+    held_by: heldBy,
+  })
+
+  return payout
+}
+
+/**
+ * A person overriding a hold — a rule's or another person's. This is the only
+ * way a held payout moves, and it is recorded against them rather than against
+ * the system.
  */
 export function approvePayoutReview(
   db: MockDb,

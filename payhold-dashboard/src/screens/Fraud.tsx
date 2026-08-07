@@ -228,22 +228,37 @@ export function FraudPage() {
                     </Td>
                   </tr>,
 
-                  // Why it stopped, in the words the rule was written in. Not
-                  // behind a toggle: a hold with an unstated reason is one an
-                  // operator can only rubber-stamp.
-                  why.length > 0 && (
+                  // Why it stopped. Not behind a toggle: a hold with an
+                  // unstated reason is one an operator can only rubber-stamp.
+                  // A person's hold comes with a sentence, a rule's with the
+                  // arithmetic it fired on, and which it was matters more than
+                  // either — one of them is somebody you can go and ask.
+                  (p.review_held_by || why.length > 0) && (
                     <tr key={`${p.id}-why`}>
                       <td colSpan={6} className="border-b border-line bg-pending-soft/40 px-6 py-4">
-                        <p className="text-sm font-medium text-fg">
-                          Held by {why.length === 1 ? 'a rule' : `${why.length} rules`}
-                        </p>
-                        <ul className="mt-2 space-y-1">
-                          {why.map((sig) => (
-                            <li key={sig.id} className="text-sm text-fg-muted">
-                              {sig.explanation}
-                            </li>
-                          ))}
-                        </ul>
+                        {p.review_held_by ? (
+                          <>
+                            <p className="text-sm font-medium text-fg">
+                              Held by {p.review_held_by}
+                            </p>
+                            <p className="mt-2 text-sm text-fg-muted">
+                              {p.review_hold_reason}
+                            </p>
+                          </>
+                        ) : (
+                          <>
+                            <p className="text-sm font-medium text-fg">
+                              Held by {why.length === 1 ? 'a rule' : `${why.length} rules`}
+                            </p>
+                            <ul className="mt-2 space-y-1">
+                              {why.map((sig) => (
+                                <li key={sig.id} className="text-sm text-fg-muted">
+                                  {sig.explanation}
+                                </li>
+                              ))}
+                            </ul>
+                          </>
+                        )}
                       </td>
                     </tr>
                   ),

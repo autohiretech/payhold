@@ -89,8 +89,17 @@ export interface PayHoldClient {
   listPayouts(): Promise<Payout[]>
   retryPayout(id: string): Promise<Payout>
   /**
-   * Let a payout a risk rule stopped go out. Rules hold; only people release,
-   * and the approval is recorded against the person who gave it.
+   * Stop one payout, because a person saw something the rules do not model.
+   *
+   * The narrow alternative to freezing a whole account, which stops every
+   * honest seller to stop one. It takes a reason and a name: the person who has
+   * to clear it has nothing else to go on, and a stop nobody signed is a stop
+   * nobody can be asked about.
+   */
+  holdPayout(id: string, heldBy: string, reason: string): Promise<Payout>
+  /**
+   * Let a held payout go out — whether a rule or a person stopped it. Only
+   * people release, and the approval is recorded against the one who gave it.
    */
   approvePayoutReview(id: string, approvedBy: string): Promise<Payout>
   /** What the deterministic rules noticed, whether or not they held anything. */

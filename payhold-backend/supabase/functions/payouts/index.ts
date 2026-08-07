@@ -3,15 +3,21 @@
  *
  *   GET  /payouts                     this tenant's payouts, newest first
  *   GET  /payouts/:id                 one, with the signals that stopped it
- *   POST /payouts/:id/approve-review  clear a risk hold. A person only
+ *   POST /payouts/:id/hold            stop one. A person only
+ *   POST /payouts/:id/approve-review  clear a hold. A person only
  *   POST /payouts/:id/retry           re-attempt one the provider refused
  *
- * The two POSTs look similar and are deliberately not interchangeable.
+ * The three POSTs look similar and are deliberately not interchangeable.
  * `retry` is for a provider that said no — nothing judged the payout, so
  * sending it again is just sending it again. `approve-review` is for a payout a
- * rule stopped, and it exists so that clearing a hold is an act by a named
- * person recorded against them (invariant 11). Letting `retry` move a held
- * payout would make it a button that skips review, so it refuses.
+ * rule or a person stopped, and it exists so that clearing a hold is an act by
+ * a named person recorded against them (invariant 11). Letting `retry` move a
+ * held payout would make it a button that skips review, so it refuses.
+ *
+ * `hold` is the other direction, and it is the reason an operator no longer has
+ * to freeze a whole tenant to stop one seller. It takes a reason and refuses an
+ * API key for the same argument `approve-review` does: a stop is a judgement,
+ * and a judgement wants somebody who can be asked why.
  */
 
 import type { SupabaseClient } from 'npm:@supabase/supabase-js@2'
@@ -23,7 +29,7 @@ import { PayHoldError, type Payout } from '../_shared/types.ts'
 const PAYOUT_COLUMNS =
   'id, tenant_id, deal_id, seller_id, amount, currency, status, scheduled_for, ' +
   'paid_at, failure_reason, attempts, provider_ref, review_held_at, ' +
-  'review_approved_by, review_approved_at, created_at'
+  'review_held_by, review_hold_reason, review_approved_by, review_approved_at, created_at'
 
 async function getPayout(
   db: SupabaseClient,
@@ -96,6 +102,54 @@ async function approveReview(
   return json(req, {
     payout: await withSignals(db, await getPayout(db, caller, id)),
     outcome,
+  })
+}
+
+/**
+ * Stop one payout.
+ *
+ * The narrow lever the product was missing: before this, an operator who
+ * noticed something the rules do not model could only freeze the entire tenant,
+ * which stops every honest seller to stop one. A key is refused here for the
+ * same reason it is on `approve-review` — this is a judgement, and
+ * `review_held_by` has to name someone who can be asked why.
+ */
+async function hold(
+  req: Request,
+  db: SupabaseClient,
+  caller: Caller,
+  id: string,
+): Promise<Response> {
+  if (caller.kind !== 'dashboard') {
+    throw new PayHoldError(
+      'unauthorized',
+      'A payout can only be held by a signed-in person, not by an API key',
+    )
+  }
+  requireRole(caller, 'owner', 'staff')
+
+  const body = await req.json().catch(() => ({})) as { reason?: unknown }
+  const reason = typeof body.reason === 'string' ? body.reason.trim() : ''
+  if (!reason) {
+    throw new PayHoldError(
+      'policy_violation',
+      'A hold must say why — the person clearing it has nothing else to go on',
+    )
+  }
+
+  // Resolved through the tenant filter first, so another tenant's payout is a
+  // 404 here rather than an error out of the money function.
+  const payout = await getPayout(db, caller, id)
+
+  const { error } = await db.rpc('hold_payout', {
+    p_payout_id: payout.id,
+    p_held_by: caller.actor,
+    p_reason: reason,
+  })
+  if (error) throw rpcError(error, 'hold this payout')
+
+  return json(req, {
+    payout: await withSignals(db, await getPayout(db, caller, id)),
   })
 }
 
@@ -182,6 +236,8 @@ Deno.serve(handler(async (req) => {
   }
 
   switch (action) {
+    case 'hold':
+      return await hold(req, db, caller, id)
     case 'approve-review':
       return await approveReview(req, db, caller, id)
     case 'retry':

@@ -910,6 +910,8 @@ export function seedDb(): MockDb {
           : null,
         attempts: spec.payout_failed ? 3 : paidAt ? 1 : 0,
         review_held_at: null,
+        review_held_by: null,
+        review_hold_reason: null,
         review_approved_by: null,
         review_approved_at: null,
       })

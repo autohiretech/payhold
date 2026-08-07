@@ -389,6 +389,17 @@ ledger entry appears. `frozen` and `held_for_review` are separate statuses on
 purpose: the first is the whole account stopped by reconciliation, the second is
 one payout waiting on one person.
 
+**A person can place that second kind too** — `holdPayout`, the Hold button on
+the Payouts screen. It is the narrow alternative to freezing an account, which
+was previously the only way to stop one seller and stops every other seller with
+them. It takes a reason, because the next person to look at the row has nothing
+else to go on, and `review_held_by` is what distinguishes it from a rule's hold
+wherever a hold is read: a name means somebody you can go and ask, null means
+the arithmetic in `risk.ts`. It refuses `paid` and `processing` — money already
+with the provider is recalled by a phone call, not a button. The backend's
+counterpart is `hold_payout` in `20260806000006_manual_hold.sql`, and
+`tests/manual-hold.test.ts` mirrors this suite case for case.
+
 Seller age is measured **at the deal's creation**, not at payout time. With a
 seven-day clearance window, every seller is a week old by the time their first
 payout comes due, so measuring at payout would make that rule unfireable.

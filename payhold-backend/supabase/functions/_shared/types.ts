@@ -153,9 +153,13 @@ export interface Payout {
   attempts: number
   /** The provider's transfer reference, set once it has one. */
   provider_ref?: string | null
-  /** When a risk rule stopped it. The signals that did are in `risk_signals`. */
+  /** When it was stopped — by a rule, or by a person. */
   review_held_at?: Timestamp | null
-  /** Who let it through. A rule can hold a payout; only a person releases one. */
+  /** Who stopped it. Null means a rule did; the signals are in `risk_signals`. */
+  review_held_by?: string | null
+  /** Their reason, in their own words. Null for a rule hold. */
+  review_hold_reason?: string | null
+  /** Who let it through. Either kind of hold, only ever a person. */
   review_approved_by?: string | null
   review_approved_at?: Timestamp | null
 }

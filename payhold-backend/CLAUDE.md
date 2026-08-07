@@ -62,7 +62,7 @@ environment or a build log.
 | `webhook-endpoints` | register (secret shown once), list, `?deliveries=1`, disable |
 | `flutterwave-webhook` | inbound, at `/flutterwave-webhook/:tenant` |
 | `provider-accounts` | bring-your-own-keys |
-| `payouts` | list, get with signals, `/approve-review`, `/retry` |
+| `payouts` | list, get with signals, `/hold`, `/approve-review`, `/retry` |
 | `risk-signals` | what the deterministic rules noticed, filterable; `?context=1` for where payments came from |
 | `webhook-dispatch`, `reconcile`, `auto-release`, `payout-dispatch` | cron only, `CRON_SECRET` |
 | `ai-dispute`, `ai-risk-narrator`, `ai-support` | draft a resolution, brief a payout, answer a question. These run as `payhold_ai` and never hold the service role |
@@ -339,6 +339,22 @@ must run in the transaction that then holds the payout. It can set
 `held_for_review` and nothing else — no ledger write, no transfer, no state
 change to the deal. `approve_payout_review` is the only way out, and it takes
 the approver's name because the audit row is about a person's decision.
+
+`hold_payout` is the same stop placed by a person instead (migration
+`20260806000006`), and it exists because the only other way to stop one seller
+was freezing the tenant, which stops every honest seller with them. It reuses
+`held_for_review` rather than adding a status — what it produces is the same
+thing, one payout waiting on one person, cleared through the same audited door.
+`review_held_by` is what tells the two apart on the way back out: null means a
+rule did it, a name means somebody did and can be asked why. Both the name and
+the reason are required, and it refuses a payout that is `paid` or `processing`
+— recalling an in-flight transfer is a conversation with the provider, and a
+hold that pretended otherwise would be a lie an operator acts on. Placing one
+clears any earlier approval, or `screen_payout` would skip that payout forever.
+
+This does not weaken invariant 11. That invariant limits *rules* to stopping,
+because a rule is arithmetic nobody agreed to at the time; a person stopping a
+payout fails in the same direction with a name attached.
 
 ## Sending a payout
 

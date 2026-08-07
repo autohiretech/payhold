@@ -156,9 +156,9 @@ export interface Seller {
 /**
  * `frozen` is the whole account stopped — reconciliation found drift, so
  * nothing leaves until a person clears it. `held_for_review` is one payout
- * stopped by a risk rule, and needs one approval rather than an account-wide
- * decision. They are deliberately separate: the first is an emergency, the
- * second is a queue.
+ * stopped by a risk rule *or by a person*, and needs one approval rather than
+ * an account-wide decision. They are deliberately separate: the first is an
+ * emergency, the second is a queue.
  */
 export type PayoutStatus =
   | 'scheduled'
@@ -183,9 +183,17 @@ export interface Payout {
   attempts: number
   /** The provider's transfer reference, set once it has one. */
   provider_ref?: string | null
-  /** When a risk rule stopped it. The signals that did are in `risk_signals`. */
+  /** When it was stopped — by a rule, or by a person. */
   review_held_at: Timestamp | null
-  /** Who let it through. A rule can hold a payout; only a person releases one. */
+  /**
+   * Who stopped it. Null means a rule did, and the signals are in
+   * `risk_signals`. A name here means somebody saw something the rules do not
+   * model, which is the only kind of stop that comes with a sentence.
+   */
+  review_held_by: string | null
+  /** Their reason, in their own words. Null for a rule hold. */
+  review_hold_reason: string | null
+  /** Who let it through. Either kind of hold, only ever a person. */
   review_approved_by: string | null
   review_approved_at: Timestamp | null
 }

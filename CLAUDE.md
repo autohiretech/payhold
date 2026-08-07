@@ -106,7 +106,10 @@ refunds is wrong and should be corrected to "full refunds". (Security deposits
 11. **Rules stop, people send.** The deterministic risk rules may hold a payout
     for review and may do nothing else. They cannot release, refund or send, so
     a wrong rule costs a seller a wait rather than money. Only a person clears
-    a hold, and the approval is recorded against them.
+    a hold, and the approval is recorded against them. A person may *also* hold
+    one — `hold_payout`, with a reason and their name — which is the same safe
+    direction with somebody accountable for it, and it is the narrow
+    alternative to freezing a whole account to stop one seller.
 
 ## Secrets and PII
 
@@ -169,7 +172,8 @@ Auth: `X-Api-Key`, hashed at rest, rate-limited per key.
 | `GET /v1/balance` | held / pending clearance / available / paid out |
 | `POST /v1/webhooks-endpoints` | Client registers their endpoint for signed notifications |
 | `GET /v1/webhook-deliveries` | Every attempt, with status and signature — the answer to "did you tell us?" |
-| `POST /v1/payouts/:id/approve-review` | Clear a risk hold. Person-only, audited against them |
+| `POST /v1/payouts/:id/hold` | Stop one payout. Takes a reason. Person-only, audited against them |
+| `POST /v1/payouts/:id/approve-review` | Clear a hold, a rule's or a person's. Person-only, audited against them |
 | `GET /v1/risk-signals` | What the deterministic rules noticed |
 | `POST /ai-dispute` `/ai-risk-narrator` `/ai-support` | Draft, brief, answer. Advisory; each writes a suggestion and nothing else |
 | `POST /ai-decisions` | A person approves or rejects a draft. The only path from model output to money |

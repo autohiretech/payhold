@@ -73,6 +73,7 @@ import {
 } from './ai'
 import {
   approvePayoutReview,
+  holdPayout,
   audit,
   captureDeposit,
   computeBalances,
@@ -396,6 +397,10 @@ export class MockClient implements PayHoldClient {
 
   async retryPayout(id: string): Promise<Payout> {
     return delay(clone(mutate((db) => retryPayout(db, id))))
+  }
+
+  async holdPayout(id: string, heldBy: string, reason: string): Promise<Payout> {
+    return delay(clone(mutate((db) => holdPayout(db, id, heldBy, reason))))
   }
 
   async approvePayoutReview(id: string, approvedBy: string): Promise<Payout> {

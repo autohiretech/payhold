@@ -18,6 +18,7 @@ import {
   approvePayoutReview,
   confirmDeal,
   fundDeal,
+  holdPayout,
   requireDeal,
   retryPayout,
   runCron,
@@ -267,5 +268,111 @@ describe('rules cannot move money', () => {
     releaseToPayout(id)
 
     expect(requireDeal(db, id).status).toBe('released')
+  })
+})
+
+/**
+ * A person stopping one payout.
+ *
+ * The narrow lever beside the account-wide freeze. It is the acceptance spec
+ * for `hold_payout` in `20260806000006_manual_hold.sql`, and its shape argues
+ * one thing: a person may stop, in the same safe direction a rule may, and
+ * unlike a rule they have to sign it.
+ */
+describe('a person can hold one payout', () => {
+  /** A deal run to a payout that nothing has stopped. */
+  function scheduledPayout(): Payout {
+    const id = newDeal()
+    fundDeal(db, id)
+    confirmDeal(db, id, 'buyer')
+    confirmDeal(db, id, 'seller')
+    advanceClock(24 * 8)
+
+    const payout = db.payouts.find((p) => p.deal_id === id)
+    if (!payout) throw new Error('release did not queue a payout')
+    return payout
+  }
+
+  it('stops it, and says who and why', () => {
+    const payout = scheduledPayout()
+    holdPayout(db, payout.id, 'grace@autohire.rw', 'Seller unreachable by phone')
+
+    expect(payout.status).toBe('held_for_review')
+    expect(payout.review_held_by).toBe('grace@autohire.rw')
+    expect(payout.review_hold_reason).toBe('Seller unreachable by phone')
+  })
+
+  it('moves no money — the same guarantee a rule hold carries', () => {
+    const payout = scheduledPayout()
+    const entries = () => db.ledger.filter((e) => e.deal_id === payout.deal_id)
+    const before = entries().length
+
+    holdPayout(db, payout.id, 'grace@autohire.rw', 'Checking with the buyer')
+
+    expect(entries().length).toBe(before)
+    expect(entries().some((e) => e.entry_type === 'payout')).toBe(false)
+  })
+
+  it('is attributable — no name and no reason are both refused', () => {
+    const payout = scheduledPayout()
+
+    expect(() => holdPayout(db, payout.id, '  ', 'because')).toThrow(PayHoldError)
+    expect(() => holdPayout(db, payout.id, 'grace@autohire.rw', '')).toThrow(PayHoldError)
+    expect(payout.status).toBe('scheduled')
+  })
+
+  it('cannot stop money that has already gone', () => {
+    const payout = scheduledPayout()
+    runCron(db)
+    expect(payout.status).toBe('paid')
+
+    expect(() => holdPayout(db, payout.id, 'grace@autohire.rw', 'too late')).toThrow(
+      /already been sent/i,
+    )
+  })
+
+  it('survives a cron pass, exactly as a rule hold does', () => {
+    const payout = scheduledPayout()
+    holdPayout(db, payout.id, 'grace@autohire.rw', 'Checking with the buyer')
+
+    advanceClock(24 * 14)
+    runCron(db)
+
+    expect(payout.status).toBe('held_for_review')
+  })
+
+  it('is cleared through the same door, and remembers who stopped it', () => {
+    const payout = scheduledPayout()
+    holdPayout(db, payout.id, 'grace@autohire.rw', 'Checking with the buyer')
+    approvePayoutReview(db, payout.id, 'owner@autohire.rw')
+
+    expect(payout.status).toBe('paid')
+    expect(payout.review_approved_by).toBe('owner@autohire.rw')
+    // Both halves are the record: who stopped it, and who let it go.
+    expect(payout.review_held_by).toBe('grace@autohire.rw')
+  })
+
+  it('records the decision against the person, with their reason', () => {
+    const payout = scheduledPayout()
+    holdPayout(db, payout.id, 'grace@autohire.rw', 'Seller unreachable by phone')
+
+    const row = db.audit.find(
+      (a) => a.deal_id === payout.deal_id && a.action === 'payout.held_by_person',
+    )
+    expect(row?.actor).toBe('grace@autohire.rw')
+    expect(row?.details.reason).toBe('Seller unreachable by phone')
+  })
+
+  it('tells the client, on the same event a rule hold sends', () => {
+    const payout = scheduledPayout()
+    holdPayout(db, payout.id, 'grace@autohire.rw', 'Checking with the buyer')
+
+    // A client cannot act on the difference between a rule stopping a payout
+    // and a person stopping it — either way their seller is not paid today.
+    expect(
+      db.webhook_deliveries.some(
+        (d) => d.deal_id === payout.deal_id && d.event === 'payout.held_for_review',
+      ),
+    ).toBe(true)
   })
 })

@@ -51,7 +51,10 @@ import type {
 //    database from version 10 is perfectly loadable and would keep showing an
 //    empty Fraud screen forever. Stale state is discarded and re-seeded — a
 //    demo nobody can see is the same as a demo that does not work.
-export const SCHEMA_VERSION = 11
+// 12: payouts gained `review_held_by` and `review_hold_reason` — a person can
+//    now stop one payout, and who did it is what separates their hold from a
+//    rule's when somebody reads it back.
+export const SCHEMA_VERSION = 12
 const STORAGE_KEY = 'payhold.mock.v1'
 
 /**

@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
-import { api } from '@/api'
+import { api, type PayoutStatus } from '@/api'
 import { AiSuggestionCard, SparkIcon } from '@/components/ai'
 import {
   Badge,
@@ -9,6 +9,8 @@ import {
   CardHeader,
   EmptyState,
   ErrorNote,
+  Field,
+  Input,
   Mono,
   PageHeader,
   Skeleton,
@@ -43,6 +45,14 @@ export function PayoutsPage() {
 
   const retry = useMoneyMutation((id: string) => api.retryPayout(id))
   const approve = useMoneyMutation((id: string) => api.approvePayoutReview(id, ME))
+
+  // Stopping one payout, for the operator who knows something the rules do not.
+  // The alternative before this existed was freezing the whole account, which
+  // stops every honest seller to stop one.
+  const [holding, setHolding] = useState<string | null>(null)
+  const hold = useMoneyMutation((args: { id: string; reason: string }) =>
+    api.holdPayout(args.id, ME, args.reason),
+  )
 
   /** The rules that stopped this one, in the words they were written in. */
   const holdReasons = (dealId: string) =>
@@ -90,6 +100,12 @@ export function PayoutsPage() {
       {approve.isError && (
         <div className="mb-4">
           <ErrorNote message={approve.error.message} />
+        </div>
+      )}
+
+      {hold.isError && (
+        <div className="mb-4">
+          <ErrorNote message={hold.error.message} />
         </div>
       )}
 
@@ -170,58 +186,105 @@ export function PayoutsPage() {
                         : formatRelative(p.scheduled_for, now)}
                     </Td>
                     <Td align="right">
-                      {p.status === 'held_for_review' ? (
-                        <Button
-                          size="sm"
-                          disabled={approve.isPending}
-                          onClick={() => approve.mutate(p.id)}
-                        >
-                          Approve and send
-                        </Button>
-                      ) : p.status === 'failed' || p.status === 'frozen' ? (
-                        <Button
-                          size="sm"
-                          disabled={retry.isPending}
-                          onClick={() => retry.mutate(p.id)}
-                        >
-                          Retry
-                        </Button>
-                      ) : (
-                        p.status === 'scheduled' &&
-                        aiReady && (
+                      <span className="flex justify-end gap-1.5">
+                        {p.status === 'held_for_review' ? (
                           <Button
                             size="sm"
-                            variant="ghost"
-                            disabled={summarise.isPending}
-                            onClick={() => {
-                              setChecking(showSummary ? null : p.deal_id)
-                              if (!summary) summarise.mutate(p.deal_id)
-                            }}
+                            disabled={approve.isPending}
+                            onClick={() => approve.mutate(p.id)}
                           >
-                            <SparkIcon className="size-3.5" />
-                            {showSummary ? 'Hide' : 'Check'}
+                            Approve and send
                           </Button>
-                        )
-                      )}
+                        ) : (
+                          <>
+                            {(p.status === 'failed' || p.status === 'frozen') && (
+                              <Button
+                                size="sm"
+                                disabled={retry.isPending}
+                                onClick={() => retry.mutate(p.id)}
+                              >
+                                Retry
+                              </Button>
+                            )}
+                            {p.status === 'scheduled' && aiReady && (
+                              <Button
+                                size="sm"
+                                variant="ghost"
+                                disabled={summarise.isPending}
+                                onClick={() => {
+                                  setChecking(showSummary ? null : p.deal_id)
+                                  if (!summary) summarise.mutate(p.deal_id)
+                                }}
+                              >
+                                <SparkIcon className="size-3.5" />
+                                {showSummary ? 'Hide' : 'Check'}
+                              </Button>
+                            )}
+                            {/* Anything that has not left yet can be stopped.
+                                `processing` is already with the provider, and a
+                                button that implied otherwise would be worse
+                                than no button. */}
+                            {HOLDABLE.includes(p.status) && (
+                              <Button
+                                size="sm"
+                                variant="ghost"
+                                onClick={() => setHolding(holding === p.id ? null : p.id)}
+                              >
+                                {holding === p.id ? 'Cancel' : 'Hold'}
+                              </Button>
+                            )}
+                          </>
+                        )}
+                      </span>
                     </Td>
                   </tr>,
 
-                  held.length > 0 && (
+                  holding === p.id && (
+                    <tr key={`${p.id}-hold`}>
+                      <td colSpan={7} className="border-b border-line bg-surface-2/40 px-6 py-4">
+                        <HoldForm
+                          pending={hold.isPending}
+                          onSubmit={async (reason) => {
+                            await hold.mutateAsync({ id: p.id, reason })
+                            setHolding(null)
+                          }}
+                        />
+                      </td>
+                    </tr>
+                  ),
+
+                  p.status === 'held_for_review' && (
                     <tr key={`${p.id}-held`}>
                       <td
                         colSpan={7}
                         className="border-b border-line bg-pending-soft/40 px-6 py-4"
                       >
-                        <p className="text-sm font-medium text-fg">
-                          Held by {held.length === 1 ? 'a rule' : `${held.length} rules`}
-                        </p>
-                        <ul className="mt-2 space-y-1">
-                          {held.map((s) => (
-                            <li key={s.id} className="text-sm text-fg-muted">
-                              {s.explanation}
-                            </li>
-                          ))}
-                        </ul>
+                        {/* Who stopped it is the first thing an approver needs.
+                            A person's hold comes with a sentence; a rule's comes
+                            with the arithmetic it fired on. */}
+                        {p.review_held_by ? (
+                          <>
+                            <p className="text-sm font-medium text-fg">
+                              Held by {p.review_held_by}
+                            </p>
+                            <p className="mt-2 text-sm text-fg-muted">
+                              {p.review_hold_reason}
+                            </p>
+                          </>
+                        ) : (
+                          <>
+                            <p className="text-sm font-medium text-fg">
+                              Held by {held.length === 1 ? 'a rule' : `${held.length} rules`}
+                            </p>
+                            <ul className="mt-2 space-y-1">
+                              {held.map((s) => (
+                                <li key={s.id} className="text-sm text-fg-muted">
+                                  {s.explanation}
+                                </li>
+                              ))}
+                            </ul>
+                          </>
+                        )}
                         <p className="mt-2 text-xs text-fg-muted">
                           Nothing has been sent. Approving records the decision
                           against you and dispatches the transfer.
@@ -249,5 +312,57 @@ export function PayoutsPage() {
         disappears — it stays here until it succeeds or is cancelled.
       </p>
     </>
+  )
+}
+
+/**
+ * Anything that has not left. `processing` is with the provider already, and
+ * `paid` is gone — recalling either is a conversation with Flutterwave rather
+ * than a button, so there is no button.
+ */
+const HOLDABLE: PayoutStatus[] = ['scheduled', 'failed', 'frozen']
+
+/**
+ * Stopping a payout, with the reason attached.
+ *
+ * The reason is required and the field says why: the next person to look at
+ * this row has nothing else to go on, and "held" with no sentence under it
+ * reads to them as a system fault rather than somebody's judgement.
+ */
+function HoldForm({
+  pending,
+  onSubmit,
+}: {
+  pending: boolean
+  onSubmit: (reason: string) => Promise<void>
+}) {
+  const [reason, setReason] = useState('')
+
+  return (
+    <form
+      className="flex flex-wrap items-end gap-3"
+      onSubmit={(e) => {
+        e.preventDefault()
+        void onSubmit(reason.trim())
+      }}
+    >
+      <div className="min-w-64 flex-1">
+        <Field
+          label="Why are you holding this?"
+          hint="Recorded against you, and shown to whoever clears it."
+        >
+          <Input
+            required
+            autoFocus
+            value={reason}
+            onChange={(e) => setReason(e.target.value)}
+            placeholder="Seller unreachable — confirming the booking by phone"
+          />
+        </Field>
+      </div>
+      <Button type="submit" variant="primary" disabled={pending || !reason.trim()}>
+        {pending ? 'Holding…' : 'Hold this payout'}
+      </Button>
+    </form>
   )
 }
