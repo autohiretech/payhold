@@ -33,12 +33,24 @@ Deno.serve(handler(async (req) => {
 
   const db = serviceClient()
 
+  // Promote deals whose clearance window has closed, before looking for
+  // payouts. Same pass, and in this order: a payout becomes dispatchable at
+  // `payout_due_at`, which is the same instant the deal stops clearing, so
+  // running the scan first would dispatch against a deal still claiming to be
+  // inside its safety window — and `settle_payout` would then have to promote
+  // it after the fact, which is the recovery path and not the normal one.
+  const { data: cleared, error: matureError } = await db.rpc('mature_clearing_deals', {})
+
+  if (matureError) throw new Error(`clearing sweep failed: ${matureError.message}`)
+
   const { data: due, error } = await db
     .from('payouts')
     .select('id, tenant_id, deal_id, seller_id, amount, currency, status, ' +
       'scheduled_for, paid_at, failure_reason, attempts')
     // `held_for_review` is not in this list and must never be. Cron is not
     // allowed to be the thing that lets a held payout through — invariant 11.
+    // `blocked` and `needs_verification` are in it, on purpose: neither is
+    // waiting on a decision, so re-asking overrules nobody. See `DISPATCHABLE`.
     .in('status', DISPATCHABLE)
     .lte('scheduled_for', new Date().toISOString())
     .order('scheduled_for', { ascending: true })
@@ -46,11 +58,14 @@ Deno.serve(handler(async (req) => {
 
   if (error) throw new Error(`payout lookup failed: ${error.message}`)
 
-  const result: Record<DispatchOutcome | 'considered' | 'errored', number> = {
+  const result: Record<DispatchOutcome | 'considered' | 'errored' | 'cleared', number> = {
+    cleared: (cleared ?? []).length,
     considered: (due ?? []).length,
     paid: 0,
     processing: 0,
     held_for_review: 0,
+    needs_verification: 0,
+    blocked: 0,
     frozen: 0,
     failed: 0,
     skipped: 0,

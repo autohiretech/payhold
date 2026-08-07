@@ -122,17 +122,40 @@ export function DealStatusPage() {
 function plainStatus(deal: Deal, side: ConfirmSide): string {
   switch (deal.status) {
     case 'created':
+    case 'checkout_started':
       return 'This payment has not been made yet.'
+    case 'payment_pending':
+      return side === 'buyer'
+        ? 'Your payment is going through. This page will update when it lands.'
+        : 'The buyer has started paying. Nothing is held until it goes through.'
+    case 'payment_failed':
+      return side === 'buyer'
+        ? 'That payment did not go through. You have not been charged, and you can try again.'
+        : 'The buyer’s payment did not go through. They can try again.'
+    case 'expired':
+      return 'This payment link has expired. Nobody was charged.'
+    case 'canceled':
+      return 'This was called off before any money moved.'
     case 'funded_held':
+    case 'in_progress':
+    case 'revision_requested':
     case 'confirmed_buyer':
     case 'confirmed_seller':
       return side === 'buyer'
         ? 'Your money is held safely. The seller cannot access it until you confirm.'
         : 'The buyer has paid and the money is held. It will reach you once both sides confirm.'
+    case 'clearing':
+      return side === 'buyer'
+        ? 'Both sides confirmed — the money has been released to the seller.'
+        : 'Both sides confirmed. Your payout is being prepared and will be sent shortly.'
     case 'released':
       return side === 'buyer'
         ? 'Both sides confirmed — the money has been released to the seller.'
-        : 'Both sides confirmed. Your payout is on its way.'
+        : 'Your payout is ready and will be sent to your account.'
+    case 'payout_pending':
+      return side === 'buyer'
+        ? 'This is complete on your side. The seller is being paid.'
+        : 'Your payout is on its way. Your provider will show it once it arrives.'
     case 'paid_out':
       return side === 'buyer'
         ? 'This is complete. The seller has been paid.'
@@ -141,6 +164,10 @@ function plainStatus(deal: Deal, side: ConfirmSide): string {
       return side === 'buyer'
         ? 'This payment was refunded to you in full.'
         : 'This payment was refunded to the buyer.'
+    case 'partially_refunded':
+      return side === 'buyer'
+        ? 'Part of this payment was refunded to you. The rest went to the seller.'
+        : 'Part of this payment went back to the buyer. The rest is yours.'
     case 'disputed':
       return 'A dispute is open. The money stays held while it is reviewed — nobody can take it in the meantime.'
   }

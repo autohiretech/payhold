@@ -77,6 +77,12 @@ export interface DisputeCaseFile {
     status: string
     created_at: Timestamp
     expected_complete_at: Timestamp | null
+    /**
+     * What the buyer was actually charged. §7.1 gives the model a split to
+     * recommend, and a split needs a ceiling — a `partial_refund` for more than
+     * this is not a split, and the validator discards it.
+     */
+    presentment_amount: Money
   }
   seller: { name: string; country: string; registered_at: Timestamp } | null
   dispute: {
@@ -275,6 +281,7 @@ export async function disputeCaseFile(
         status: deal.status,
         created_at: deal.created_at,
         expected_complete_at: deal.expected_complete_at,
+        presentment_amount: deal.presentment_amount,
       },
       seller: seller
         ? { name: seller.name, country: seller.country, registered_at: seller.created_at }

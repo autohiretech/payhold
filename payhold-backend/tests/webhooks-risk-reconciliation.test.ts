@@ -45,6 +45,12 @@ async function seed(opts: {
      returning id`,
     [tenant.id, String(opts.sellerAgeDays ?? 400)],
   )
+
+  // §12: a seller who has not been verified cannot be paid, and that gate is
+  // not a risk rule — it runs whatever `risk_rules_enabled` says. These tests
+  // are about the discretionary rules, so the fixture says the onboarding
+  // actually happened.
+  await h.db.query(`select verify_seller($1, 'fixture')`, [seller.id])
   const { rows: [deal] } = await h.db.query<{ id: string }>(
     `insert into deals (tenant_id, buyer_ref, seller_id, description, amount, currency,
                         presentment_currency, presentment_amount, buyer_country,
@@ -85,7 +91,7 @@ describe('outbound webhooks are queued by the state change itself', () => {
     const s = await seed()
     await h.db.query(`update deals set status = 'funded_held' where id = $1`, [s.deal])
 
-    expect(await events(s.deal)).toEqual(['deal.funded_held'])
+    expect(await events(s.deal)).toEqual(['order.funded_held'])
   })
 
   test('the queued body is exactly what will be signed', async () => {
@@ -99,7 +105,7 @@ describe('outbound webhooks are queued by the state change itself', () => {
     // and then every delivery fails verification on the client's side while
     // looking fine here.
     expect(JSON.parse(d.body)).toEqual(d.payload)
-    expect(JSON.parse(d.body).event).toBe('deal.funded_held')
+    expect(JSON.parse(d.body).event).toBe('order.funded_held')
   })
 
   test('confirmations carry which side and whether the timer did it', async () => {
@@ -110,7 +116,7 @@ describe('outbound webhooks are queued by the state change itself', () => {
     )
 
     const { rows: [d] } = await h.db.query<{ payload: { data: Record<string, string> } }>(
-      `select payload from webhook_deliveries where deal_id = $1 and event = 'deal.confirmed'`,
+      `select payload from webhook_deliveries where deal_id = $1 and event = 'order.accepted'`,
       [s.deal],
     )
     expect(d.payload.data).toMatchObject({ side: 'buyer', actor: 'auto' })
@@ -124,10 +130,12 @@ describe('outbound webhooks are queued by the state change itself', () => {
                      [s.deal])
     await h.db.query(`select release_deal($1, 90000, 'RWF', 10000)`, [s.deal])
 
+    // §10.2's vocabulary: the buyer accepts, the seller delivers, and the
+    // second of those starts the clearance window rather than finishing it.
     expect(await events(s.deal)).toEqual([
-      'deal.confirmed',
-      'deal.confirmed',
-      'deal.released',
+      'order.accepted',
+      'order.delivered',
+      'order.clearing_started',
     ])
   })
 
@@ -140,7 +148,7 @@ describe('outbound webhooks are queued by the state change itself', () => {
     )
     await h.db.query(`select refund_deal($1, 'Host cancelled')`, [s.deal])
 
-    expect(await events(s.deal)).toContain('deal.refunded')
+    expect(await events(s.deal)).toContain('refund.succeeded')
   })
 
   test('a deposit capture notifies', async () => {
@@ -180,7 +188,7 @@ describe('outbound webhooks are queued by the state change itself', () => {
     await h.db.query(`update deals set status = 'funded_held' where id = $1`, [s.deal])
     await h.db.query(`update deals set status = 'funded_held' where id = $1`, [s.deal])
 
-    expect(await events(s.deal)).toEqual(['deal.funded_held'])
+    expect(await events(s.deal)).toEqual(['order.funded_held'])
   })
 })
 
@@ -197,7 +205,7 @@ describe('delivery claiming and backoff', () => {
     const mine = rows.find((r) => JSON.parse(r.body).deal_id === s.deal)
 
     expect(mine).toBeDefined()
-    expect(mine!.event).toBe('deal.funded_held')
+    expect(mine!.event).toBe('order.funded_held')
     expect(mine!.url).toBe('https://client.example/hooks')
   })
 
@@ -490,7 +498,9 @@ describe('risk rules', () => {
     const { rows: [d] } = await h.db.query<{ status: string }>(
       `select status from deals where id = $1`, [s.deal],
     )
-    expect(d.status).toBe('released')
+    // A held payout does not hold the deal: the money left the hold and the
+    // clearance window is running regardless of what the rules decided.
+    expect(d.status).toBe('clearing')
   })
 })
 

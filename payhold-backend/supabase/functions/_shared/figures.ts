@@ -59,14 +59,29 @@ export async function releaseFigures(
  * this deal's clearing pool, and the two are only the same number when no
  * currency conversion happened.
  *
- * `rail_balances()` derives that pool as `−release + fee + payout` over the
- * deal's entries. A payout entry of any other size leaves a residue there
- * forever: not large, but permanent, and `available` never returning to zero
- * is exactly what the reconciliation pass reports as drift — which freezes the
- * tenant's payouts over a rounding error nobody can explain. Reading the pool
- * back and sending precisely that is self-correcting, and it stays correct
- * when the FX rate has moved between funding and clearance.
+ * `rail_balances()` derives that pool over the deal's entries. A payout entry
+ * of any other size leaves a residue there forever: not large, but permanent,
+ * and `available` never returning to zero is exactly what the reconciliation
+ * pass reports as drift — which freezes the tenant's payouts over a rounding
+ * error nobody can explain. Reading the pool back and sending precisely that is
+ * self-correcting, and it stays correct when the FX rate has moved between
+ * funding and clearance.
+ *
+ * **This list must match `rail_balances`' `clearing` expression exactly.** A
+ * deduction type present there and missing here would send the seller money the
+ * pool says is not theirs — a tax we owe onward, or a reserve still carved out.
+ * V2 §7 added four of them at once, which is precisely how such a list drifts.
  */
+const POOL_ENTRY_TYPES = [
+  'release',
+  'fee',
+  'provider_fee',
+  'tax',
+  'reserve',
+  'reserve_release',
+  'payout',
+] as const
+
 export async function amountLeaving(
   db: SupabaseClient,
   deal: Deal,
@@ -75,12 +90,14 @@ export async function amountLeaving(
     .from('ledger')
     .select('entry_type, amount')
     .eq('deal_id', deal.id)
-    .in('entry_type', ['release', 'fee', 'payout'])
+    .in('entry_type', POOL_ENTRY_TYPES)
 
   if (error) throw new Error(`ledger read failed: ${error.message}`)
 
-  // The sign convention from `rail_balances`: entries are stored negative, and
-  // a release credits the pool while a fee and a prior payout debit it.
+  // The sign convention from `rail_balances`: entries are stored negative, so a
+  // release credits the pool and everything else debits it. `reserve_release`
+  // is the one credit among the deductions — it is stored positive, so adding
+  // it works out on its own.
   let clearing = 0
   for (const entry of data ?? []) {
     clearing += entry.entry_type === 'release' ? -entry.amount : entry.amount

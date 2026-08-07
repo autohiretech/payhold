@@ -25,11 +25,18 @@ export interface Citation {
 
 export interface DisputeDraft {
   kind: 'dispute_resolution'
-  recommendation: 'release' | 'refund' | 'escalate'
+  recommendation: 'release' | 'refund' | 'partial_refund' | 'escalate'
   headline: string
   rationale: string[]
   cited: Citation[]
   confidence: number
+  /**
+   * §7.1. Present only on `partial_refund`, in minor units of the currency the
+   * buyer was charged. Validated here and again by `resolve_dispute`, which
+   * refuses a null or whole-payment amount — a model that names a figure the
+   * engine cannot carry out has drafted something nobody can approve.
+   */
+  refund_amount?: number
 }
 
 export interface RiskBrief {
@@ -41,7 +48,7 @@ export interface RiskBrief {
   confidence: number
 }
 
-const RECOMMENDATIONS = ['release', 'refund', 'escalate'] as const
+const RECOMMENDATIONS = ['release', 'refund', 'partial_refund', 'escalate'] as const
 
 function strings(value: unknown): string[] {
   return (Array.isArray(value) ? value : []).filter(
@@ -71,6 +78,12 @@ function confidence(value: unknown): number {
 export function validateDisputeDraft(
   value: unknown,
   validRefs: Set<string>,
+  /**
+   * What the buyer paid, in presentment minor units. A `partial_refund` naming
+   * more than this — or the whole of it — is not a split, and is discarded
+   * rather than shown: §24.5 says invalid output is logged and never rendered.
+   */
+  refundable?: number,
 ): DisputeDraft {
   const v = value as Partial<DisputeDraft>
 
@@ -83,6 +96,25 @@ export function validateDisputeDraft(
     throw new PayHoldError('policy_violation', 'The model returned an unusable draft.')
   }
 
+  let refundAmount: number | undefined
+
+  if (v.recommendation === 'partial_refund') {
+    const amount = v.refund_amount
+
+    if (
+      typeof amount !== 'number' ||
+      !Number.isInteger(amount) ||
+      amount <= 0 ||
+      (refundable !== undefined && amount >= refundable)
+    ) {
+      throw new PayHoldError(
+        'policy_violation',
+        'The model recommended a split without a usable amount.',
+      )
+    }
+    refundAmount = amount
+  }
+
   return {
     kind: 'dispute_resolution',
     recommendation: v.recommendation!,
@@ -90,6 +122,7 @@ export function validateDisputeDraft(
     rationale: strings(v.rationale),
     cited: resolvable(v.cited, validRefs),
     confidence: confidence(v.confidence),
+    ...(refundAmount !== undefined ? { refund_amount: refundAmount } : {}),
   }
 }
 

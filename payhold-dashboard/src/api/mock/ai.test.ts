@@ -275,7 +275,7 @@ describe('budget and availability (§12.5)', () => {
     confirmDeal(db, deal.id, 'buyer')
     confirmDeal(db, deal.id, 'seller')
 
-    expect(requireDeal(db, deal.id).status).toBe('released')
+    expect(requireDeal(db, deal.id).status).toBe('clearing')
     expect(() => runCron(db)).not.toThrow()
   })
 
@@ -301,7 +301,7 @@ describe('budget and availability (§12.5)', () => {
     )!
     confirmDeal(db, deal.id, 'seller')
 
-    expect(requireDeal(db, deal.id).status).toBe('released')
+    expect(requireDeal(db, deal.id).status).toBe('clearing')
   })
 })
 

@@ -38,14 +38,34 @@ export type PaymentMethod = 'card' | 'mobile_money' | 'bank_transfer'
 // Deal state machine
 // ---------------------------------------------------------------------------
 
+/**
+ * Spec §6. **In the Postgres enum's declaration order**, which is the order
+ * `order by status` produces — see `20260807000001_lifecycle_states.sql`. Keep
+ * the two in step: this array reading as the lifecycle is what lets a screen
+ * sort by it.
+ *
+ * §6's `delivered` and `buyer_review` are absent deliberately. Both name the
+ * window where the seller has confirmed and the buyer has not, which is
+ * `confirmed_seller` here. §29.1 carries the ruling.
+ */
 export const DEAL_STATUSES = [
   'created',
+  'checkout_started',
+  'payment_pending',
+  'payment_failed',
+  'expired',
+  'canceled',
   'funded_held',
+  'in_progress',
+  'revision_requested',
   'confirmed_buyer',
   'confirmed_seller',
+  'clearing',
   'released',
+  'payout_pending',
   'paid_out',
   'refunded',
+  'partially_refunded',
   'disputed',
 ] as const
 
@@ -54,13 +74,35 @@ export type DealStatus = (typeof DEAL_STATUSES)[number]
 /** Statuses where money is sitting in the provider vault under our control. */
 export const HOLDING_STATUSES: readonly DealStatus[] = [
   'funded_held',
+  'in_progress',
+  'revision_requested',
   'confirmed_buyer',
   'confirmed_seller',
   'disputed',
 ]
 
+/**
+ * At or past the release — the money has left the hold. `clearing` is inside
+ * the safety window, `released` is past it and payable (§5.1's `available`).
+ *
+ * This is the set the old code spelled `['released', 'paid_out']`, and it is
+ * the one to reach for when the question is "has this deal's money moved yet",
+ * because that question now has four answers.
+ */
+export const PAST_HOLD_STATUSES: readonly DealStatus[] = [
+  'clearing',
+  'released',
+  'payout_pending',
+  'paid_out',
+]
+
 /** Statuses no further transition can leave. */
-export const TERMINAL_STATUSES: readonly DealStatus[] = ['paid_out', 'refunded']
+export const TERMINAL_STATUSES: readonly DealStatus[] = [
+  'paid_out',
+  'refunded',
+  'expired',
+  'canceled',
+]
 
 export type ConfirmSide = 'buyer' | 'seller'
 
@@ -102,6 +144,22 @@ export interface Deal {
   released_at: Timestamp | null
   payout_due_at: Timestamp | null
   fee_amount: Money
+  /**
+   * §7's itemisation, all in the **presentment** currency — what the buyer is
+   * charged. `amount` and `fee_amount` are settlement; do not add the two sets
+   * together.
+   *
+   * These are what a checkout shows *before* payment. What actually happened is
+   * `DealAmounts`, derived from the ledger.
+   */
+  tax_amount: Money
+  discount_amount: Money
+  /** What the rail charged. Zero until the provider reports it at funding. */
+  provider_fee_amount: Money
+  /** §6.1's new-seller carve-out, decided at release. Zero when none applies. */
+  reserve_amount: Money
+  reserve_until: Timestamp | null
+  completion_policy: CompletionPolicy
   confirmations: Confirmation[]
   metadata: Record<string, string>
   created_at: Timestamp
@@ -112,10 +170,145 @@ export interface Deal {
 // Sellers and payouts
 // ---------------------------------------------------------------------------
 
+/**
+ * The rail a destination is tokenized against, which is provider and method
+ * together — a MoMo token means nothing to a bank transfer.
+ *
+ * The last five are **declared and disabled** (spec §29.3): their
+ * `payout_routes` rows carry no provider, and the `route_needs_an_adapter`
+ * check makes such a row impossible to enable. They exist so a seller who picks
+ * one is told why it will not work rather than told nothing.
+ */
 export type PayoutProvider =
   | 'flutterwave_momo'
   | 'flutterwave_bank'
   | 'stripe_connect'
+  | 'paypal'
+  | 'venmo'
+  | 'cash_app_pay'
+  | 'alipay'
+  | 'wechat_pay'
+
+/** §5.1's "selected method", in the shape a seller recognises. */
+export type PayoutMethod = 'mobile_money' | 'bank_account' | 'wallet'
+
+/** §5.1's `route.riskStatus`. Only `approved` is eligible. */
+export type RouteRiskStatus = 'approved' | 'review' | 'suspended'
+
+/**
+ * §5.1's routing table — **data, not code**. Which rails exist, where they
+ * reach, and whether they are on. §12 requires a country or a provider to be
+ * disabled without a redeploy, which is why this is a row.
+ *
+ * `tenant_id: null` is the platform default for that rail. A tenant row
+ * *replaces* it rather than sitting beside it.
+ */
+export interface PayoutRoute {
+  id: string
+  tenant_id: string | null
+  payout_provider: PayoutProvider
+  /** Null means declared and unbuilt, and therefore impossible to enable. */
+  provider: Provider | null
+  method: PayoutMethod
+  countries: Country[]
+  currencies: Currency[]
+  supports_payouts: boolean
+  enabled: boolean
+  risk_status: RouteRiskStatus
+  /** Lower wins. §5.1's "reliability", made explicit rather than implied. */
+  rank: number
+  min_amount: Money
+  max_amount: Money | null
+  fee_fixed: Money
+  fee_bps: number
+  note: string | null
+  created_at: Timestamp
+}
+
+/**
+ * Why a route was or was not eligible. `routed` is the success case; the rest
+ * come from `route_evaluation`'s filter chain, in the order it applies them.
+ */
+export type RouteReasonCode =
+  | 'routed'
+  | 'provider_disabled'
+  | 'route_suspended'
+  | 'route_under_review'
+  | 'payouts_not_supported'
+  | 'country_not_supported'
+  | 'currency_not_supported'
+  | 'below_route_minimum'
+  | 'above_route_maximum'
+  | 'destination_not_verified'
+  | 'no_eligible_verified_destination'
+  | 'no_route_for_destination'
+
+/**
+ * §5.1: a payout decision must be "deterministic and auditable" — the selected
+ * provider, selected method, eligibility checks, ranking score, currency, fees,
+ * exchange-rate source and reason code, kept after the fact.
+ */
+export interface PayoutDecision {
+  id: string
+  tenant_id: string
+  payout_id: string
+  /** Null on a no-route decision: there was nothing to select. */
+  route_id: string | null
+  destination_id: string | null
+  provider: Provider | null
+  payout_provider: PayoutProvider | null
+  method: PayoutMethod | null
+  currency: Currency | null
+  amount: Money | null
+  ranking_score: number | null
+  fee_estimate: Money | null
+  /** Null when no conversion happened, which is what §5.1 prefers. */
+  fx_source: 'deal_locked_rate' | 'payhold_indicative' | null
+  fx_rate: number | null
+  /** True only on a backup destination, which §5.1 requires be logged. */
+  is_fallback: boolean
+  reason_code: RouteReasonCode
+  /** Every route considered and its verdict. */
+  checks: RouteCheck[]
+  created_at: Timestamp
+}
+
+export interface RouteCheck {
+  route_id: string
+  provider: Provider | null
+  payout_provider: PayoutProvider
+  method: PayoutMethod
+  rank: number
+  fee_estimate: Money
+  /** Whether this is the rail the destination is tokenized against. */
+  preferred: boolean
+  eligible: boolean
+  reason_code: RouteReasonCode
+}
+
+/**
+ * §5.1: a seller has a preferred destination and may have a verified backup,
+ * which one pair of columns on `sellers` could not express.
+ */
+export interface SellerDestination {
+  id: string
+  tenant_id: string
+  seller_id: string
+  label: string | null
+  country: Country
+  payout_currency: Currency
+  payout_provider: PayoutProvider
+  beneficiary_token: string
+  masked_destination: string
+  is_primary: boolean
+  /** Used only after a failed primary payout and an explicit policy check. */
+  is_backup: boolean
+  /** Null means ownership has not been confirmed. */
+  verified_at: Timestamp | null
+  /** §5.1's change protection: a newly added destination waits. */
+  security_hold_until: Timestamp | null
+  created_at: Timestamp
+}
 
 export interface Seller {
   id: string
@@ -127,9 +320,41 @@ export interface Seller {
   /** Provider-side token. PayHold never stores the real destination. */
   beneficiary_token: string
   masked_destination: string
+  /**
+   * §12's onboarding state. A seller starts `pending` and cannot be paid until
+   * somebody attests that the identity check, the sanctions screen and the
+   * ownership check came back.
+   */
+  kyc_status: KycStatus
+  external_user_id: string | null
+  sanctions_checked_at: Timestamp | null
+  destination_changed_at: Timestamp | null
   created_at: Timestamp
 }
 
+/** §12's state list, verbatim. */
+export type KycStatus =
+  | 'pending'
+  | 'verified'
+  | 'restricted'
+  | 'rejected'
+  | 'review_required'
+
+/**
+ * What is actually true of a payout row. Six of these are stops, and they are
+ * separate because who can end them differs:
+ *
+ *   `frozen`              the whole tenant is stopped on reconciliation drift.
+ *   `held_for_review`     a discretionary rule, or a person, stopped this one.
+ *                         `approve_payout_review` is the only way out and it
+ *                         records a name. A machine may never clear it.
+ *   `needs_verification`  §12: the seller has something outstanding. The way
+ *                         out is `verify_seller`, an attestation with somebody
+ *                         behind it — deliberately *not* the approve button.
+ *   `blocked`             §5.1's no-route case, and a disputed deal. Nothing to
+ *                         approve and nothing for the seller to fix; it moves
+ *                         when some other fact does.
+ */
 export type PayoutStatus =
   | 'scheduled'
   | 'processing'
@@ -137,6 +362,26 @@ export type PayoutStatus =
   | 'failed'
   | 'frozen'
   | 'held_for_review'
+  | 'needs_verification'
+  | 'blocked'
+
+/**
+ * §5.1's seller-facing vocabulary, **derived** rather than stored.
+ *
+ * `clearing` and `available` are questions about the deal's window, which the
+ * deal's own status already answers; storing them on the payout would be one
+ * fact with two writers. `frozen` and `held_for_review` both read as `blocked`
+ * here — to a seller they are the same thing, and pointing at a review queue
+ * invites them to fix something that is not theirs to fix.
+ */
+export type PayoutDisplayStatus =
+  | 'clearing'
+  | 'available'
+  | 'processing'
+  | 'paid'
+  | 'failed'
+  | 'blocked'
+  | 'needs_verification'
 
 export interface Payout {
   id: string
@@ -148,11 +393,17 @@ export interface Payout {
   status: PayoutStatus
   scheduled_for: Timestamp
   paid_at: Timestamp | null
-  /** Populated on `failed`; surfaced in the dashboard for triage. */
+  /**
+   * Why this payout is not moving — a provider's refusal, or the routing
+   * engine's sentence when it is `blocked`. Surfaced in the dashboard for
+   * triage.
+   */
   failure_reason: string | null
   attempts: number
   /** The provider's transfer reference, set once it has one. */
   provider_ref?: string | null
+  /** §5.1: which destination this payout actually went to. */
+  destination_id?: string | null
   /** When it was stopped — by a rule, or by a person. */
   review_held_at?: Timestamp | null
   /** Who stopped it. Null means a rule did; the signals are in `risk_signals`. */
@@ -172,7 +423,16 @@ export type LedgerEntryType =
   | 'hold'
   | 'release'
   | 'refund'
+  /** PayHold's commission. Reclassified, not moved — see `Balance.fees_retained`. */
   | 'fee'
+  /** What the rail charged. Unlike `fee`, this genuinely left the balance. */
+  | 'provider_fee'
+  /** Collected from the buyer and owed onward. Never the seller's. */
+  | 'tax'
+  /** §6.1's new-seller carve-out, taken out of the clearing pool. */
+  | 'reserve'
+  /** The carve-out returned. The only credit among the deductions. */
+  | 'reserve_release'
   | 'payout'
   | 'deposit_hold'
   | 'deposit_capture'
@@ -191,17 +451,57 @@ export interface LedgerEntry {
   created_at: Timestamp
 }
 
+/**
+ * The six buckets, per currency. V2 §7 added two, and both are money that is
+ * still physically with the provider:
+ *
+ * `reserved` — §6.1's new-seller carve-out. Taken out of the clearing pool so
+ * it cannot be paid, without leaving the vault.
+ *
+ * `fees_retained` — our commission and collected tax. They have stopped being
+ * the seller's, but nothing sweeps them out of the tenant's own provider
+ * balance, so a reconciliation pass that ignored them reported drift equal to
+ * the fee on every released deal.
+ *
+ * `paid_out` is the only bucket describing money that has actually gone.
+ */
 export interface Balance {
   currency: Currency
   held: Money
   pending_clearance: Money
   available: Money
+  reserved: Money
+  fees_retained: Money
   paid_out: Money
 }
 
-/** The same four buckets, split by the rail actually holding the money. */
+/** The same six buckets, split by the rail actually holding the money. */
 export interface RailBalance extends Balance {
   provider: Provider
+}
+
+/**
+ * §7's price breakdown for one deal, derived from the ledger and never stored.
+ * All figures are in the **presentment** currency — what the buyer was charged.
+ *
+ * On an unfunded deal every figure is zero: this describes money that moved.
+ * The estimate a checkout shows *before* payment comes from the deal's own
+ * columns instead.
+ */
+export interface DealAmounts {
+  currency: Currency
+  /** What actually arrived from the buyer. */
+  buyer_paid: Money
+  platform_fee: Money
+  /** What the rail took. Unlike the platform fee, this really left. */
+  provider_fee: Money
+  tax: Money
+  /** Currently carved out and unpayable; returns to `seller_net` when it ends. */
+  reserve: Money
+  refunded: Money
+  paid_out: Money
+  /** Still owed to the seller and sendable. */
+  seller_net: Money
 }
 
 // ---------------------------------------------------------------------------
@@ -294,6 +594,24 @@ export interface ReconciliationAlert {
 // Request payloads
 // ---------------------------------------------------------------------------
 
+/**
+ * §14's per-deal completion policy. Every field is nullable and falls back to
+ * the tenant's settings, so a client that sends nothing behaves exactly as it
+ * did before V2.
+ *
+ * It is locked at creation, not read live: §27 says in-flight deals keep the
+ * settings they were created with, and a rental whose clearance window moved
+ * under it mid-trip is the exact surprise that rule exists to prevent.
+ */
+export interface CompletionPolicy {
+  /** The client's own name for the event that ends the work — `vehicle_returned`. */
+  completion_event: string | null
+  /** Hours of buyer silence after delivery before the timer confirms for them. */
+  auto_complete_after_hours: number | null
+  /** Days between release and payout. Overrides the tenant's `clearance_days`. */
+  clearing_days: number | null
+}
+
 export interface CreateDealInput {
   buyer_ref: string
   seller_id: string
@@ -303,6 +621,10 @@ export interface CreateDealInput {
   buyer_country?: Country
   deposit_amount?: Money
   expected_complete_at?: Timestamp
+  completion_policy?: Partial<CompletionPolicy>
+  /** §7, presentment currency. The client knows its own tax rules; we do not. */
+  tax_amount?: Money
+  discount_amount?: Money
   metadata?: Record<string, string>
 }
 

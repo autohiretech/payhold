@@ -14,6 +14,7 @@ import type {
   AdminApi,
   DealListFilter,
   PayHoldClient,
+  PayoutRouting,
   SimulationApi,
   WebhookDeliveryFilter,
 } from '../client'
@@ -37,10 +38,11 @@ import {
   type DealOutcome,
   type Dispute,
   type LedgerEntry,
+  type Money,
   type ConnectProviderInput,
   type PaymentMethod,
   type Payout,
-  type PayoutProvider,
+  type PayoutRoute,
   type Provider,
   type ProviderAccount,
   type ProviderRequirement,
@@ -62,8 +64,14 @@ import {
   defaultProviderFor,
   isMarketSupported,
   payoutRoute,
+  PAYOUT_PROVIDER_LABEL,
 } from '@/lib/rails'
 import { canConvert, convert } from '@/lib/fx'
+import {
+  latestDecision,
+  payoutDisplayStatus,
+  seedPrimaryDestination,
+} from './routing'
 import {
   aiUsage,
   askAssistant,
@@ -242,6 +250,23 @@ export class MockClient implements PayHoldClient {
         released_at: null,
         payout_due_at: null,
         fee_amount: Math.round(input.amount * cfg.service_fee_rate),
+        // §7's itemisation, presentment currency. Tax and discount come from
+        // the client — they know their own rules; the provider fee and the
+        // reserve are filled in by funding and release respectively.
+        tax_amount: input.tax_amount ?? 0,
+        discount_amount: input.discount_amount ?? 0,
+        provider_fee_amount: 0,
+        reserve_amount: 0,
+        reserve_until: null,
+        // §14. Locked at creation for the same reason `fee_amount` is: a
+        // clearance window that moved under an in-flight deal is the surprise
+        // §27 exists to prevent. Nulls fall back to the tenant's settings.
+        completion_policy: {
+          completion_event: input.completion_policy?.completion_event ?? null,
+          auto_complete_after_hours:
+            input.completion_policy?.auto_complete_after_hours ?? null,
+          clearing_days: input.completion_policy?.clearing_days ?? null,
+        },
         confirmations: [],
         metadata: input.metadata ?? {},
         created_at: createdAt,
@@ -299,9 +324,16 @@ export class MockClient implements PayHoldClient {
     return delay(clone(mutate((db) => confirmDeal(db, id, side))))
   }
 
-  async refundDeal(id: string, reason: string): Promise<Deal> {
+  async refundDeal(
+    id: string,
+    reason: string,
+    amount?: Money,
+    lineItems?: unknown,
+  ): Promise<Deal> {
     await this.getDeal(id)
-    return delay(clone(mutate((db) => refundDeal(db, id, reason))))
+    return delay(
+      clone(mutate((db) => refundDeal(db, id, reason, amount, lineItems))),
+    )
   }
 
   // -- Deposits ------------------------------------------------------------
@@ -329,12 +361,7 @@ export class MockClient implements PayHoldClient {
       // The raw destination is tokenized here and immediately discarded — the
       // real system never stores it, and neither does the mock.
       const tail = input.destination.replace(/\D/g, '').slice(-4) || '0000'
-      const DESTINATION_LABEL: Record<PayoutProvider, string> = {
-        flutterwave_momo: 'Mobile money',
-        flutterwave_bank: 'Bank',
-        stripe_connect: 'Stripe',
-      }
-      const label = DESTINATION_LABEL[input.payout_provider]
+      const label = PAYOUT_PROVIDER_LABEL[input.payout_provider]
 
       const payoutCurrency = input.payout_currency ?? defaultCurrencyFor(input.country)
       const route = payoutRoute(input.country, payoutCurrency)
@@ -354,9 +381,20 @@ export class MockClient implements PayHoldClient {
         payout_provider: input.payout_provider,
         beneficiary_token: `ben_fw_${nextId('tok')}`,
         masked_destination: `${label} •••• ${tail}`,
+        // §12: a new seller starts unverified and cannot be paid until
+        // somebody attests otherwise. That is the gate, and defaulting it
+        // to verified here would make the mock lie about the one thing
+        // this phase added.
+        kyc_status: 'pending' as const,
+        external_user_id: null,
+        sanctions_checked_at: null,
+        destination_changed_at: null,
         created_at: nowIso(),
       }
       db.sellers.push(created)
+      // §5.1: the destination is the record from here on, and a seller without
+      // one is unpayable for a reason nobody chose.
+      seedPrimaryDestination(db, created)
       audit(db, created.tenant_id, null, 'dashboard', 'seller.created', {
         seller_id: created.id,
         name: created.name,
@@ -405,6 +443,32 @@ export class MockClient implements PayHoldClient {
 
   async approvePayoutReview(id: string, approvedBy: string): Promise<Payout> {
     return delay(clone(mutate((db) => approvePayoutReview(db, id, approvedBy))))
+  }
+
+  async listPayoutRoutes(): Promise<PayoutRoute[]> {
+    const db = getDb()
+    // The platform defaults plus this tenant's own overrides, which is exactly
+    // what the backend's RLS policy returns: a tenant needs to see the corridor
+    // that refused their seller in order to do anything about it.
+    const routes = db.payout_routes.filter(
+      (r) => r.tenant_id === null || r.tenant_id === db.current_tenant_id,
+    )
+    return delay(clone(routes))
+  }
+
+  async getPayoutRouting(id: string): Promise<PayoutRouting> {
+    const db = getDb()
+    const payout = db.payouts.find(
+      (p) => p.id === id && p.tenant_id === db.current_tenant_id,
+    )
+    // Another tenant's payout is a 404, never a 403 — a different answer would
+    // confirm it exists.
+    if (!payout) throw new PayHoldError('not_found', `Payout ${id} not found`)
+
+    return delay({
+      display_status: payoutDisplayStatus(db, payout),
+      decision: clone(latestDecision(db, payout.id)),
+    })
   }
 
   async listRiskSignals(dealId?: string): Promise<RiskSignal[]> {

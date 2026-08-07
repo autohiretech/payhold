@@ -26,7 +26,12 @@ import {
   type FlutterwaveCredentials,
 } from '../_shared/flutterwave.ts'
 import { handler, json, readJson, required } from '../_shared/http.ts'
-import { PayHoldError, type Provider } from '../_shared/types.ts'
+import {
+  HOLDING_STATUSES,
+  PAST_HOLD_STATUSES,
+  PayHoldError,
+  type Provider,
+} from '../_shared/types.ts'
 import type { SupabaseClient } from 'npm:@supabase/supabase-js@2'
 
 interface ConnectBody {
@@ -196,7 +201,13 @@ async function disconnect(
     .select('id', { count: 'exact', head: true })
     .eq('tenant_id', caller.tenant_id)
     .eq('provider', provider)
-    .in('status', ['funded_held', 'confirmed_buyer', 'confirmed_seller', 'disputed', 'released'])
+    // Everything still holding money, plus everything past the hold that has
+    // not yet been paid out. Without credentials none of these could be paid
+    // or refunded, so the deals would be stranded.
+    .in('status', [
+      ...HOLDING_STATUSES,
+      ...PAST_HOLD_STATUSES.filter((s) => s !== 'paid_out'),
+    ])
 
   if ((count ?? 0) > 0) {
     throw new PayHoldError(

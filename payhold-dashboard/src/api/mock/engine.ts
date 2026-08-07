@@ -13,17 +13,20 @@
 
 import {
   HOLDING_STATUSES,
+  PAST_HOLD_STATUSES,
   PayHoldError,
   type Balance,
   type ConfirmSide,
   type Currency,
   type Deal,
+  type DealAmounts,
   type DealOutcome,
   type Dispute,
   type LedgerEntry,
   type LedgerEntryType,
   type PaymentMethod,
   type Payout,
+  type PayoutStatus,
   type Provider,
   type RailBalance,
   type ReconciliationAlert,
@@ -35,12 +38,14 @@ import {
   addDays,
   audit,
   getDb,
+  hoursBetween,
   isDue,
   nextId,
   nowIso,
   type MockDb,
 } from './store'
 import { dealFindings, payoutFindings, recordFindings } from './risk'
+import { primaryDestination, routePayout } from './routing'
 import { deliverPending, emitWebhook } from './webhooks'
 
 /**
@@ -196,7 +201,7 @@ export function fundDeal(
   // would be a worse product than the fraud it prevents.
   recordFindings(db, deal.tenant_id, deal.id, deal.seller_id, dealFindings(db, deal))
 
-  emitWebhook(db, deal.tenant_id, 'deal.funded_held', deal.id, {
+  emitWebhook(db, deal.tenant_id, 'order.funded_held', deal.id, {
     amount: deal.amount,
     currency: deal.currency,
     presentment_amount: deal.presentment_amount,
@@ -246,7 +251,15 @@ export function confirmDeal(
       `deal.confirmed_${side}`,
       { actor },
     )
-    emitWebhook(db, deal.tenant_id, 'deal.confirmed', deal.id, { side, actor })
+    // §10.2: the seller delivers, the buyer accepts. One event per side, and
+    // the confirmation row is what knows which — and whether the timer did it.
+    emitWebhook(
+      db,
+      deal.tenant_id,
+      side === 'seller' ? 'order.delivered' : 'order.accepted',
+      deal.id,
+      { side, actor },
+    )
   }
 
   const hasBuyer = deal.confirmations.some((c) => c.side === 'buyer')
@@ -303,18 +316,61 @@ function releaseDeal(db: MockDb, deal: Deal): Deal {
   if (!hasBoth) {
     throw new PayHoldError('invalid_state', 'Release requires both confirmations')
   }
-  if (deal.status === 'released' || deal.status === 'paid_out') return deal
+  if (PAST_HOLD_STATUSES.includes(deal.status)) return deal
 
   const cfg = settingsFor(db, deal.tenant_id)
   const releasedAt = nowIso()
 
-  deal.status = 'released'
+  // §6.1's new-seller reserve. Off unless the tenant has set a rate, so an
+  // account that has not configured one behaves exactly as it did before V2.
+  // "New" is counted in payouts actually *paid* — a transfer that worked is
+  // what the reserve is waiting to observe.
+  const rate = cfg.reserve_rate ?? 0
+  let reserve = 0
+  let reserveDays = 0
+
+  if (rate > 0) {
+    const priorPaid = db.payouts.filter(
+      (p) => p.seller_id === deal.seller_id && p.status === 'paid',
+    ).length
+
+    if (priorPaid < (cfg.reserve_after_payouts ?? 3)) {
+      const pool =
+        deal.presentment_amount -
+        presentmentFee(deal) -
+        deal.provider_fee_amount -
+        deal.tax_amount
+      reserve = Math.floor(pool * rate)
+      reserveDays = cfg.reserve_days ?? 30
+    }
+  }
+
+  // §6: the money leaves the hold here and the safety window starts. `released`
+  // is the far side of that window — see `20260807000002_lifecycle.sql`.
+  deal.status = 'clearing'
   deal.released_at = releasedAt
-  deal.payout_due_at = addDays(releasedAt, cfg.clearance_days)
+  // §14: a deal that carried its own policy at creation wins over the tenant
+  // setting, and keeps it however the setting moves afterwards. A reserve is
+  // extra days on top (§6.1), ending exactly when the payout comes due — one
+  // payout per deal, so a reserve outliving it would have nothing to send it.
+  deal.payout_due_at = addDays(
+    releasedAt,
+    (deal.completion_policy.clearing_days ?? cfg.clearance_days) + reserveDays,
+  )
+  deal.reserve_amount = reserve
+  deal.reserve_until = reserve > 0 ? deal.payout_due_at : null
   touch(deal)
 
-  ledgerEntry(db, deal, 'release', -deal.presentment_amount)
+  // What the buyer paid, less anything already sent back. Releasing the
+  // original figure would let out money that is no longer there.
+  const refundedAlready = db.refunds
+    .filter((r) => r.deal_id === deal.id && r.status !== 'failed')
+    .reduce((n, r) => n + r.amount, 0)
+
+  ledgerEntry(db, deal, 'release', -(deal.presentment_amount - refundedAlready))
   ledgerEntry(db, deal, 'fee', -presentmentFee(deal))
+  if (deal.tax_amount > 0) ledgerEntry(db, deal, 'tax', -deal.tax_amount)
+  if (reserve > 0) ledgerEntry(db, deal, 'reserve', -reserve)
   if (deal.deposit_amount && !depositSettled(db, deal.id)) {
     ledgerEntry(db, deal, 'deposit_release', -deal.deposit_amount)
   }
@@ -351,7 +407,7 @@ function releaseDeal(db: MockDb, deal: Deal): Deal {
     paid_in: payoutCurrency,
   })
 
-  emitWebhook(db, deal.tenant_id, 'deal.released', deal.id, {
+  emitWebhook(db, deal.tenant_id, 'order.clearing_started', deal.id, {
     fee_amount: deal.fee_amount,
     net: netSettlement,
     payout_currency: payoutCurrency,
@@ -372,32 +428,144 @@ function releaseDeal(db: MockDb, deal: Deal): Deal {
   return deal
 }
 
-export function refundDeal(db: MockDb, dealId: string, reason: string): Deal {
+/**
+ * §7.1 — full, partial or line-item.
+ *
+ * `amount` omitted means everything still refundable, which is what every V1
+ * caller meant. What is refundable is `presentment_amount` less what has
+ * already gone back; the guard is cumulative and lives here for the same reason
+ * the release guard lives under the row lock in SQL.
+ *
+ * **A partial refund does not change the deal's status** (§29.8). It is an
+ * amount, not a lifecycle position — a deal refunded by a third still has to be
+ * delivered, cleared and paid out for the other two thirds.
+ */
+export function refundDeal(
+  db: MockDb,
+  dealId: string,
+  reason: string,
+  amount?: number,
+  lineItems?: unknown,
+  actor = 'dashboard',
+): Deal {
   const deal = requireDeal(db, dealId)
 
-  if (deal.status === 'released' || deal.status === 'paid_out') {
-    throw new PayHoldError(
-      'policy_violation',
-      'Funds have already been released — refund is no longer possible',
-    )
-  }
   if (deal.status === 'refunded') return deal
-  if (deal.status === 'created') {
+  if (
+    !HOLDING_STATUSES.includes(deal.status) &&
+    !PAST_HOLD_STATUSES.includes(deal.status)
+  ) {
     throw new PayHoldError('invalid_state', 'Nothing has been collected to refund')
   }
 
+  const payout = db.payouts.find((p) => p.deal_id === deal.id)
+  if (payout?.status === 'processing') {
+    throw new PayHoldError(
+      'policy_violation',
+      'A payout for this deal is in flight — wait for it to settle',
+    )
+  }
+
+  // A failed refund never left, so it does not count against what is still
+  // refundable. A pending one does: it is expected to.
+  const already = db.refunds
+    .filter((r) => r.deal_id === deal.id && r.status !== 'failed')
+    .reduce((n, r) => n + r.amount, 0)
+  const refundable = deal.presentment_amount - already
+
+  if (refundable <= 0) {
+    throw new PayHoldError(
+      'policy_violation',
+      'Nothing further is refundable on this deal',
+    )
+  }
+
+  const value = amount ?? refundable
+
+  if (!Number.isInteger(value) || value <= 0) {
+    throw new PayHoldError('policy_violation', 'A refund must be a positive amount')
+  }
+  if (value > refundable) {
+    throw new PayHoldError(
+      'policy_violation',
+      `Refund of ${value} exceeds the ${refundable} still refundable on this deal`,
+    )
+  }
+
+  const full = value === refundable
+  const pastHold = PAST_HOLD_STATUSES.includes(deal.status)
+
+  db.refunds.push({
+    id: nextId('rfn'),
+    tenant_id: deal.tenant_id,
+    deal_id: deal.id,
+    amount: value,
+    currency: deal.presentment_currency,
+    reason,
+    line_items: lineItems ?? null,
+    status: deal.status === 'paid_out' ? 'pending' : 'succeeded',
+    actor,
+    created_at: nowIso(),
+    settled_at: deal.status === 'paid_out' ? null : nowIso(),
+  })
+
+  // §7.1.4. The money is with the seller and is not ours to send.
+  if (deal.status === 'paid_out') {
+    ledgerEntry(db, deal, 'receivable', value)
+    audit(db, deal.tenant_id, deal.id, actor, 'refund.receivable_raised', {
+      amount: value,
+      reason,
+      note: 'The seller has already been paid. This needs a person.',
+    })
+    return deal
+  }
+
+  if (pastHold) {
+    // §7.1.3. Put it back in the hold, then take it out to the buyer. Booking
+    // only the refund would drive `held` negative — the release has already
+    // cancelled the hold.
+    const poolBefore = clearingPool(db, deal.id)
+    ledgerEntry(db, deal, 'release', value)
+    ledgerEntry(db, deal, 'refund', -value)
+
+    if (payout && poolBefore > 0 && payout.status !== 'paid') {
+      payout.amount = Math.max(
+        1,
+        Math.floor((payout.amount * clearingPool(db, deal.id)) / poolBefore),
+      )
+    }
+  } else {
+    ledgerEntry(db, deal, 'refund', -value)
+  }
+
+  if (!full) {
+    audit(db, deal.tenant_id, deal.id, actor, 'deal.partially_refunded', {
+      amount: value,
+      refundable_before: refundable,
+      reason,
+    })
+    touch(deal)
+    return deal
+  }
+
+  // The one refund that is a lifecycle event.
   deal.status = 'refunded'
   touch(deal)
 
-  ledgerEntry(db, deal, 'refund', -deal.presentment_amount)
   if (deal.deposit_amount && !depositSettled(db, deal.id)) {
     ledgerEntry(db, deal, 'deposit_release', -deal.deposit_amount)
   }
 
-  audit(db, deal.tenant_id, deal.id, 'dashboard', 'deal.refunded', { reason })
-  emitWebhook(db, deal.tenant_id, 'deal.refunded', deal.id, {
+  // Nothing is owed any more, so nothing should be scheduled.
+  if (payout && ['scheduled', 'frozen', 'held_for_review'].includes(payout.status)) {
+    payout.status = 'failed'
+    payout.failure_reason = 'Deal was refunded'
+  }
+
+  audit(db, deal.tenant_id, deal.id, actor, 'deal.refunded', { reason, amount: value })
+  emitWebhook(db, deal.tenant_id, 'refund.succeeded', deal.id, {
     reason,
-    amount: deal.presentment_amount,
+    amount: value,
     currency: deal.presentment_currency,
   })
 
@@ -405,6 +573,17 @@ export function refundDeal(db: MockDb, dealId: string, reason: string): Deal {
     recordOutcome(db, deal, 'refunded', 'client_refund', reason)
   }
   return deal
+}
+
+/** The clearing pool for one deal — the mirror of SQL's `deal_clearing_pool`. */
+function clearingPool(db: MockDb, dealId: string): number {
+  let pool = 0
+  for (const e of db.ledger) {
+    if (e.deal_id !== dealId) continue
+    if (e.entry_type === 'release') pool -= e.amount
+    else if (POOL_DEDUCTIONS.includes(e.entry_type)) pool += e.amount
+  }
+  return pool
 }
 
 // ---------------------------------------------------------------------------
@@ -482,7 +661,10 @@ export function openDispute(
 ): Dispute {
   const deal = requireDeal(db, dealId)
 
-  if (!HOLDING_STATUSES.includes(deal.status)) {
+  // §6 adds `clearing -> disputed`. A chargeback or a complaint does not wait
+  // politely for the safety window to end — and freezing during clearing is
+  // most of what having a window is for.
+  if (!HOLDING_STATUSES.includes(deal.status) && deal.status !== 'clearing') {
     throw new PayHoldError(
       'invalid_state',
       `A deal in ${deal.status} cannot be disputed`,
@@ -509,7 +691,7 @@ export function openDispute(
   deal.status = 'disputed'
   touch(deal)
   audit(db, deal.tenant_id, deal.id, `user:${raisedBy}`, 'deal.disputed', { reason })
-  emitWebhook(db, deal.tenant_id, 'deal.disputed', deal.id, {
+  emitWebhook(db, deal.tenant_id, 'dispute.opened', deal.id, {
     dispute_id: dispute.id,
     raised_by: raisedBy,
     reason,
@@ -575,6 +757,49 @@ export function resolveDispute(
 // ---------------------------------------------------------------------------
 
 /**
+ * §12: what stops this seller being paid at all, as opposed to what a rule
+ * finds worth a second look. The mirror of SQL's `seller_capabilities` plus
+ * §5.1's change protection.
+ *
+ * Every reason, not the first — a client showing a seller what is missing
+ * should not make them fix one thing at a time.
+ */
+function sellerEligibility(db: MockDb, payout: Payout): string[] {
+  const seller = db.sellers.find((s) => s.id === payout.seller_id)
+  if (!seller) return ['The seller no longer exists']
+
+  const reasons: string[] = []
+
+  if (seller.kyc_status !== 'verified') {
+    reasons.push(`Identity is ${seller.kyc_status}, not verified`)
+  }
+  if (!seller.sanctions_checked_at) {
+    reasons.push('Sanctions screening has not been run')
+  }
+
+  const destination = primaryDestination(db, seller.id)
+  if (!destination) {
+    reasons.push('No payout destination has been registered')
+  } else if (!destination.verified_at) {
+    reasons.push('The payout destination has not been verified')
+  }
+
+  // §5.1: a newly moved destination waits, so a stolen session cannot redirect
+  // a payout and have it leave before anybody notices.
+  if (seller.destination_changed_at) {
+    const hours = hoursBetween(seller.destination_changed_at, nowIso())
+    if (hours < 24) reasons.push('The payout destination changed in the last 24 hours')
+  }
+
+  // A routing failure is deliberately **not** in this list. If it were, an
+  // unroutable payout would be held as `needs_verification`, the routing engine
+  // would never see it — no decision row, no reason code — and a seller would be
+  // told to verify something that is already verified. §5.1's answer to "we
+  // cannot reach you" is `blocked`, with the checks behind it.
+  return reasons
+}
+
+/**
  * Run the deterministic rules against a payout that is about to leave.
  *
  * Returns true when the payout was held. The signals are written either way —
@@ -582,11 +807,79 @@ export function resolveDispute(
  * stopping for, because that is the history a model of our own trains on.
  */
 function screenPayout(db: MockDb, payout: Payout): boolean {
-  // Already looked at by a person: their decision stands, and re-running the
-  // rules would let a rule overrule the human who overruled it.
+  const cfg = settingsFor(db, payout.tenant_id)
+
+  // §8 outranks everything, and is nobody's to clear from here: the payout
+  // moves when the dispute resolves and not before. `blocked` rather than
+  // `needs_verification` because there is nothing for the seller to verify.
+  if (requireDeal(db, payout.deal_id).status === 'disputed') {
+    if (payout.status !== 'blocked') {
+      payout.status = 'blocked'
+      payout.failure_reason = 'The deal is disputed'
+      audit(db, payout.tenant_id, payout.deal_id, 'system', 'payout.blocked', {
+        payout_id: payout.id,
+        reason_code: 'deal_disputed',
+      })
+    }
+    return true
+  }
+
+  // §12's eligibility gate, and it is **not** behind `risk_rules_enabled`, nor
+  // behind an earlier approval. The discretionary rules below are arithmetic a
+  // tenant may reasonably decline to act on; "we have never verified this
+  // seller" is not, and neither is an approval that predates a revocation.
+  const reasons = sellerEligibility(db, payout)
+
+  if (reasons.length > 0) {
+    // Written on entry and on a change of reasons, not on every pass:
+    // `needs_verification` is re-screened by the dispatcher, and §12.3's labels
+    // cannot be backfilled, which makes drowning them in duplicates costly.
+    const last = [...db.risk_signals]
+      .filter((r) => r.deal_id === payout.deal_id && r.signal === 'not_eligible')
+      .pop()
+    const changed = JSON.stringify((last?.value as { reasons?: string[] })?.reasons) !==
+      JSON.stringify(reasons)
+
+    if (changed) {
+      recordFindings(db, payout.tenant_id, payout.deal_id, payout.seller_id, [
+        {
+          signal: 'not_eligible',
+          severity: 'review',
+          value: { reasons },
+          explanation: `This seller cannot be paid yet: ${reasons.join('; ')}.`,
+        },
+      ])
+    }
+
+    if (payout.status !== 'needs_verification') {
+      payout.status = 'needs_verification'
+      payout.review_held_at = nowIso()
+
+      audit(db, payout.tenant_id, payout.deal_id, 'system', 'payout.needs_verification', {
+        payout_id: payout.id,
+        eligibility: reasons,
+      })
+    }
+    return true
+  }
+
+  // Nothing outstanding any more. Somebody attested to the missing fact, so the
+  // payout goes back in the queue rather than waiting for a pass that would
+  // never come.
+  if (payout.status === 'needs_verification') {
+    payout.status = 'scheduled'
+    payout.review_held_at = null
+    audit(db, payout.tenant_id, payout.deal_id, 'system', 'payout.eligible', {
+      payout_id: payout.id,
+    })
+  }
+
+  // Already looked at by a person: their decision stands over the discretionary
+  // rules, and re-running those would let a rule overrule the human who
+  // overruled it. It does not stand over the gate above — that is the point of
+  // the ordering.
   if (payout.review_approved_at) return false
 
-  const cfg = settingsFor(db, payout.tenant_id)
   const findings = payoutFindings(db, payout, cfg)
   if (findings.length === 0) return false
 
@@ -624,8 +917,14 @@ function dispatchPayout(db: MockDb, payout: Payout): void {
 
   // Screening happens before the attempt counter moves: a payout a rule stopped
   // was never tried, and counting it as an attempt would misreport the
-  // provider's reliability.
+  // provider's reliability. It also covers §8 — a disputed deal is blocked
+  // here, which is why this runs before routing rather than after: routing
+  // un-blocks a payout it can route, and would let a disputed one back out.
   if (screenPayout(db, payout)) return
+
+  // §5.1's routing engine. Deterministic, and it records what it decided
+  // whether or not it found anything — the decision is the audit.
+  if (routePayout(db, payout).reason_code !== 'routed') return
 
   payout.attempts += 1
 
@@ -656,6 +955,15 @@ function dispatchPayout(db: MockDb, payout: Payout): void {
     convert(payout.amount, payout.currency, deal.presentment_currency)?.amount ??
     payout.amount
   ledgerEntry(db, deal, 'payout', -leaving)
+  // A settled transfer proves the window is over, so a deal still clearing is
+  // promoted rather than skipped — the same recovery path `settle_payout` takes.
+  if (deal.status === 'clearing') {
+    deal.status = 'released'
+    audit(db, deal.tenant_id, deal.id, 'system', 'deal.cleared', {
+      reason: 'payout settled',
+      payout_due_at: deal.payout_due_at,
+    })
+  }
   deal.status = 'paid_out'
   touch(deal)
 
@@ -663,7 +971,7 @@ function dispatchPayout(db: MockDb, payout: Payout): void {
     amount: payout.amount,
     seller_id: payout.seller_id,
   })
-  emitWebhook(db, payout.tenant_id, 'deal.paid_out', payout.deal_id, {
+  emitWebhook(db, payout.tenant_id, 'payout.paid', payout.deal_id, {
     payout_id: payout.id,
     amount: payout.amount,
     currency: payout.currency,
@@ -683,6 +991,15 @@ export function retryPayout(db: MockDb, payoutId: string): Payout {
     throw new PayHoldError(
       'invalid_state',
       'This payout is held for review — approve it to send it',
+    )
+  }
+  // `blocked` is deliberately not refused: re-attempting is exactly what a
+  // person wants once they have enabled a route or resolved a dispute, and
+  // dispatch re-asks both questions before it sends anything.
+  if (payout.status === 'needs_verification') {
+    throw new PayHoldError(
+      'invalid_state',
+      'This seller has something outstanding — verify them to send it',
     )
   }
   dispatchPayout(db, payout)
@@ -801,9 +1118,17 @@ export function approvePayoutReview(
 
 export interface CronResult {
   auto_released: number
+  /** Reserves whose hold ended this pass, returned to the clearing pool. */
+  reserves_released: number
+  /** Deals whose clearance window closed this pass: `clearing` → `released`. */
+  cleared: number
   paid: number
   frozen: number
   held_for_review: number
+  /** §12: stopped because something about the seller is outstanding. */
+  needs_verification: number
+  /** §5.1: no eligible route, or a disputed deal. */
+  blocked: number
   webhooks_delivered: number
   drift_alerts: number
 }
@@ -815,15 +1140,34 @@ export interface CronResult {
  *      before checking would be sending money out of a balance we already know
  *      we cannot explain
  *   2. auto-release timers
- *   3. payout dispatch for anything whose clearance window has closed
- *   4. outbound webhook delivery, last, so this pass's own events go out
+ *   3. the reserve sweep — §6.1 carve-outs whose hold has ended go back into
+ *      the pool, before anything reads that pool
+ *   4. the clearing sweep — deals whose safety window has closed become
+ *      `released`, which is what makes their payout dispatchable
+ *   5. payout dispatch for anything now released
+ *   6. outbound webhook delivery, last, so this pass's own events go out
  */
+/**
+ * Payout states a machine may send. The mirror of `DISPATCHABLE` in
+ * `_shared/dispatch.ts`, and the reasoning is in the loop below.
+ */
+const DISPATCHABLE: PayoutStatus[] = [
+  'scheduled',
+  'frozen',
+  'blocked',
+  'needs_verification',
+]
+
 export function runCron(db: MockDb): CronResult {
   const result: CronResult = {
     auto_released: 0,
+    reserves_released: 0,
+    cleared: 0,
     paid: 0,
     frozen: 0,
     held_for_review: 0,
+    needs_verification: 0,
+    blocked: 0,
     webhooks_delivered: 0,
     drift_alerts: 0,
   }
@@ -850,16 +1194,60 @@ export function runCron(db: MockDb): CronResult {
     result.auto_released += 1
   }
 
+  // Return any reserve whose hold has ended, before the clearing sweep. Both
+  // are keyed on the same instant, and a deal that matured while its reserve
+  // was still carved out would offer the dispatcher a pool short by it.
+  for (const deal of db.deals) {
+    if (deal.reserve_amount <= 0 || !isDue(deal.reserve_until)) continue
+    if (db.ledger.some((e) => e.deal_id === deal.id && e.entry_type === 'reserve_release')) {
+      continue
+    }
+
+    ledgerEntry(db, deal, 'reserve_release', deal.reserve_amount)
+    audit(db, deal.tenant_id, deal.id, 'system', 'deal.reserve_released', {
+      amount: deal.reserve_amount,
+      reserve_until: deal.reserve_until,
+    })
+    result.reserves_released += 1
+  }
+
+  // Promote deals whose clearance window has closed, before looking at
+  // payouts. Same order as `payout-dispatch`: a payout becomes dispatchable at
+  // `payout_due_at`, which is the same instant the deal stops clearing, so
+  // dispatching first would send against a deal still claiming to be inside its
+  // safety window. Disputed and refunded deals are excluded by the status
+  // check, so a dispute opened during clearing freezes the promotion.
+  for (const deal of db.deals) {
+    if (deal.status !== 'clearing' || !isDue(deal.payout_due_at)) continue
+
+    deal.status = 'released'
+    touch(deal)
+    audit(db, deal.tenant_id, deal.id, 'system', 'deal.cleared', {
+      payout_due_at: deal.payout_due_at,
+    })
+    emitWebhook(db, deal.tenant_id, 'order.released', deal.id, {
+      payout_due_at: deal.payout_due_at,
+    })
+    result.cleared += 1
+  }
+
   for (const payout of db.payouts) {
-    // `held_for_review` is deliberately not dispatchable: cron must never be
-    // the thing that lets a held payout through. Only a person can.
-    const dispatchable = payout.status === 'scheduled' || payout.status === 'frozen'
-    if (!dispatchable || !isDue(payout.scheduled_for)) continue
+    // `held_for_review` is deliberately absent and must stay absent: cron must
+    // never be the thing that lets a payout past a rule or a person.
+    //
+    // `blocked` and `needs_verification` are present, and that is the
+    // difference between them and a hold. Neither is waiting on a decision —
+    // one waits for a route to exist, the other for somebody to attest to a
+    // fact — so a pass that re-asks and finds the reason gone overrules nobody.
+    // The same shape as `frozen` clearing once reconciliation is resolved.
+    if (!DISPATCHABLE.includes(payout.status) || !isDue(payout.scheduled_for)) continue
 
     dispatchPayout(db, payout)
     if (payout.status === 'paid') result.paid += 1
     if (payout.status === 'frozen') result.frozen += 1
     if (payout.status === 'held_for_review') result.held_for_review += 1
+    if (payout.status === 'needs_verification') result.needs_verification += 1
+    if (payout.status === 'blocked') result.blocked += 1
   }
 
   result.webhooks_delivered = deliverPending(db).delivered
@@ -874,12 +1262,37 @@ export function runCron(db: MockDb): CronResult {
 const HELD_TYPES: LedgerEntryType[] = ['hold', 'release', 'refund']
 
 /**
- * Four buckets, per currency, computed entirely from ledger entries:
+ * Everything that comes out of the seller's clearing pool. `release` credits it
+ * and is handled separately; these all debit it, except `reserve_release`,
+ * which is stored positive and so adds back on its own.
+ *
+ * **Keep this identical to `POOL_ENTRY_TYPES` in the backend's `figures.ts` and
+ * to the `clearing` expression in `rail_balances`.** A type present in one and
+ * missing from another sends a seller money that is not theirs.
+ */
+const POOL_DEDUCTIONS: LedgerEntryType[] = [
+  'fee',
+  'provider_fee',
+  'tax',
+  'reserve',
+  'reserve_release',
+  'payout',
+]
+
+/**
+ * Six buckets, per currency, computed entirely from ledger entries:
  *
  *   held              hold + release + refund  (nets to zero once settled)
- *   clearing pool     −release − fee − payout  (what the seller is owed)
- *   split of that     by each deal's payout_due_at
+ *   clearing pool     −release, less every deduction that is not the seller's
+ *   split of that     by each deal's payout_due_at → pending / available
+ *   reserved          §6.1's carve-out, taken out of the pool and unpayable
+ *   fees_retained     our commission and collected tax: no longer the
+ *                     seller's, and still sitting in the provider balance
  *   paid_out          the payout entries, unsigned
+ *
+ * `fees_retained` is the bucket whose absence made every released deal look
+ * like drift — see `payhold-backend/.../20260807000004_money_breakdown.sql`.
+ * Only `paid_out` describes money that actually left.
  *
  * Security deposits are excluded — they are the buyer's money held against
  * damage, not part of the tenant's balance.
@@ -895,6 +1308,8 @@ export function computeBalances(db: MockDb, tenantId: string): Balance[] {
         held: 0,
         pending_clearance: 0,
         available: 0,
+        reserved: 0,
+        fees_retained: 0,
         paid_out: 0,
       }
       byCurrency.set(rail.currency, b)
@@ -902,6 +1317,8 @@ export function computeBalances(db: MockDb, tenantId: string): Balance[] {
     b.held += rail.held
     b.pending_clearance += rail.pending_clearance
     b.available += rail.available
+    b.reserved += rail.reserved
+    b.fees_retained += rail.fees_retained
     b.paid_out += rail.paid_out
   }
 
@@ -914,12 +1331,54 @@ export function computeBalances(db: MockDb, tenantId: string): Balance[] {
         held: 0,
         pending_clearance: 0,
         available: 0,
+        reserved: 0,
+        fees_retained: 0,
         paid_out: 0,
       })
     }
   }
 
   return [...byCurrency.values()].sort((a, b) => a.currency.localeCompare(b.currency))
+}
+
+/**
+ * §7's breakdown for one deal — the counterpart of the backend's
+ * `deal_amounts()`, derived from the ledger and never stored.
+ *
+ * All in the presentment currency. On an unfunded deal every figure is zero,
+ * deliberately: this describes money that moved, and the estimate a checkout
+ * shows before payment comes from the deal's own columns.
+ */
+export function computeDealAmounts(db: MockDb, dealId: string): DealAmounts {
+  const deal = requireDeal(db, dealId)
+  const entries = db.ledger.filter((e) => e.deal_id === dealId)
+
+  // Deductions are stored negative and reported positive, and negating zero in
+  // JavaScript yields `-0` — which serialises as `-0` and compares unequal to
+  // `0` under `Object.is`. `|| 0` normalises it; a breakdown should never hand
+  // a client a negative zero.
+  const sum = (...types: LedgerEntryType[]) =>
+    entries.filter((e) => types.includes(e.entry_type)).reduce((n, e) => n + e.amount, 0)
+  const owed = (...types: LedgerEntryType[]) => -sum(...types) || 0
+
+  let sellerNet = 0
+  for (const e of entries) {
+    if (e.entry_type === 'release') sellerNet -= e.amount
+    if (POOL_DEDUCTIONS.includes(e.entry_type)) sellerNet += e.amount
+  }
+
+  return {
+    currency: deal.presentment_currency,
+    buyer_paid: sum('hold'),
+    platform_fee: owed('fee'),
+    provider_fee: owed('provider_fee'),
+    tax: owed('tax'),
+    reserve: owed('reserve', 'reserve_release'),
+    refunded: owed('refund'),
+    receivable: sum('receivable'),
+    paid_out: owed('payout'),
+    seller_net: sellerNet,
+  }
 }
 
 /**
@@ -944,6 +1403,8 @@ export function computeRailBalances(db: MockDb, tenantId: string): RailBalance[]
         held: 0,
         pending_clearance: 0,
         available: 0,
+        reserved: 0,
+        fees_retained: 0,
         paid_out: 0,
       }
       byRail.set(key, b)
@@ -965,16 +1426,25 @@ export function computeRailBalances(db: MockDb, tenantId: string): RailBalance[]
 
     let held = 0
     let clearing = 0
+    let reserved = 0
+    let retained = 0
     let paid = 0
 
     for (const e of entries) {
       if (HELD_TYPES.includes(e.entry_type)) held += e.amount
       if (e.entry_type === 'release') clearing -= e.amount
-      if (e.entry_type === 'fee') clearing += e.amount
-      if (e.entry_type === 'payout') {
-        clearing += e.amount
-        paid -= e.amount
+      // Everything that is not the seller's comes out of the pool. This list
+      // must match `amountLeaving`'s and the SQL's, or a payout sends money the
+      // pool says is spoken for.
+      if (POOL_DEDUCTIONS.includes(e.entry_type)) clearing += e.amount
+      // Carved out of the pool rather than gone. `reserve` is stored negative
+      // and `reserve_release` positive, so the two net to zero when it ends.
+      if (e.entry_type === 'reserve' || e.entry_type === 'reserve_release') {
+        reserved -= e.amount
       }
+      // Stopped being the seller's, still in the vault.
+      if (e.entry_type === 'fee' || e.entry_type === 'tax') retained -= e.amount
+      if (e.entry_type === 'payout') paid -= e.amount
     }
 
     // Attribute to the rail recorded on the entries, not the deal — a deal's
@@ -985,6 +1455,8 @@ export function computeRailBalances(db: MockDb, tenantId: string): RailBalance[]
 
     b.held += held
     b.paid_out += paid
+    b.reserved += reserved
+    b.fees_retained += retained
     if (isDue(deal.payout_due_at)) b.available += clearing
     else b.pending_clearance += clearing
   }
@@ -1012,17 +1484,44 @@ export function driftKey(
  * What the provider says it is holding for this tenant on this rail.
  *
  * In the real system this is an API call — Flutterwave's `/balances`, Stripe's
- * balance endpoint. Here it is our own number plus whatever drift the dev panel
- * injected, which is the same shape of answer: something computed elsewhere
- * that we have to agree with.
+ * balance endpoint.
+ *
+ * **This used to be our own expected figure plus injected drift**, which made
+ * the comparison self-fulfilling: whatever the buckets said, the "provider"
+ * agreed. That is why the mock never noticed that the platform fee made every
+ * released deal drift — it could not, by construction.
+ *
+ * So it is now derived independently, from money that genuinely crossed the
+ * provider boundary: buyer payments in, the rail's own fee out, refunds out,
+ * payouts out. `release`, `fee`, `tax`, `reserve` and `reserve_release` are
+ * reclassifications between our own buckets and appear nowhere here — which is
+ * exactly the property the bucket maths has to satisfy for the two to agree.
+ *
+ * Deposits are excluded, as they are from the buckets: a pre-auth is the
+ * buyer's money held against damage, not the tenant's balance.
  */
+const CROSSES_THE_BOUNDARY: LedgerEntryType[] = [
+  'hold',
+  'provider_fee',
+  'refund',
+  'payout',
+]
+
 function providerReportedBalance(
   db: MockDb,
   tenantId: string,
   rail: RailBalance,
 ): number {
-  const expected = rail.held + rail.pending_clearance + rail.available
-  return expected + (db.provider_drift[driftKey(tenantId, rail.provider, rail.currency)] ?? 0)
+  let actual = 0
+
+  for (const e of db.ledger) {
+    if (e.tenant_id !== tenantId || e.deal_id === null) continue
+    if (e.provider !== rail.provider || e.currency !== rail.currency) continue
+    // Signed already: a hold credits, a fee and a payout debit.
+    if (CROSSES_THE_BOUNDARY.includes(e.entry_type)) actual += e.amount
+  }
+
+  return actual + (db.provider_drift[driftKey(tenantId, rail.provider, rail.currency)] ?? 0)
 }
 
 /**
@@ -1049,7 +1548,16 @@ export function runReconciliation(db: MockDb, tenantId?: string): Reconciliation
     let raisedNew = false
 
     for (const rail of computeRailBalances(db, tenant.id)) {
-      const ledgerBalance = rail.held + rail.pending_clearance + rail.available
+      // Five buckets, not three. `reserved` and `fees_retained` are money that
+      // has stopped being the seller's without leaving the provider — omitting
+      // them made every released deal report drift equal to our own commission,
+      // and drift freezes payouts. See the backend's `reconcile/index.ts`.
+      const ledgerBalance =
+        rail.held +
+        rail.pending_clearance +
+        rail.available +
+        rail.reserved +
+        rail.fees_retained
       const providerBalance = providerReportedBalance(db, tenant.id, rail)
       const drift = providerBalance - ledgerBalance
 

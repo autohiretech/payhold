@@ -186,7 +186,7 @@ describe('the auto-release timer', () => {
       `select status from deals where id = $1`,
       [s.deal],
     )
-    expect(d.status).toBe('released')
+    expect(d.status).toBe('clearing')
     expect(await confirmations(s.deal)).toEqual([
       { side: 'buyer', actor: 'auto' },
       { side: 'seller', actor: 'auto' },

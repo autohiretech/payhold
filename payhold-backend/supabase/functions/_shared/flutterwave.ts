@@ -19,6 +19,7 @@ import type {
   PayoutRequest,
   PayoutResult,
   PreauthRequest,
+  ProviderCapabilities,
   RefundRequest,
   TokenizeRequest,
   TokenizeResult,
@@ -71,6 +72,25 @@ function toMethod(paymentType: string | null | undefined): PaymentMethod | null 
 
 export class FlutterwaveProvider implements PaymentProvider {
   readonly name = 'flutterwave' as const
+
+  /**
+   * §9. Unverified like every other rail claim in this repository — see
+   * `RAILS_VERIFIED`. These describe what Flutterwave's documentation says the
+   * API can do, not what a signed agreement confirms our account may do, and
+   * §16 requires the second before any of it carries live money.
+   */
+  readonly capabilities: ProviderCapabilities = {
+    supportsCapture: true,
+    supportsPartialRefund: true,
+    // Transfers API to tokenized beneficiaries.
+    supportsMarketplacePayout: true,
+    supportsSellerOnboarding: false,
+    supportsDispute: false,
+    supportsLocalCurrency: true,
+    supportsMobileMoney: true,
+    // Transfers and refunds settle out of band; the webhook is what confirms.
+    supportsAsyncRefund: true,
+  }
 
   constructor(
     private readonly creds: FlutterwaveCredentials,
@@ -156,6 +176,8 @@ export class FlutterwaveProvider implements PaymentProvider {
       status: string
       payment_type?: string
       card?: { type?: string }
+      /** What Flutterwave charged us for this collection. */
+      app_fee?: number
     }>(`/transactions/verify_by_reference?tx_ref=${encodeURIComponent(providerRef)}`)
 
     return {
@@ -169,6 +191,11 @@ export class FlutterwaveProvider implements PaymentProvider {
         : 'pending',
       method: toMethod(data.payment_type),
       network: data.card?.type ?? null,
+      // §7's provider fee, in the same currency as the amount. Absent on some
+      // responses; zero is the honest reading, because booking a guess would
+      // put the ledger out by the difference and the reconciliation pass reads
+      // that as drift.
+      fee: data.app_fee ? toMinor(data.app_fee, data.currency) : 0,
     }
   }
 

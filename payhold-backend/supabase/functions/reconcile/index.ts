@@ -29,12 +29,39 @@ interface RailBalance {
   held: number
   pending_clearance: number
   available: number
+  reserved: number
+  fees_retained: number
   paid_out: number
 }
 
-/** What the provider should still be holding for us on this rail. */
+/**
+ * What the provider should still be holding for us on this rail.
+ *
+ * Five buckets, not three, and the two added in V2 §7 are the difference
+ * between this pass being right and it freezing every tenant that ever
+ * released a deal:
+ *
+ * `fees_retained` — our commission and collected tax have stopped being the
+ * seller's, but nothing sweeps them out of the tenant's provider balance. Under
+ * bring-your-own-keys there is no such transfer. Leaving them out made a
+ * released deal expect the amount *minus* the fee while the provider reported
+ * the whole thing, and drift freezes payouts automatically.
+ *
+ * `reserved` — carved out of the clearing pool so it cannot be paid, but it
+ * never left the vault.
+ *
+ * `paid_out` is still excluded, because that money genuinely went. So is the
+ * provider's own fee, which is why it is booked as a debit and given no
+ * retained bucket: the rail took it and it is not coming back.
+ */
 function expected(rail: RailBalance): Money {
-  return rail.held + rail.pending_clearance + rail.available
+  return (
+    rail.held +
+    rail.pending_clearance +
+    rail.available +
+    rail.reserved +
+    rail.fees_retained
+  )
 }
 
 async function reconcileTenant(

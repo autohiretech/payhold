@@ -53,8 +53,25 @@ async function seedDeal(opts: {
     [tenant.id, seller.id, amount, opts.deposit ?? null, opts.status ?? 'funded_held',
      Math.round(amount * 0.1)],
   )
+
   return { tenant: tenant.id, seller: seller.id, deal: deal.id }
 }
+
+/**
+ * Book the hold a funded deal implies.
+ *
+ * `seedDeal` writes a status without the ledger entry that status would have
+ * come with, which most tests want — they build the exact entries they are
+ * asserting on. Refunds are the exception: what is refundable is derived from
+ * the ledger, because you cannot send back money that never arrived, so a
+ * refund test has to say the money arrived.
+ */
+const fund = (s: Seeded, amount = 100_000) =>
+  h.db.query(
+    `insert into ledger (tenant_id, deal_id, entry_type, amount, currency, provider)
+     values ($1, $2, 'hold', $3, 'RWF', 'fake')`,
+    [s.tenant, s.deal, amount],
+  )
 
 const confirm = (deal: string, side: 'buyer' | 'seller') =>
   h.db.query(`insert into confirmations (deal_id, side) values ($1, $2)`, [deal, side])
@@ -230,6 +247,7 @@ describe('release', () => {
 
   test('a refunded deal can never be released', async () => {
     const s = await seedDeal()
+    await fund(s)
     await h.db.query(`select refund_deal($1, 'buyer cancelled')`, [s.deal])
     await confirm(s.deal, 'buyer')
     await confirm(s.deal, 'seller')
@@ -263,7 +281,10 @@ describe('confirm', () => {
     const { rows: after } = await h.db.query<{ status: string }>(
       `select status from deals where id = $1`, [s.deal],
     )
-    expect(after[0].status).toBe('released')
+    // The second confirmation releases the money from the hold and starts the
+    // clearance window — which is what `clearing` names. `released` is the far
+    // side of that window; see `20260807000002_lifecycle.sql`.
+    expect(after[0].status).toBe('clearing')
   })
 
   test('confirming twice from the same side is a no-op, not an error', async () => {
@@ -288,19 +309,33 @@ describe('confirm', () => {
 })
 
 describe('refund', () => {
-  test('is blocked once funds have been released', async () => {
+  test('after release, the seller payable is reversed rather than refused', async () => {
+    // V1 refused this outright. §7.1.3 says reverse the payable and refund the
+    // buyer, and §29.6 adopts it — so the guard moved from the lifecycle to the
+    // cumulative amount.
     const s = await seedDeal()
+    await fund(s)
     await confirm(s.deal, 'buyer')
     await confirm(s.deal, 'seller')
     await release(s.deal)
-    await rejects(
-      () => h.db.query(`select refund_deal($1, 'too late')`, [s.deal]),
-      /already been released/,
+
+    await h.db.query(`select refund_deal($1, 'Damaged on arrival')`, [s.deal])
+
+    const { rows: [d] } = await h.db.query<{ status: string }>(
+      `select status from deals where id = $1`, [s.deal],
     )
+    expect(d.status).toBe('refunded')
+
+    // The un-release keeps `held` at zero rather than driving it negative.
+    const { rows: [b] } = await h.db.query<{ held: string }>(
+      `select held from rail_balances($1)`, [s.tenant],
+    )
+    expect(Number(b.held)).toBe(0)
   })
 
   test('is a no-op the second time', async () => {
     const s = await seedDeal()
+    await fund(s)
     await h.db.query(`select refund_deal($1, 'buyer cancelled')`, [s.deal])
     await h.db.query(`select refund_deal($1, 'buyer cancelled')`, [s.deal])
     const { rows } = await h.db.query<{ n: number }>(
@@ -558,11 +593,12 @@ describe('disputes', () => {
     const { rows: [deal] } = await h.db.query<{ status: string }>(
       `select status from deals where id = $1`, [s.deal],
     )
-    expect(deal.status).toBe('released')
+    expect(deal.status).toBe('clearing')
   })
 
   test('resolving to refund returns the buyer\'s money', async () => {
     const s = await seedDeal()
+    await fund(s)
     const { rows: [d] } = await h.db.query<{ open_dispute: string }>(
       `select (open_dispute($1, 'buyer', 'Never arrived')).id as open_dispute`, [s.deal],
     )
@@ -610,10 +646,25 @@ describe('data integrity', () => {
     )
   })
 
-  test('a released deal must carry its release time', async () => {
+  test('a deal cannot skip the clearance window', async () => {
     const s = await seedDeal()
+    // The transition guard is a BEFORE trigger, so it now answers this before
+    // the constraint gets a chance to. That ordering is the point: the reason
+    // a held deal cannot be `released` is that the window has not run, not
+    // that a timestamp column is empty.
     await rejects(
       () => h.db.query(`update deals set status = 'released' where id = $1`, [s.deal]),
+      /invalid_transition/,
+    )
+  })
+
+  test('a deal past the hold must carry its release time', async () => {
+    const s = await seedDeal()
+    // `funded_held -> clearing` is a legal shape, so the guard passes it
+    // through and the constraint is what refuses a clearing deal with no
+    // `released_at`.
+    await rejects(
+      () => h.db.query(`update deals set status = 'clearing' where id = $1`, [s.deal]),
       /released_at_matches_status/,
     )
   })

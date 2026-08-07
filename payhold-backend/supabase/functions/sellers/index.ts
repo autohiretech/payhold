@@ -24,7 +24,8 @@ import { PayHoldError, type CreateSellerInput, type Seller } from '../_shared/ty
 
 const SELLER_COLUMNS =
   'id, tenant_id, name, country, payout_currency, payout_provider, ' +
-  'beneficiary_token, masked_destination, created_at'
+  'beneficiary_token, masked_destination, kyc_status, external_user_id, ' +
+  'sanctions_checked_at, destination_changed_at, created_at'
 
 async function create(
   req: Request,
@@ -96,9 +97,121 @@ async function create(
   return json(req, { seller, payout_route: route }, 201)
 }
 
+/**
+ * §10.1's `GET /v1/sellers/{id}/capabilities` — can this seller be paid, and if
+ * not, what is missing.
+ *
+ * The same questions `screen_payout` asks, asked ahead of time. A client that
+ * can show a seller "your sanctions screening is out of date" while they are
+ * still onboarding is a client whose sellers do not discover it as a held
+ * payout three weeks later.
+ */
+async function readCapabilities(
+  req: Request,
+  db: SupabaseClient,
+  caller: Caller,
+  id: string,
+): Promise<Response> {
+  // Tenant-scoped first, and a seller belonging to someone else is a 404 — a
+  // capability read must not confirm that another tenant's seller exists.
+  const { data: seller } = await db
+    .from('sellers')
+    .select('id')
+    .eq('id', id)
+    .eq('tenant_id', caller.tenant_id)
+    .maybeSingle()
+
+  if (!seller) throw new PayHoldError('not_found', `Seller ${id} not found`)
+
+  const { data, error } = await db.rpc('seller_capabilities', { p_seller: id })
+  if (error) throw new Error(`seller_capabilities failed: ${error.message}`)
+
+  const row = (data as {
+    can_receive_payouts: boolean
+    kyc_status: string
+    reasons: string[] | null
+    route_reasons: string[] | null
+  }[] | null)?.[0]
+
+  // The two lists are separate because the answers are: `reasons` is what this
+  // seller has to go and do, `route_reasons` is what PayHold cannot yet reach.
+  // §5.2's second case is the second kind — a verified U.S. seller who picked
+  // Venmo needs to be told that, not told to verify something again.
+  return json(req, {
+    can_receive_payouts: row?.can_receive_payouts ?? false,
+    kyc_status: row?.kyc_status ?? 'pending',
+    reasons: row?.reasons ?? [],
+    route_reasons: row?.route_reasons ?? [],
+  })
+}
+
+/**
+ * §12: record that the identity check, the sanctions screen and the ownership
+ * check came back.
+ *
+ * **Refuses an API key.** The same reasoning as `approve_payout_review`: a
+ * client that could verify its own sellers from its own server has turned KYC
+ * into a field it sets, and the attestation is supposed to be somebody's.
+ */
+async function verify(
+  req: Request,
+  db: SupabaseClient,
+  caller: Caller,
+  id: string,
+): Promise<Response> {
+  if (caller.kind === 'api_key') {
+    throw new PayHoldError(
+      'policy_violation',
+      'Verifying a seller is a person\'s decision and cannot be done with an API key',
+    )
+  }
+
+  const body = await readJson<{ verified?: boolean }>(req)
+
+  const { data: seller } = await db
+    .from('sellers')
+    .select('id')
+    .eq('id', id)
+    .eq('tenant_id', caller.tenant_id)
+    .maybeSingle()
+
+  if (!seller) throw new PayHoldError('not_found', `Seller ${id} not found`)
+
+  const { error } = await db.rpc('verify_seller', {
+    p_seller: id,
+    // From the session, never the request body — a caller that can name its own
+    // verifier can forge one.
+    p_actor: caller.actor,
+    p_verified: body.verified ?? true,
+  })
+  if (error) throw new Error(`verify_seller failed: ${error.message}`)
+
+  const { data } = await db
+    .from('sellers')
+    .select(SELLER_COLUMNS)
+    .eq('id', id)
+    .maybeSingle()
+
+  return json(req, data)
+}
+
 Deno.serve(handler(async (req) => {
   const db = serviceClient()
   const caller = await resolveCaller(db, req)
+
+  const url = new URL(req.url)
+  const segments = url.pathname.split('/').filter(Boolean)
+  const base = segments.indexOf('sellers')
+  const id = segments[base + 1]
+  const action = segments[base + 2]
+
+  if (req.method === 'GET' && id && action === 'capabilities') {
+    return await readCapabilities(req, db, caller, id)
+  }
+
+  if (req.method === 'POST' && id && action === 'verify') {
+    return await verify(req, db, caller, id)
+  }
 
   switch (req.method) {
     case 'POST':

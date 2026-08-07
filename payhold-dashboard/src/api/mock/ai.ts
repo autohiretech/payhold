@@ -1175,7 +1175,18 @@ function describeDeal(db: MockDb, deal: Deal): string {
 
   switch (deal.status) {
     case 'created':
+    case 'checkout_started':
       return `${money} for ${who}, waiting on the buyer to pay. Nothing is held yet — the payment link is live and the deal starts when they use it.`
+    case 'payment_pending':
+      return `${money} for ${who}. The buyer has started paying; nothing is held until the provider confirms it.`
+    case 'payment_failed':
+      return `${money} for ${who}. The buyer's payment did not go through. They can try again on the same deal.`
+    case 'expired':
+      return `${money} for ${who}, never paid. The link expired and nobody was charged.`
+    case 'canceled':
+      return `${money} for ${who}, called off before any money moved.`
+    case 'in_progress':
+    case 'revision_requested':
     case 'funded_held':
       return `${money} is held for ${who}. Neither side has confirmed yet. It releases when both do, or on ${new Date(deal.auto_release_at ?? '').toDateString()} if the buyer stays silent.`
     case 'confirmed_buyer':
@@ -1183,11 +1194,17 @@ function describeDeal(db: MockDb, deal: Deal): string {
       return `${money} is held for ${who}. The ${confirmed[0]} has confirmed; it releases the moment the ${confirmed[0] === 'buyer' ? 'seller' : 'buyer'} does.`
     case 'disputed':
       return `${money} is frozen — there is an open dispute on this deal. It can neither release nor refund until someone resolves it.`
-    case 'released':
+    case 'clearing':
       return `${money} was released to ${who} and is in the clearance window. The payout goes out on ${new Date(deal.payout_due_at ?? '').toDateString()}.`
+    case 'released':
+      return `${money} for ${who} has cleared and is ready to pay out. Nothing is holding it except the next dispatch pass — or a risk hold, if the Payouts screen shows one.`
+    case 'payout_pending':
+      return `${money} for ${who} is with the provider and has not settled yet. It books as paid when they confirm it.`
     case 'paid_out':
       return `Done — ${money} was released to ${who} and paid out. Nothing further happens on this deal.`
     case 'refunded':
       return `${money} went back to the buyer. This deal is closed.`
+    case 'partially_refunded':
+      return `Part of ${money} went back to the buyer; the rest follows the deal to ${who}.`
   }
 }

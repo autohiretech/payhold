@@ -21,7 +21,13 @@
 
 // Imported from the types module directly, not the `@/api` barrel: the mock
 // engine imports this file, and the barrel imports the mock.
-import type { Country, Currency, PaymentMethod, Provider } from '@/api/types'
+import type {
+  Country,
+  Currency,
+  PaymentMethod,
+  PayoutProvider,
+  Provider,
+} from '@/api/types'
 import { COUNTRIES, countryInfo } from './countries'
 
 export { COUNTRIES, countryInfo, countryName, countriesByRegion } from './countries'
@@ -197,6 +203,25 @@ export const PROVIDER_LABEL: Record<Provider, string> = {
   flutterwave: 'Flutterwave',
   stripe: 'Stripe',
   fake: 'Demo mode',
+}
+
+/**
+ * A payout rail in words. `PayoutProvider` is provider and method together,
+ * because a destination is tokenized against one specific pair.
+ *
+ * Three copies of this map used to live in screens, which is exactly what the
+ * "never inline a provider name" convention exists to prevent: adding a rail
+ * meant finding all three, and §5.1 added five at once.
+ */
+export const PAYOUT_PROVIDER_LABEL: Record<PayoutProvider, string> = {
+  flutterwave_momo: 'Mobile money',
+  flutterwave_bank: 'Bank transfer',
+  stripe_connect: 'Stripe Connect',
+  paypal: 'PayPal',
+  venmo: 'Venmo',
+  cash_app_pay: 'Cash App Pay',
+  alipay: 'Alipay',
+  wechat_pay: 'WeChat Pay',
 }
 
 export const PROVIDER_BLURB: Record<Provider, string> = {

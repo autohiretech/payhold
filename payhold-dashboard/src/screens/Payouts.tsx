@@ -320,7 +320,17 @@ export function PayoutsPage() {
  * `paid` is gone — recalling either is a conversation with Flutterwave rather
  * than a button, so there is no button.
  */
-const HOLDABLE: PayoutStatus[] = ['scheduled', 'failed', 'frozen']
+const HOLDABLE: PayoutStatus[] = [
+  'scheduled',
+  'failed',
+  'frozen',
+  // Already stopped, but by arithmetic. A person holding one of these converts
+  // a machine's stop into one with a name on it, which is the only kind that
+  // then needs a named approval to clear — and the gate still re-applies on the
+  // next pass, so a hold cannot be used to smuggle a payout past it.
+  'blocked',
+  'needs_verification',
+]
 
 /**
  * Stopping a payout, with the reason attached.

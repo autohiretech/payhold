@@ -31,7 +31,11 @@ import type {
   DealStatus,
   Dispute,
   LedgerEntry,
+  Money,
   Payout,
+  PayoutDecision,
+  PayoutDisplayStatus,
+  PayoutRoute,
   PaymentMethod,
   Provider,
   ProviderAccount,
@@ -48,6 +52,13 @@ import type {
   WebhookDeliveryStatus,
   WebhookEndpoint,
 } from './types'
+
+/** §5.1's status visibility, in one object: the state, and why it is that. */
+export interface PayoutRouting {
+  display_status: PayoutDisplayStatus
+  /** Null before the routing engine has looked at this payout. */
+  decision: PayoutDecision | null
+}
 
 export interface DealListFilter {
   status?: DealStatus[]
@@ -71,7 +82,17 @@ export interface PayHoldClient {
   listDeals(filter?: DealListFilter): Promise<Deal[]>
   /** Both sides present → atomic release. */
   confirmDeal(id: string, side: ConfirmSide): Promise<Deal>
-  refundDeal(id: string, reason: string): Promise<Deal>
+  /**
+   * §7.1. `amount` omitted means everything still refundable, which is what
+   * every V1 caller meant. `line_items` is the client's own breakdown, carried
+   * for the audit record rather than interpreted.
+   */
+  refundDeal(
+    id: string,
+    reason: string,
+    amount?: Money,
+    lineItems?: unknown,
+  ): Promise<Deal>
 
   // -- Deposits (card pre-auth) --------------------------------------------
   captureDeposit(dealId: string, amount: number): Promise<Deal>
@@ -102,6 +123,21 @@ export interface PayHoldClient {
    * people release, and the approval is recorded against the one who gave it.
    */
   approvePayoutReview(id: string, approvedBy: string): Promise<Payout>
+  /**
+   * §5.1's routing table — which rails exist, where they reach, and whether
+   * they are on. Read-only here: enablement is data an operator changes, and a
+   * client that could switch its own corridors on has turned §5's country
+   * launch checklist into a field it sets.
+   */
+  listPayoutRoutes(): Promise<PayoutRoute[]>
+  /**
+   * Where a payout was routed and why — §5.1's "deterministic and auditable".
+   *
+   * `display_status` is the seven-state seller-facing vocabulary, derived:
+   * `Payout.status` keeps every distinction an operator needs, and this is the
+   * one a seller is shown.
+   */
+  getPayoutRouting(id: string): Promise<PayoutRouting>
   /** What the deterministic rules noticed, whether or not they held anything. */
   listRiskSignals(dealId?: string): Promise<RiskSignal[]>
   /**

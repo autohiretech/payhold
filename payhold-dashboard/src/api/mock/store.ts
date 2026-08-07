@@ -16,13 +16,17 @@ import type {
   Deal,
   DealOutcome,
   Dispute,
+  Refund,
   LedgerEntry,
   Payout,
+  PayoutDecision,
+  PayoutRoute,
   ProviderAccount,
   ReconciliationAlert,
   RequestContext,
   RiskSignal,
   Seller,
+  SellerDestination,
   Tenant,
   TenantSettings,
   WebhookDelivery,
@@ -54,7 +58,12 @@ import type {
 // 12: payouts gained `review_held_by` and `review_hold_reason` — a person can
 //    now stop one payout, and who did it is what separates their hold from a
 //    rule's when somebody reads it back.
-export const SCHEMA_VERSION = 12
+// 13: §5.1's Routing Center. Destinations moved to their own table (a seller
+//     has a preferred one and may have a backup, which one pair of columns
+//     could not express), the rails became `payout_routes` rows so a corridor
+//     can be switched off without a deploy, and every choice now writes a
+//     `payout_decisions` row. Payouts gained `blocked` and `needs_verification`.
+export const SCHEMA_VERSION = 13
 const STORAGE_KEY = 'payhold.mock.v1'
 
 /**
@@ -96,10 +105,24 @@ export interface MockDb {
   accounts: MockAccount[]
   settings: TenantSettings[]
   sellers: Seller[]
+  /**
+   * §5.1. `Seller.beneficiary_token` and `masked_destination` are the primary's
+   * copy — the backend keeps them in step with a trigger and this is the
+   * record. A seller has one primary and may have one verified backup.
+   */
+  seller_destinations: SellerDestination[]
   deals: Deal[]
   ledger: LedgerEntry[]
   payouts: Payout[]
+  /**
+   * §5.1's routing table — data, not code. `tenant_id: null` rows are the
+   * platform defaults; a tenant row for the same rail replaces one.
+   */
+  payout_routes: PayoutRoute[]
+  /** Every routing choice and the checks behind it. §5.1 wants it auditable. */
+  payout_decisions: PayoutDecision[]
   disputes: Dispute[]
+  refunds: Refund[]
   api_keys: ApiKey[]
   /**
    * Connected payment rails, per tenant. Credentials are deliberately absent —
@@ -173,10 +196,14 @@ const REQUIRED_KEYS: Record<keyof MockDb, true> = {
   accounts: true,
   settings: true,
   sellers: true,
+  seller_destinations: true,
   deals: true,
   ledger: true,
   payouts: true,
+  payout_routes: true,
+  payout_decisions: true,
   disputes: true,
+  refunds: true,
   api_keys: true,
   provider_accounts: true,
   webhook_endpoints: true,

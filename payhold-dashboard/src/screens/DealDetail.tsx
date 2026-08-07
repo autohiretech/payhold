@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
-import { api, type ConfirmSide, type Deal } from '@/api'
+import { api, HOLDING_STATUSES, type ConfirmSide, type Deal } from '@/api'
 import {
   Badge,
   Button,
@@ -406,11 +406,12 @@ function Actions({ deal }: { deal: Deal }) {
   )
   const releaseDeposit = useMoneyAction(() => api.releaseDeposit(deal.id))
 
-  const canConfirm = ['funded_held', 'confirmed_buyer', 'confirmed_seller'].includes(
-    deal.status,
-  )
+  const canConfirm = HOLDING_STATUSES.includes(deal.status) && deal.status !== 'disputed'
   const canRefund = canConfirm || deal.status === 'disputed'
-  const canDispute = canConfirm
+  // §6 adds `clearing -> disputed`: a chargeback arrives when it arrives, and
+  // the safety window is most of what it is for. Refund stays closed there
+  // until Phase 3 — `refund_deal` still refuses anything past the hold.
+  const canDispute = canConfirm || deal.status === 'clearing'
   const hasDeposit = deal.deposit_amount !== null && deal.deposit_amount > 0
 
   const error =

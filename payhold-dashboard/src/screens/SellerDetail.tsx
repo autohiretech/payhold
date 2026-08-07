@@ -23,7 +23,13 @@ import {
   formatRelative,
   type StatusMeta,
 } from '@/lib/format'
-import { COUNTRY_LABEL, countryFlag, countryName, payoutRoute } from '@/lib/rails'
+import {
+  COUNTRY_LABEL,
+  countryFlag,
+  countryName,
+  PAYOUT_PROVIDER_LABEL,
+  payoutRoute,
+} from '@/lib/rails'
 import {
   simNow,
   useDeals,
@@ -33,13 +39,7 @@ import {
   useRiskSignals,
   useSellers,
 } from '@/lib/queries'
-import type { Currency, Money, RiskSeverity, Seller } from '@/api'
-
-const PAYOUT_LABEL: Record<Seller['payout_provider'], string> = {
-  flutterwave_momo: 'Mobile money',
-  flutterwave_bank: 'Bank transfer',
-  stripe_connect: 'Stripe Connect',
-}
+import type { Currency, Money, RiskSeverity } from '@/api'
 
 /**
  * One counterparty, everything this account knows about them.
@@ -176,7 +176,7 @@ export function SellerDetailPage() {
         />
         <dl className="grid gap-x-8 gap-y-5 px-6 pb-6 sm:grid-cols-2 lg:grid-cols-3">
           <Detail label="Seller id" value={<Mono>{seller.id}</Mono>} />
-          <Detail label="Method" value={PAYOUT_LABEL[seller.payout_provider]} />
+          <Detail label="Method" value={PAYOUT_PROVIDER_LABEL[seller.payout_provider]} />
           <Detail label="Destination" value={<Mono>{seller.masked_destination}</Mono>} />
           <Detail label="Paid in" value={seller.payout_currency} />
           <Detail

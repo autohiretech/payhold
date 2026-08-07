@@ -32,6 +32,7 @@ import type {
   ReconciliationAlert,
   RequestContext,
   Seller,
+  SellerDestination,
   Tenant,
   TenantSettings,
   WebhookEndpoint,
@@ -50,6 +51,7 @@ import {
 import { collectionRails, defaultProviderFor, providerFor } from '@/lib/rails'
 import { makeAccount } from './accounts'
 import { payoutFindings, recordFindings } from './risk'
+import { platformPayoutRoutes } from './routing'
 import { SCHEMA_VERSION, addDays, mintId, type MockDb } from './store'
 
 const AUTOHIRE = 'ten_0001'
@@ -117,6 +119,9 @@ export function seedDb(): MockDb {
       tenant_id: AUTOHIRE,
       service_fee_rate: 0.1,
       buyer_fee: 0,
+      // Below the §6.1 default of 14 on purpose: a tenant that has chosen its
+      // own window is the normal case, and a fixture where every number equals
+      // the default teaches nothing about which ones are configurable.
       clearance_days: 7,
       auto_release_days: 3,
       // Rwanda is home; KES covers the Kenya expansion, USD the tourist trade.
@@ -156,6 +161,13 @@ export function seedDb(): MockDb {
       payout_provider: 'flutterwave_momo',
       beneficiary_token: 'ben_fw_8sk21',
       masked_destination: 'MTN •••• 4821',
+      // Verified, like every seller that predates V2's KYC gate — the
+      // migration grandfathers them for the same reason. A demo where every
+      // payout is held teaches the wrong lesson about the gate.
+      kyc_status: 'verified' as const,
+      external_user_id: null,
+      sanctions_checked_at: ago(30),
+      destination_changed_at: null,
       created_at: ago(198),
     },
     {
@@ -167,6 +179,13 @@ export function seedDb(): MockDb {
       payout_provider: 'flutterwave_bank',
       beneficiary_token: 'ben_fw_2ma94',
       masked_destination: 'BK •••• 0073',
+      // Verified, like every seller that predates V2's KYC gate — the
+      // migration grandfathers them for the same reason. A demo where every
+      // payout is held teaches the wrong lesson about the gate.
+      kyc_status: 'verified' as const,
+      external_user_id: null,
+      sanctions_checked_at: ago(30),
+      destination_changed_at: null,
       created_at: ago(176),
     },
     {
@@ -178,6 +197,13 @@ export function seedDb(): MockDb {
       payout_provider: 'flutterwave_momo',
       beneficiary_token: 'ben_fw_5df10',
       masked_destination: 'Airtel •••• 9302',
+      // Verified, like every seller that predates V2's KYC gate — the
+      // migration grandfathers them for the same reason. A demo where every
+      // payout is held teaches the wrong lesson about the gate.
+      kyc_status: 'verified' as const,
+      external_user_id: null,
+      sanctions_checked_at: ago(30),
+      destination_changed_at: null,
       created_at: ago(120),
     },
     {
@@ -189,6 +215,13 @@ export function seedDb(): MockDb {
       payout_provider: 'flutterwave_bank',
       beneficiary_token: 'ben_fw_7qz45',
       masked_destination: 'Equity •••• 6611',
+      // Verified, like every seller that predates V2's KYC gate — the
+      // migration grandfathers them for the same reason. A demo where every
+      // payout is held teaches the wrong lesson about the gate.
+      kyc_status: 'verified' as const,
+      external_user_id: null,
+      sanctions_checked_at: ago(30),
+      destination_changed_at: null,
       created_at: ago(88),
     },
     {
@@ -200,6 +233,13 @@ export function seedDb(): MockDb {
       payout_provider: 'flutterwave_momo',
       beneficiary_token: 'ben_fw_4ke82',
       masked_destination: 'M-Pesa •••• 5540',
+      // Verified, like every seller that predates V2's KYC gate — the
+      // migration grandfathers them for the same reason. A demo where every
+      // payout is held teaches the wrong lesson about the gate.
+      kyc_status: 'verified' as const,
+      external_user_id: null,
+      sanctions_checked_at: ago(30),
+      destination_changed_at: null,
       created_at: ago(52),
     },
     /**
@@ -219,6 +259,13 @@ export function seedDb(): MockDb {
       payout_provider: 'flutterwave_momo',
       beneficiary_token: 'ben_fw_9tn07',
       masked_destination: 'MTN •••• 3157',
+      // Verified, like every seller that predates V2's KYC gate — the
+      // migration grandfathers them for the same reason. A demo where every
+      // payout is held teaches the wrong lesson about the gate.
+      kyc_status: 'verified' as const,
+      external_user_id: null,
+      sanctions_checked_at: ago(30),
+      destination_changed_at: null,
       created_at: ago(14),
     },
     {
@@ -230,6 +277,13 @@ export function seedDb(): MockDb {
       payout_provider: 'flutterwave_momo',
       beneficiary_token: 'ben_fw_1cc38',
       masked_destination: 'MTN •••• 7714',
+      // Verified, like every seller that predates V2's KYC gate — the
+      // migration grandfathers them for the same reason. A demo where every
+      // payout is held teaches the wrong lesson about the gate.
+      kyc_status: 'verified' as const,
+      external_user_id: null,
+      sanctions_checked_at: ago(30),
+      destination_changed_at: null,
       created_at: ago(40),
     },
   ]
@@ -724,6 +778,21 @@ export function seedDb(): MockDb {
       released_at: spec.status === 'refunded' ? null : releasedAt,
       payout_due_at: spec.status === 'refunded' ? null : payoutDue,
       fee_amount: fee,
+      // Fixtures carry no tax, discount or reserve: they should demonstrate the
+      // ordinary shape, and a breakdown with a figure in every line teaches
+      // less about which ones are optional.
+      tax_amount: 0,
+      discount_amount: 0,
+      provider_fee_amount: 0,
+      reserve_amount: 0,
+      reserve_until: null,
+      // Fixtures carry no per-deal policy: they should demonstrate the tenant's
+      // settings, which is what a new account actually sees.
+      completion_policy: {
+        completion_event: null,
+        auto_complete_after_hours: null,
+        clearing_days: null,
+      },
       confirmations: confirmed.map((side, i) => ({
         side,
         confirmed_at: addDays(createdAt, 3.5 + i * 0.2),
@@ -1186,6 +1255,47 @@ export function seedDb(): MockDb {
     })
   }
 
+  /**
+   * §5.1: every seller's registered destination becomes their primary, verified
+   * for the same reason their KYC is — nothing here has ever taken live money,
+   * so there is no unverified seller to catch, and leaving them pending would
+   * hold every payout in the demo for a fact untrue of them.
+   *
+   * `sel_0001` also gets a verified backup, so the fallback path §5.1 gates
+   * behind a failed primary is something the demo can actually reach.
+   */
+  const seller_destinations: SellerDestination[] = sellers.flatMap((seller) => {
+    const primary: SellerDestination = {
+      id: `dest_${seller.id.slice(-4)}_p`,
+      tenant_id: seller.tenant_id,
+      seller_id: seller.id,
+      label: 'Primary',
+      country: seller.country,
+      payout_currency: seller.payout_currency,
+      payout_provider: seller.payout_provider,
+      beneficiary_token: seller.beneficiary_token,
+      masked_destination: seller.masked_destination,
+      is_primary: true,
+      is_backup: false,
+      verified_at: seller.created_at,
+      security_hold_until: null,
+      created_at: seller.created_at,
+    }
+
+    if (seller.id !== 'sel_0001') return [primary]
+
+    return [primary, {
+      ...primary,
+      id: `dest_${seller.id.slice(-4)}_b`,
+      label: 'Backup',
+      payout_provider: 'flutterwave_bank' as const,
+      beneficiary_token: 'ben_fw_bk_3312',
+      masked_destination: 'BK of Kigali •••• 9910',
+      is_primary: false,
+      is_backup: true,
+    }]
+  })
+
   const db: MockDb = {
     version: SCHEMA_VERSION,
     clock_offset_ms: 0,
@@ -1194,10 +1304,18 @@ export function seedDb(): MockDb {
     accounts,
     settings,
     sellers,
+    seller_destinations,
     deals,
     ledger,
     payouts,
+    // §5's launch matrix as rows. Which corridor is open is data, so a demo can
+    // switch one off and watch a payout block — §5.2's eighth case.
+    payout_routes: platformPayoutRoutes(ago(365)),
+    payout_decisions: [],
     disputes,
+    // No fixture refunds: the seeded deals all ran cleanly or are still
+    // running, and a refund is a thing that happened rather than a state.
+    refunds: [],
     api_keys,
     provider_accounts,
     webhook_endpoints,

@@ -9,11 +9,12 @@
  * customer's team reads it and either approves it — which is what executes, via
  * `ai-decisions` — or does not.
  *
- * There are only three recommendations, and the missing fourth is the point:
- * v1 has no partial-refund primitive, so a case the evidence genuinely divides
- * comes back `escalate` rather than as a split the engine could not carry out.
- * Promising a resolution the money functions cannot perform would be worse than
- * admitting the case needs a person.
+ * There are four recommendations. `partial_refund` used to be the missing one:
+ * v1 had no partial-refund primitive, so a case the evidence genuinely divided
+ * came back `escalate` rather than as a split the engine could not carry out.
+ * §7.1 built the primitive, so the split is now a resolution somebody can
+ * actually approve — and `escalate` goes back to meaning what it says, which is
+ * that no split resolves this either.
  *
  * This function runs as `payhold_ai`, not the service role. Postgres, not this
  * file, is what stops it releasing anything.
@@ -45,13 +46,17 @@ Recommend exactly one of:
 
 - "release" — the seller should be paid.
 - "refund"  — the buyer should get their money back.
+- "partial_refund" — some of it goes back to the buyer and the rest to the
+  seller. Give "refund_amount" in minor units, in the currency the buyer paid.
 - "escalate" — a person needs to look at this properly.
 
-Choose "escalate" whenever the case file does not clearly favour one side.
-There is no partial refund in this system: you cannot recommend splitting the
-amount, and recommending release or refund when the evidence is genuinely
-balanced would push someone into an all-or-nothing decision the file does not
-support. An honest "escalate" is a good answer, not a failure.
+Choose "partial_refund" when the file supports a split you can name a figure
+for and say why — a rental returned two days early, damage covering part of the
+deposit. Do not use it to average two positions you cannot choose between.
+
+Choose "escalate" when the file does not settle the question at all, including
+when it is clear something is wrong but not what. An honest "escalate" is a
+good answer, not a failure.
 
 Weigh, at minimum: who raised the dispute and when, relative to the
 confirmations and the expected completion date; what the deal was for; and the
@@ -73,7 +78,16 @@ called "escalate" should not be at 0.9.
 const SCHEMA = {
   type: 'object',
   properties: {
-    recommendation: { type: 'string', enum: ['release', 'refund', 'escalate'] },
+    recommendation: {
+      type: 'string',
+      enum: ['release', 'refund', 'partial_refund', 'escalate'],
+    },
+    refund_amount: {
+      type: 'integer',
+      description:
+        'Required for partial_refund and ignored otherwise. Minor units, in ' +
+        'the currency the buyer was charged. Must be less than what they paid.',
+    },
     headline: {
       type: 'string',
       description:
@@ -165,7 +179,7 @@ Deno.serve(handler(async (req) => {
         trusted('Draft a suggested resolution.'),
       ],
     },
-    (raw) => validateDisputeDraft(raw, validRefs),
+    (raw) => validateDisputeDraft(raw, validRefs, file.deal.presentment_amount),
   )
 
   const suggestion = await recordSuggestion(db, {

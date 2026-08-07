@@ -64,7 +64,11 @@ function defaultSettings(tenantId: string): TenantSettings {
     tenant_id: tenantId,
     service_fee_rate: 0.1,
     buyer_fee: 0,
-    clearance_days: 7,
+    // §6.1 / §29.7 — 14 calendar days, matching the published marketplace
+    // standard. V1 defaulted to 7. The backend's `setting_num` default moved
+    // with it; a tenant that has chosen its own value is unaffected, and so is
+    // every in-flight deal (§27).
+    clearance_days: 14,
     auto_release_days: 3,
     currencies: ['RWF', 'USD', 'KES'],
     ai_enabled: true,

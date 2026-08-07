@@ -25,6 +25,7 @@ import {
   settingsFor,
 } from './engine'
 import { payoutFindings } from './risk'
+import { seedPrimaryDestination } from './routing'
 import { seedDb } from './seed'
 import { advanceClock, loadDb, nowIso, resetDb, type MockDb } from './store'
 
@@ -77,6 +78,11 @@ function useBrandNewSeller(dealId: string): string {
     ).toISOString(),
   }
   db.sellers.push(seller)
+  // A seller arrives with their destination or not at all — the mirror of
+  // `sellers_seed_primary_destination`. Verified, because these tests are about
+  // the discretionary rules; §12's gate has its own suite below and would
+  // otherwise stop every payout here before a rule got to look at it.
+  seedPrimaryDestination(db, seller).verified_at = seller.created_at
   deal.seller_id = seller.id
   return seller.id
 }
@@ -374,5 +380,108 @@ describe('a person can hold one payout', () => {
         (d) => d.deal_id === payout.deal_id && d.event === 'payout.held_for_review',
       ),
     ).toBe(true)
+  })
+})
+
+describe('the eligibility gate — §12', () => {
+  it('an unverified seller cannot be paid, whatever the rules setting says', () => {
+    const deal = db.deals.find(
+      (d) => d.status === 'created' && d.tenant_id === AUTOHIRE && !d.deposit_amount,
+    )!
+    const id = deal.id
+
+    // This deal's own seller — the fixtures have several, and mutating the
+    // wrong one tests nothing.
+    db.sellers.find((s) => s.id === deal.seller_id)!.kyc_status = 'pending'
+
+    // The distinction this phase turns on: the discretionary rules are
+    // arithmetic a tenant may decline to act on; eligibility is not.
+    settingsFor(db, AUTOHIRE).risk_rules_enabled = false
+
+    fundDeal(db, id)
+    confirmDeal(db, id, 'buyer')
+    confirmDeal(db, id, 'seller')
+    advanceClock(24 * 30)
+    runCron(db)
+
+    const payout = db.payouts.find((p) => p.deal_id === id)!
+    // §5.1 gave the gate its own status. `held_for_review` is a queue an
+    // operator can clear; this is not one, deliberately — see below.
+    expect(payout.status).toBe('needs_verification')
+    // Null means arithmetic did it, not a person — invariant 11's distinction.
+    expect(payout.review_held_by).toBeNull()
+  })
+
+  it('an operator cannot approve past the gate, and a retry cannot skip it', () => {
+    // §12's sentence, made structural. While eligibility produced
+    // `held_for_review`, "we have never verified this seller" sat in the same
+    // queue as "this payout is unusually large", and the approve button cleared
+    // both. The way out is a verification with somebody's name on it.
+    const deal = db.deals.find(
+      (d) => d.status === 'created' && d.tenant_id === AUTOHIRE && !d.deposit_amount,
+    )!
+    db.sellers.find((s) => s.id === deal.seller_id)!.kyc_status = 'pending'
+
+    fundDeal(db, deal.id)
+    confirmDeal(db, deal.id, 'buyer')
+    confirmDeal(db, deal.id, 'seller')
+    advanceClock(24 * 30)
+    runCron(db)
+
+    const payout = db.payouts.find((p) => p.deal_id === deal.id)!
+    expect(() => approvePayoutReview(db, payout.id, 'admin')).toThrow(PayHoldError)
+    expect(() => retryPayout(db, payout.id)).toThrow(/outstanding/i)
+    expect(payout.status).toBe('needs_verification')
+  })
+
+  it('verifying the seller puts the payout back in the queue by itself', () => {
+    // The other half of the same decision. `needs_verification` is
+    // machine-recoverable — a rule that re-screens and finds the reason gone is
+    // not *sending* anything, so invariant 11 is untouched — and it has to be,
+    // or a verified seller would sit in a state no pass would ever move.
+    const deal = db.deals.find(
+      (d) => d.status === 'created' && d.tenant_id === AUTOHIRE && !d.deposit_amount,
+    )!
+    const seller = db.sellers.find((s) => s.id === deal.seller_id)!
+    seller.kyc_status = 'pending'
+
+    fundDeal(db, deal.id)
+    confirmDeal(db, deal.id, 'buyer')
+    confirmDeal(db, deal.id, 'seller')
+    advanceClock(24 * 30)
+    runCron(db)
+
+    const payout = db.payouts.find((p) => p.deal_id === deal.id)!
+    expect(payout.status).toBe('needs_verification')
+
+    seller.kyc_status = 'verified'
+    runCron(db)
+
+    expect(payout.status).toBe('paid')
+  })
+
+  it('an earlier approval does not skip the eligibility gate', () => {
+    // The hole the gate inherited when it landed above `screenPayout`'s
+    // approval short-circuit. That early return was right while everything
+    // below it was a discretionary rule; a seller whose verification was
+    // revoked after an approval would otherwise have been paid.
+    const id = newDeal()
+    const sellerId = useBrandNewSeller(id)
+    const payout = releaseToPayout(id)
+    expect(payout.status).toBe('held_for_review')
+
+    // Approving normally dispatches, so the tenant is frozen first: the
+    // approval is recorded and the money stays put, which is the only state in
+    // which "approved but not yet sent" is observable.
+    db.tenants.find((t) => t.id === AUTOHIRE)!.status = 'payouts_frozen'
+    approvePayoutReview(db, payout.id, 'admin@autohiretech.com')
+    expect(payout.review_approved_by).toBe('admin@autohiretech.com')
+    expect(payout.status).toBe('frozen')
+
+    db.sellers.find((s) => s.id === sellerId)!.kyc_status = 'restricted'
+    db.tenants.find((t) => t.id === AUTOHIRE)!.status = 'active'
+    runCron(db)
+
+    expect(payout.status).toBe('needs_verification')
   })
 })

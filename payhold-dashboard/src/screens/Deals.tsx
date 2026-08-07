@@ -34,14 +34,26 @@ import { api } from '@/api'
 /** Coarse groupings, because "show me what's live" beats picking eight statuses. */
 const FILTERS: { label: string; statuses: DealStatus[] }[] = [
   { label: 'All', statuses: [] },
-  { label: 'Awaiting payment', statuses: ['created'] },
+  {
+    label: 'Awaiting payment',
+    statuses: ['created', 'checkout_started', 'payment_pending'],
+  },
   {
     label: 'Holding',
-    statuses: ['funded_held', 'confirmed_buyer', 'confirmed_seller'],
+    statuses: [
+      'funded_held',
+      'in_progress',
+      'revision_requested',
+      'confirmed_buyer',
+      'confirmed_seller',
+    ],
   },
-  { label: 'Released', statuses: ['released', 'paid_out'] },
-  { label: 'Needs attention', statuses: ['disputed'] },
-  { label: 'Refunded', statuses: ['refunded'] },
+  // One tab rather than three: an operator scanning this list wants "the money
+  // is out of the hold and on its way", and the difference between clearing,
+  // ready and sending is what the badge says.
+  { label: 'Released', statuses: ['clearing', 'released', 'payout_pending', 'paid_out'] },
+  { label: 'Needs attention', statuses: ['disputed', 'payment_failed'] },
+  { label: 'Refunded', statuses: ['refunded', 'partially_refunded'] },
 ]
 
 export function DealsPage() {

@@ -179,7 +179,7 @@ describe('approving a dispute draft', () => {
       `select status from deals where id = $1`,
       [s.deal],
     )
-    expect(deal.status).toBe('released')
+    expect(deal.status).toBe('clearing')
 
     const { rows: [dsp] } = await h.db.query<{ status: string; note: string }>(
       `select status, resolution_note as note from disputes where deal_id = $1`,
@@ -442,6 +442,10 @@ describe('outcome labels are written from the money path', () => {
       `select confirm_deal($1, 'seller', 'user', 90000, 'RWF', 10000)`,
       [s.deal],
     )
+    // Through the legal path rather than a jump: the transition guard added in
+    // `20260807000002_lifecycle.sql` refuses `clearing -> paid_out`, and the
+    // point of this test is what happens to the label on the *later* change.
+    await h.db.query(`update deals set status = 'released' where id = $1`, [s.deal])
     await h.db.query(`update deals set status = 'paid_out' where id = $1`, [s.deal])
 
     const { rows } = await h.db.query<{ n: number; outcome: string }>(

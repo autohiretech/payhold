@@ -239,6 +239,10 @@ Deno.serve(handler(async (req) => {
     p_verified_currency: verified.currency,
     p_fx_rate: lockedRate,
     p_auto_release_days: settings.auto_release_days,
+    // §7. Taken from the re-fetched transaction rather than the webhook body,
+    // like every other figure here: this is the number that reconciles our
+    // ledger against what the provider is actually holding.
+    p_provider_fee: verified.fee,
   })
 
   // Where the buyer paid from, as Flutterwave saw it — the strongest of the

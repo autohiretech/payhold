@@ -192,7 +192,7 @@ describe('a payment that matches', () => {
     const { rows } = await h.db.query<{ event: string }>(
       `select event from webhook_deliveries where deal_id = $1`, [s.deal],
     )
-    expect(rows.map((r) => r.event)).toEqual(['deal.funded_held'])
+    expect(rows.map((r) => r.event)).toEqual(['order.funded_held'])
   })
 })
 

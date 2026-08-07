@@ -140,7 +140,8 @@ describe('creating an account', () => {
     const settings = await new MockClient().getSettings()
 
     expect(settings.service_fee_rate).toBe(0.1)
-    expect(settings.clearance_days).toBe(7)
+    // §6.1 / §29.7 — 14 calendar days for a new company. V1 defaulted to 7.
+    expect(settings.clearance_days).toBe(14)
     expect(settings.auto_release_days).toBe(3)
     expect(settings.currencies.length).toBeGreaterThan(0)
   })

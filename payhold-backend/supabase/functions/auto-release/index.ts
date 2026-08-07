@@ -29,7 +29,12 @@ import { serviceClient } from '../_shared/auth.ts'
 import { requireCronCaller } from '../_shared/cron-auth.ts'
 import { releaseFigures } from '../_shared/figures.ts'
 import { handler, json } from '../_shared/http.ts'
-import type { ConfirmSide, Deal } from '../_shared/types.ts'
+import {
+  PAST_HOLD_STATUSES,
+  type ConfirmSide,
+  type Deal,
+  type DealStatus,
+} from '../_shared/types.ts'
 
 /** Deals per pass. Each is a handful of round trips; the next pass takes more. */
 const BATCH = 50
@@ -84,7 +89,7 @@ async function autoRelease(db: SupabaseClient, deal: Deal): Promise<boolean> {
     // The buyer call releases whenever the seller had already confirmed. Asking
     // for the second side afterwards would hit the refusal above.
     const status = (data as { status?: string } | null)?.status
-    if (status === 'released' || status === 'paid_out') break
+    if (status && PAST_HOLD_STATUSES.includes(status as DealStatus)) break
   }
 
   return true

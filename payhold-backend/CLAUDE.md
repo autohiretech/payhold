@@ -55,14 +55,14 @@ environment or a build log.
 | Function | Serves |
 |---|---|
 | `account` | `/signup` creates a company and its first owner; `/me` turns a session into a tenant and a role |
-| `deals` | create, list, get, `/pay`, `/confirm`, `/refund`, `/deposit`, `/capture`, `/release-deposit` |
+| `deals` | create (with §14's `completion_policy`), list, get, `/pay`, `/confirm`, `/refund`, `/deposit`, `/capture`, `/release-deposit` |
 | `payment-options` | what a buyer in a market can pay with; the catalogue a client renders its checkout from |
-| `sellers` | register a tokenized payout destination, list |
+| `sellers` | register a tokenized payout destination, list, `/:id/capabilities`, `/:id/verify` (person-only) |
 | `balance` | four buckets per currency, or `?by=rail` |
 | `webhook-endpoints` | register (secret shown once), list, `?deliveries=1`, disable |
 | `flutterwave-webhook` | inbound, at `/flutterwave-webhook/:tenant` |
 | `provider-accounts` | bring-your-own-keys |
-| `payouts` | list, get with signals, `/hold`, `/approve-review`, `/retry` |
+| `payouts` | list, get with signals **and the routing decision and display status**, `/hold`, `/approve-review`, `/retry` |
 | `risk-signals` | what the deterministic rules noticed, filterable; `?context=1` for where payments came from |
 | `webhook-dispatch`, `reconcile`, `auto-release`, `payout-dispatch` | cron only, `CRON_SECRET` |
 | `ai-dispute`, `ai-risk-narrator`, `ai-support` | draft a resolution, brief a payout, answer a question. These run as `payhold_ai` and never hold the service role |
@@ -115,7 +115,14 @@ method implies (this is where a provisional Flutterwave deal becomes a Stripe
 deal), the provider redirects the buyer, and their webhook is what moves the
 deal to `funded_held` — after `flutterwave-webhook` checks the `verif-hash`
 *and* re-fetches the transaction. Starting a charge is not evidence one
-succeeded, so nothing about the deal's state changes at step two.
+succeeded, so step two moves the deal to `payment_pending` and no further —
+§6 gives the attempt a state of its own precisely so it cannot look like money.
+
+The status write happens *after* the provider call returns, not before: a charge
+that threw never started, and `/pay` refuses `payment_pending`, so a deal left
+in that state by a rail that rejected it would be unretryable. `payment_failed`
+is accepted back, which is how a declined card is retried without the client
+creating a second deal for the same booking.
 
 The amount comparison lives in `fund_deal`, not in TypeScript, because
 "mismatch → disputed, never funded_held" is only a guarantee when the
@@ -206,8 +213,16 @@ an API key hash or a provider credential.
 
 `decide_ai_suggestion` is the single bridge across. It locks the suggestion
 `for update`, requires a `decided_by`, and only reaches `resolve_dispute` for an
-approved `dispute_resolution` of `release` or `refund`. A rejection, an approved
-`escalate`, and every risk summary write their row and stop. The endpoint in
+approved `dispute_resolution` of `release`, `refund` or — as of Phase 3 —
+`partial_refund`, whose amount it reads off the suggestion the approver was
+looking at rather than off the request. A rejection, an approved `escalate`, and
+every risk summary write their row and stop.
+
+**Every money function that gained a parameter in V2 was dropped and recreated,
+and a recreated function is granted to PUBLIC by default.** `refund_deal` and
+`resolve_dispute` both needed an explicit `revoke ... from payhold_ai` that the
+old signature's revoke no longer covered. `tests/intelligence.test.ts` matches on
+the function *name*, which is what makes that catchable. The endpoint in
 front of it (`ai-decisions`) is a separate deployment holding the service role,
 and it takes the approver from the session rather than the request body — a
 client that can name its own approver can forge an approval.
@@ -215,10 +230,17 @@ client that can name its own approver can forge an approval.
 Two smaller decisions worth knowing:
 
 - **`deal_outcomes` is written by triggers on the money path**, not by anything
-  AI. The labels §12.4 will train on have to cover resolutions no model saw, or
+  AI. The labels §24.4 will train on have to cover resolutions no model saw, or
   the eventual fraud model learns from a biased sample. Same reasoning as
   `enqueue_webhooks`: a label that every future code path must remember is a
   label that will be forgotten.
+
+  The trap to know about: `deals_label_outcome` carries its condition in the
+  trigger's `when` clause, not in the function. When release started landing in
+  `clearing` instead of `released`, replacing the function alone would have left
+  the trigger deaf — the labels would simply have stopped being written, with no
+  error, and §24.3 says they cannot be backfilled. The trigger is dropped and
+  recreated in `20260807000002` for that reason.
 - **The dispute statement is wrapped as an untrusted document.** It is written
   by a member of the public and it is *about* the question we are asking, which
   makes it the injection surface. `untrusted()` frames it as evidence rather
@@ -332,6 +354,148 @@ strictly safer; a signing secret has to be *used* on every delivery.
 independently, and the dashboard mock pins the same construction from the other
 side — a client who develops against the mock must not break on the real API.
 
+## The lifecycle, and where `clearing` came from
+
+Spec §6, migrations `20260807000001` (the enum values) and `20260807000002`
+(everything else). **Two migrations, not one, and they must stay that way**:
+Postgres refuses to use an enum value added in the same transaction, and
+Supabase runs each file in one.
+
+The change worth understanding is that **`clearing` is a rename of what
+`released` used to mean.** V1 wrote the release entry, said `released`, and used
+`payout_due_at` to hold the money through the window. V2 names both halves:
+`clearing` inside it, `released` past it, `payout_pending` while the transfer is
+with the provider. `release_deal` still does everything it did, at the same
+moment, under the same lock — it just lands in a differently-named state.
+
+`mature_clearing_deals()` is what promotes `clearing → released` when
+`payout_due_at` passes. It moves no money and writes no ledger entry; the money
+moved at release. `payout-dispatch` calls it **first**, before scanning for due
+payouts, because a payout becomes dispatchable at the same instant its deal
+stops clearing — scanning first would dispatch against a deal still claiming to
+be inside its safety window.
+
+`settle_payout` promotes a still-clearing deal itself rather than refusing it: a
+settled transfer proves the window is over. That is the recovery path (a forced
+retry, a provider settling early), and it writes a `deal.cleared` audit row
+saying a payout rather than the clock caused it. The alternative was making
+`clearing -> paid_out` a legal edge, which would have let a retry pay inside the
+window and leave no trace that it had skipped one.
+
+**The transition guard** is `deal_transition_allowed`, enforced by
+`deals_assert_transition`, a before-trigger. A trigger for the same reason
+`enqueue_webhooks` is one: a rule every future code path must remember to call
+is a rule that eventually gets skipped, including by a correction someone runs
+by hand at 2am. It guards **shape, not policy** — `release_deal` still owns the
+both-confirmations check and `refund_deal` still owns whether a refund is
+allowed this late, so a permissive edge here weakens nothing.
+
+Two edges look wrong and are not. `released -> paid_out` skips `payout_pending`
+because a synchronous rail settles inside the dispatch call and never reaches
+`mark_payout_processing`; requiring the intermediate state would make a card
+payout illegal. And `payment_failed -> funded_held` exists because an async rail
+can report a failure and then settle — refusing it would leave money at the
+provider with no deal willing to admit it arrived.
+
+**`clearing -> disputed` opened a hole that had to be closed in the same
+change.** V1 could only dispute a held deal, so no payout row existed yet; now a
+chargeback can arrive when the payout is already scheduled. `settle_payout`
+refuses a disputed deal under the row lock and `dispatchPayout` skips it early,
+so the cron reports a skip rather than an error and we never ask a provider to
+send money we are about to refuse to book. `released_at_matches_status` had to
+exempt `disputed` for the same reason — a deal disputed during clearing has a
+`released_at`.
+
+`deal_transition_allowed` is granted to `anon` and `authenticated` deliberately:
+it describes the state machine rather than being a way into it, and the
+dashboard uses it to grey out an action that could not succeed.
+
+## The six buckets, and the drift that was not drift
+
+Migrations `20260807000003` (entry types) and `20260807000004` (everything
+else). Same two-file split as the lifecycle, same reason.
+
+`rail_balances` gained `reserved` and `fees_retained`, and `reconcile`'s
+`expected()` counts both. That is a **bug fix**, not a feature. The platform fee
+is a debit in the clearing pool; nothing sweeps it out of the tenant's provider
+balance, because under bring-your-own-keys there is no such transfer. So a
+100,000 deal with a 10,000 fee expected 90,000 while the provider reported
+100,000 — drift of exactly the fee, on every released deal, and
+`record_reconciliation` freezes payouts on any drift. The sandbox walkthrough
+would have hit it on its first deal.
+
+The three-way distinction is the thing to hold on to:
+
+| | leaves the vault? | in `expected`? |
+|---|---|---|
+| `fee`, `tax` | no — reclassified, still ours to hold | yes, as `fees_retained` |
+| `reserve` | no — carved out of the pool | yes, as `reserved` |
+| `provider_fee` | **yes** — the rail took it | no |
+
+`amountLeaving` in `_shared/figures.ts` has a matching list, `POOL_ENTRY_TYPES`,
+and so does the dashboard mock's `POOL_DEDUCTIONS`. **All three must agree.** A
+deduction in `rail_balances` and missing from `amountLeaving` sends a seller
+money the pool says is spoken for — a tax we owe onward, or a reserve still
+carved out.
+
+`deal_amounts(deal)` is §7's breakdown: eight values, presentment currency,
+derived and never stored. It returns a row of zeroes for an unfunded deal rather
+than no row, so a client rendering a breakdown does not have to distinguish
+"nothing happened yet" from "no such thing".
+
+**`release_due_reserves()` runs before `mature_clearing_deals()`** in the same
+dispatch pass. Both are keyed on the same instant, and a deal that matured while
+its reserve was still carved out would offer the dispatcher a pool short by it.
+
+### `create or replace` cannot change a signature
+
+It adds a sibling. An earlier draft of V2 wrote a six-argument `fund_deal`
+intending to replace the nine-argument one; Postgres kept both, the webhook went
+on calling the original, and **every test still passed** — because the tests for
+the new behaviour were calling the function nothing in production uses.
+
+`tests/lifecycle.test.ts` now asserts `count(*) from pg_proc where proname =
+'fund_deal'` is 1. Any money function that gains a parameter needs an explicit
+`drop function` with the **old** argument list, and is worth the same guard.
+
+## Partial refunds — §7.1
+
+Migrations `20260807000005` (enum values) and `20260807000006`. A refund is now
+a row in `refunds`, not a bare ledger entry, because §7.1.6 has Alipay and
+WeChat Pay settling asynchronously up to 90 days out — a refund has a lifetime,
+and a `failed` one must stop counting against what is still refundable.
+
+**Where the refund lands decides what the ledger does**, and the third case is
+the one to understand:
+
+| Lifecycle position | Entries |
+|---|---|
+| before capture | none — refused |
+| before release | `refund` |
+| after release, before payout | **`release` (positive)** then `refund` |
+| after payout | `receivable`, and the refund stays `pending` |
+
+The positive `release` is not a trick. `held` is `hold + release + refund`, and
+by then the negative release has already cancelled the hold — booking only the
+refund would drive `held` to minus the refunded amount and hand reconciliation a
+drift that is not one. Putting it back and taking it out again is what §7.1.3
+means by "reverse the seller payable".
+
+`release_deal` releases `presentment_amount` **less what has been refunded**.
+Deriving it from `hold` entries would be purer, but it makes releasing depend on
+a ledger entry only `fund_deal` writes, and a dozen fixtures set a status
+directly. The two are the same number wherever the ledger is complete.
+
+**A partial refund does not touch the deal's status** (§29.8). `partially_refunded`
+is declared and never written. The reasoning is in the migration header, and the
+short version is that a deal refunded by a third still has to be paid out for
+the other two thirds.
+
+Two things a partial refund does adjust: the scheduled payout shrinks in
+proportion to the pool (scaled, not converted — the payout is in the seller's
+currency and the refund in the buyer's), and a full refund fails any payout
+still scheduled.
+
 ## Risk rules live in SQL
 
 `screen_payout` implements them, for the same reason the release guard does: it
@@ -356,20 +520,144 @@ This does not weaken invariant 11. That invariant limits *rules* to stopping,
 because a rule is arithmetic nobody agreed to at the time; a person stopping a
 payout fails in the same direction with a name attached.
 
+## Seller onboarding — §12, migration `20260807000007`
+
+`screen_payout` now has two halves, and the split is the point.
+
+**The eligibility gate** runs first and is not behind `risk_rules_enabled`.
+Unverified identity, missing or stale sanctions screening, an unverified
+destination, a destination that moved inside `destination_hold_hours` — any of
+those holds the payout whatever the tenant has set. The rules below it are
+discretionary and stay behind the setting. A tenant that switched the rules off
+must not thereby start paying sellers it has never verified.
+
+Invariant 11 survives intact: the gate holds and does nothing else, and
+`review_held_by` is still null, because arithmetic did it rather than a person.
+
+**Phase 5 changed what it sets and when it may be skipped** — see the routing
+section below. The gate now produces `needs_verification` rather than
+`held_for_review`, and an earlier approval no longer short-circuits it.
+
+**Three triggers make the invariants structural** rather than something an
+endpoint has to remember:
+
+- `sellers_seed_primary_destination` — inserting a seller creates their primary
+  `seller_destinations` row. Without it, every seller created after this
+  migration would be unpayable for a reason nobody chose, and the endpoint would
+  be the only insert path that got it right.
+- `seller_destinations_sync_primary` — the primary row is the record;
+  `sellers.beneficiary_token` and `masked_destination` are a copy with exactly
+  one writer, so they cannot disagree. They go when Phase 5 reads the table.
+- the same trigger stamps `destination_changed_at`, and **only when the token
+  actually moved** — re-saving an unchanged destination would otherwise hold a
+  payout for nothing.
+
+`verify_seller(seller, actor, verified)` is one function rather than three
+column updates because the three travel together: a seller marked verified with
+no sanctions date, or with an unverified destination, is still unpayable, and a
+caller would have to know that to get it right. It takes a name for the same
+reason `approve_payout_review` does.
+
+`seller_capabilities(seller)` is the read-only counterpart — the same questions,
+asked ahead of time, returning **every** reason rather than the first.
+
+## Payout routing — §5.1, migrations `20260807000008` and `20260807000009`
+
+Same two-file split as the lifecycle and the six buckets, same reason: Postgres
+refuses to use an enum value added in the same transaction.
+
+`payout_routes` replaces `_shared/rails.ts`'s `payoutProviderFor` **on the
+payout path**. rails.ts stays where it is and keeps its other job — refusing a
+corridor at seller registration, before a destination is stored — but which rail
+carries a scheduled payout is now a row, because §12 requires a country or a
+provider to be disabled without a redeploy and a `case` statement cannot be.
+
+`route_evaluation(tenant, country, currency, amount, rail)` is §5.1's filter
+chain in the order its pseudocode writes it, returning **every** route with its
+verdict rather than only the survivors. The losers are the eligibility record
+`payout_decisions.checks` stores, and they are what answers a seller asking why
+the rail *they* picked will not work.
+
+Two traps in that function. Every column reference is qualified, and has to be:
+`returns table` puts `provider`, `method` and `rank` in scope as parameter names
+and each is also a `payout_routes` column. And the `order by` ends with
+`payout_provider::text` so the ordering is total — a tie broken by whatever
+Postgres returned first would make the engine non-deterministic in exactly the
+way §5.1 forbids.
+
+`route_payout(payout)` chooses, records and — when there is nothing to choose —
+blocks. One function rather than a chooser and a recorder, because §5.1 wants
+the decision auditable and a recorder the caller may forget is not an audit. It
+refuses a `paid` or `processing` payout outright: re-routing money in flight is
+the silent redirection the section forbids.
+
+**Ordering in `dispatch.ts` is a dependency, not a preference.** Screening runs
+before routing because `screen_payout` is what blocks a disputed deal's payout,
+and `route_payout` un-blocks any payout it can route. Routing first would let a
+disputed one back into the queue. `settle_payout` still refuses it under the row
+lock — the ordering is what keeps the *status* honest in between.
+
+### `screen_payout` grew a third answer, and lost a short-circuit
+
+| Reason | Status | Ends when |
+|---|---|---|
+| the deal is disputed | `blocked` | the dispute resolves |
+| §12 eligibility | `needs_verification` | `verify_seller` records an attestation |
+| a discretionary rule | `held_for_review` | a named person approves |
+
+`approve_payout_review` still accepts only `held_for_review`, which is the point:
+until Phase 5 the eligibility checks produced that status too, so an operator
+could approve past "we have never verified this seller" — exactly what §12's
+sentence says must not be possible.
+
+**The approval short-circuit moved below the gate.** `screen_payout` returned
+early on `review_approved_at`, which was right while everything under that line
+was a rule — a rule must not overrule the person who overruled it. Phase 4 put
+the unconditional gate *above* it and the gate inherited the short-circuit, so a
+seller whose verification was revoked after an approval would have been paid.
+
+**The `not_eligible` signal is written on entry and on a change of reasons.**
+`needs_verification` is in `DISPATCHABLE`, so it is re-screened every pass; an
+unconditional insert would write one row per pass for as long as a seller took
+to send a document, and §24.3 says these labels cannot be backfilled. The same
+de-duplication guards `payout_decisions`.
+
+### `seller_capabilities` returns two lists, and that is the whole signature change
+
+`reasons` is what the seller must do; `route_reasons` is what we cannot reach.
+`screen_payout` reads only the first. If a routing failure appeared there, an
+unroutable payout would become `needs_verification`, the routing engine would
+never see it — no decision row, no checks, no reason code — and a verified
+seller would be told to verify themselves again.
+
+Changing the return type meant `drop function`, not `create or replace`, and the
+grant had to be reissued. The same trap as a money function gaining a parameter.
+
 ## Sending a payout
 
 `_shared/dispatch.ts` is the single implementation, shared by the
 `payout-dispatch` cron and `payouts/:id/approve-review`, so that approving
 cannot become a route which skips a check the cron makes. Its order is the
-safety argument: **frozen tenant → `screen_payout` → provider → book.**
+safety argument: **frozen tenant → `screen_payout` → `route_payout` → provider
+→ book.**
 
 Provider before booking is deliberate. A transfer that succeeded but was not
 booked is re-sent next pass on the same `idempotency_key`, the provider returns
 the same transfer, and it books then. Booking first would report a seller paid
 who was not.
 
+The rail and the beneficiary token both come from the routing decision now, not
+from `payoutProviderFor(seller.country, …)` and `sellers.beneficiary_token`. A
+seller has more than one destination and only the decision knows which was
+picked.
+
 `held_for_review` is absent from `DISPATCHABLE` and must stay absent — cron may
-never be the thing that lets a held payout through. The approve endpoint also
+never be the thing that lets a held payout through. `blocked` and
+`needs_verification` **are** in it, and the difference is that neither is
+waiting on a decision: one waits for a route to exist, the other for somebody to
+attest to a fact, so a pass that re-asks and finds the reason gone overrules
+nobody. The same shape as `frozen` clearing once reconciliation is resolved.
+The approve endpoint also
 **refuses an API key**: invariant 11 wants a person, and a client that could
 approve its own held payouts from its own server has turned the rules into a
 formality.
@@ -436,6 +724,15 @@ in `net._http_response`.
 
 ## Not built yet
 
+- **Six lifecycle states with no writer.** `checkout_started` waits on Phase 7's
+  checkout sessions; `partially_refunded` on Phase 3; `in_progress`,
+  `revision_requested`, `expired` and `canceled` each want an endpoint
+  (§10.1 lists `POST /v1/orders/{id}/cancel` among them). The enum values and
+  the transition guard already know all six, so those are endpoints rather than
+  migrations. **`auto-release` and `deals_auto_release_idx` filter on
+  `funded_held | confirmed_buyer | confirmed_seller`** — whoever gives
+  `in_progress` or `revision_requested` a writer must widen both, or the timer
+  will silently skip deals sitting in them.
 - **The reminders cron.** The one scheduled job still missing. It needs a
   channel to remind people *on* — there is no email path here, and a tenant
   webhook is a notification to the client's server rather than to a buyer who

@@ -12,6 +12,7 @@ import { PayHoldError } from '../types'
 import {
   captureDeposit,
   computeBalances,
+  computeDealAmounts,
   computeRailBalances,
   confirmDeal,
   fundDeal,
@@ -21,6 +22,7 @@ import {
   resolveDispute,
   retryPayout,
   runCron,
+  settingsFor,
 } from './engine'
 import { seedDb } from './seed'
 import { advanceClock, loadDb, resetDb, type MockDb } from './store'
@@ -79,7 +81,9 @@ describe('release requires both confirmations', () => {
     confirmDeal(db, id, 'buyer')
 
     const deal = confirmDeal(db, id, 'seller')
-    expect(deal.status).toBe('released')
+    // The second confirmation releases the money from the hold and starts the
+    // safety window. `released` is the far side of that window (spec §6).
+    expect(deal.status).toBe('clearing')
     expect(deal.released_at).toBeTruthy()
     expect(deal.payout_due_at).toBeTruthy()
   })
@@ -134,15 +138,62 @@ describe('refunds', () => {
     ).toHaveLength(1)
   })
 
-  it('is blocked once funds have released', () => {
+  it('after release, the seller payable is reversed rather than refused', () => {
+    // V1 refused this outright and §29.6 adopts §7.1.3 instead: reverse the
+    // payable, refund the buyer. The guard moved from the lifecycle to the
+    // cumulative amount.
     const id = newDeal()
     fundDeal(db, id)
     confirmDeal(db, id, 'buyer')
     confirmDeal(db, id, 'seller')
 
-    expect(() => refundDeal(db, id, 'too late')).toThrow(
-      /already been released/i,
+    const deal = refundDeal(db, id, 'Damaged on arrival')
+    expect(deal.status).toBe('refunded')
+
+    // The un-release keeps `held` at zero rather than driving it negative.
+    const held = db.ledger
+      .filter((e) => e.deal_id === id && ['hold', 'release', 'refund'].includes(e.entry_type))
+      .reduce((n, e) => n + e.amount, 0)
+    expect(held).toBe(0)
+  })
+
+  it('a partial refund leaves the rest held and the deal running — §7.1.2', () => {
+    const id = newDeal()
+    const before = fundDeal(db, id).presentment_amount
+
+    const deal = refundDeal(db, id, 'One day cut short', Math.round(before / 4))
+
+    // §29.8: a partial refund is an amount, not a lifecycle position.
+    expect(deal.status).toBe('funded_held')
+    expect(computeDealAmounts(db, id).refunded).toBe(Math.round(before / 4))
+  })
+
+  it('refunds cannot add up to more than the buyer paid', () => {
+    const id = newDeal()
+    const paid = fundDeal(db, id).presentment_amount
+
+    refundDeal(db, id, 'First', Math.round(paid * 0.7))
+    expect(() => refundDeal(db, id, 'Too much', Math.round(paid * 0.4))).toThrow(
+      /exceeds the/i,
     )
+  })
+
+  it('a refund after payout books what the seller owes — §7.1.4', () => {
+    const id = newDeal()
+    fundDeal(db, id)
+    confirmDeal(db, id, 'buyer')
+    confirmDeal(db, id, 'seller')
+    advanceClock(24 * 30)
+    runCron(db)
+
+    expect(requireDeal(db, id).status).toBe('paid_out')
+
+    refundDeal(db, id, 'Chargeback', 10_000)
+    const a = computeDealAmounts(db, id)
+
+    // Nothing left the provider: there was nothing there to send.
+    expect(a.receivable).toBe(10_000)
+    expect(requireDeal(db, id).status).toBe('paid_out')
   })
 
   it('is a no-op when repeated', () => {
@@ -157,6 +208,206 @@ describe('refunds', () => {
   })
 })
 
+describe('fees, tax and reserve — spec §7', () => {
+  /** What a provider would actually be holding, from money that crossed it. */
+  function providerHolds(): number {
+    return db.ledger
+      .filter(
+        (e) =>
+          e.tenant_id === AUTOHIRE &&
+          ['hold', 'provider_fee', 'refund', 'payout'].includes(e.entry_type),
+      )
+      .reduce((n, e) => n + e.amount, 0)
+  }
+
+  function ledgerSays(): number {
+    return computeRailBalances(db, AUTOHIRE).reduce(
+      (n, r) =>
+        n + r.held + r.pending_clearance + r.available + r.reserved + r.fees_retained,
+      0,
+    )
+  }
+
+  it('a released deal does not drift by our own commission', () => {
+    // The bug this pins: the platform fee is a debit in the clearing pool, but
+    // nothing sweeps it out of the tenant's provider balance — under
+    // bring-your-own-keys there is no such transfer. Without `fees_retained`
+    // the two figures differed by exactly the fee on every released deal, and
+    // drift freezes that tenant's payouts automatically.
+    const id = newDeal()
+    fundDeal(db, id)
+    confirmDeal(db, id, 'buyer')
+    confirmDeal(db, id, 'seller')
+
+    expect(ledgerSays()).toBe(providerHolds())
+  })
+
+  it('the breakdown adds up to what the buyer paid', () => {
+    const id = newDeal()
+    const deal = requireDeal(db, id)
+    deal.tax_amount = 4_000
+    fundDeal(db, id)
+    confirmDeal(db, id, 'buyer')
+    confirmDeal(db, id, 'seller')
+
+    const a = computeDealAmounts(db, id)
+    expect(a.tax).toBe(4_000)
+    expect(
+      a.platform_fee + a.provider_fee + a.tax + a.reserve +
+        a.paid_out + a.refunded + a.seller_net,
+    ).toBe(a.buyer_paid)
+  })
+
+  it('a reserve is carved out of the pool and is not payable', () => {
+    settingsFor(db, AUTOHIRE).reserve_rate = 0.2
+    settingsFor(db, AUTOHIRE).reserve_days = 30
+
+    const id = newDeal()
+    fundDeal(db, id)
+    confirmDeal(db, id, 'buyer')
+    confirmDeal(db, id, 'seller')
+
+    const a = computeDealAmounts(db, id)
+    expect(a.reserve).toBeGreaterThan(0)
+    // Whatever is reserved is not in the seller's net, and not in `available`.
+    const rails = computeRailBalances(db, AUTOHIRE)
+    expect(rails.reduce((n, r) => n + r.reserved, 0)).toBe(a.reserve)
+  })
+
+  it('the reserve ends exactly when the payout comes due', () => {
+    settingsFor(db, AUTOHIRE).reserve_rate = 0.2
+    settingsFor(db, AUTOHIRE).reserve_days = 30
+
+    const id = newDeal()
+    fundDeal(db, id)
+    confirmDeal(db, id, 'buyer')
+    confirmDeal(db, id, 'seller')
+
+    // One payout per deal, so a reserve outliving it would have nothing to
+    // send it.
+    const deal = requireDeal(db, id)
+    expect(deal.reserve_until).toBe(deal.payout_due_at)
+  })
+
+  it('returning the reserve moves nothing in or out of the vault', () => {
+    settingsFor(db, AUTOHIRE).reserve_rate = 0.2
+    settingsFor(db, AUTOHIRE).reserve_days = 30
+
+    const id = newDeal()
+    fundDeal(db, id)
+    confirmDeal(db, id, 'buyer')
+    confirmDeal(db, id, 'seller')
+
+    // The reserve ends at exactly the moment the payout comes due, so no clock
+    // position isolates the return from the transfer. What is checkable — and
+    // what actually matters — is that the reconciliation identity survives the
+    // whole lifecycle: buckets in, buckets out, still equal to the money that
+    // genuinely crossed the provider boundary.
+    advanceClock(24 * 60)
+    runCron(db)
+
+    expect(computeDealAmounts(db, id).reserve).toBe(0)
+    expect(ledgerSays()).toBe(providerHolds())
+  })
+})
+
+describe('the clearance window — spec §6', () => {
+  it('the second confirmation lands in clearing, with the money already out of the hold', () => {
+    const id = newDeal()
+    fundDeal(db, id)
+    confirmDeal(db, id, 'buyer')
+    const deal = confirmDeal(db, id, 'seller')
+
+    expect(deal.status).toBe('clearing')
+    expect(deal.released_at).toBeTruthy()
+    // The release entry is written here, not on entry to `released`. The state
+    // names which side of the safety window the deal is on; it does not decide
+    // when money moves.
+    expect(
+      db.ledger.filter((e) => e.deal_id === id && e.entry_type === 'release'),
+    ).toHaveLength(1)
+  })
+
+  it('a deal inside its window is not matured', () => {
+    const id = newDeal()
+    fundDeal(db, id)
+    confirmDeal(db, id, 'buyer')
+    confirmDeal(db, id, 'seller')
+
+    runCron(db)
+    expect(requireDeal(db, id).status).toBe('clearing')
+  })
+
+  it('a deal past its window becomes released, and the client is told', () => {
+    const id = newDeal()
+    fundDeal(db, id)
+    confirmDeal(db, id, 'buyer')
+    confirmDeal(db, id, 'seller')
+
+    advanceClock(24 * 30)
+    const result = runCron(db)
+
+    expect(result.cleared).toBeGreaterThan(0)
+    expect(
+      db.webhook_deliveries.some(
+        (d) => d.deal_id === id && d.event === 'order.released',
+      ),
+    ).toBe(true)
+  })
+
+  it('maturing moves no money', () => {
+    const id = newDeal()
+    fundDeal(db, id)
+    confirmDeal(db, id, 'buyer')
+    confirmDeal(db, id, 'seller')
+
+    const before = db.ledger.filter((e) => e.deal_id === id).length
+    advanceClock(24 * 30)
+    runCron(db)
+
+    // The payout that follows writes its own entry, so count only what the
+    // promotion itself could have added.
+    const added = db.ledger
+      .filter((e) => e.deal_id === id)
+      .slice(before)
+      .filter((e) => e.entry_type !== 'payout')
+    expect(added).toHaveLength(0)
+  })
+
+  it('a dispute opened during clearing freezes the promotion', () => {
+    const id = newDeal()
+    fundDeal(db, id)
+    confirmDeal(db, id, 'buyer')
+    confirmDeal(db, id, 'seller')
+    openDispute(db, id, 'buyer', 'Damage found on return')
+
+    advanceClock(24 * 30)
+    runCron(db)
+
+    expect(requireDeal(db, id).status).toBe('disputed')
+  })
+
+  it('a deal carrying its own clearing days wins over the tenant setting — §14', () => {
+    const id = newDeal()
+    const deal = requireDeal(db, id)
+    deal.completion_policy = {
+      completion_event: 'vehicle_returned',
+      auto_complete_after_hours: 72,
+      clearing_days: 1,
+    }
+
+    fundDeal(db, id)
+    confirmDeal(db, id, 'buyer')
+    confirmDeal(db, id, 'seller')
+
+    const days =
+      (new Date(requireDeal(db, id).payout_due_at!).getTime() -
+        new Date(requireDeal(db, id).released_at!).getTime()) /
+      86_400_000
+    expect(Math.round(days)).toBe(1)
+  })
+})
+
 describe('auto-release timer', () => {
   it('confirms on a silent party behalf and releases', () => {
     const id = newDeal()
@@ -168,7 +419,7 @@ describe('auto-release timer', () => {
 
     const deal = requireDeal(db, id)
     expect(result.auto_released).toBeGreaterThan(0)
-    expect(deal.status).toBe('released')
+    expect(deal.status).toBe('clearing')
     expect(deal.confirmations.find((c) => c.side === 'buyer')?.actor).toBe('auto')
   })
 
@@ -231,7 +482,10 @@ describe('payouts', () => {
 
     expect(payout.status).toBe('failed')
     expect(payout.failure_reason).toBeTruthy()
-    expect(requireDeal(db, id).status).toBe('released')
+    // Still `clearing`: this retry is a person pushing a payout inside the
+    // safety window, so nothing has matured it. The failure must not move the
+    // deal either — a payout that did not go changes nothing about the deal.
+    expect(requireDeal(db, id).status).toBe('clearing')
 
     retryPayout(db, payout.id)
     expect(payout.status).toBe('paid')
@@ -256,7 +510,7 @@ describe('disputes', () => {
 
     resolveDispute(db, dispute.id, 'release', 'Delivery photos check out')
 
-    expect(requireDeal(db, id).status).toBe('released')
+    expect(requireDeal(db, id).status).toBe('clearing')
     expect(dispute.status).toBe('resolved_released')
   })
 

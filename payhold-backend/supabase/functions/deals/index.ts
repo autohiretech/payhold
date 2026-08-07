@@ -42,6 +42,8 @@ import {
   type ConfirmSide,
   type CreateDealInput,
   type Deal,
+  type DealAmounts,
+  type Money,
   type PaymentMethod,
 } from '../_shared/types.ts'
 
@@ -51,8 +53,34 @@ const DEAL_COLUMNS = `
   presentment_currency, presentment_amount, fx_rate, deposit_amount,
   buyer_country, provider, payment_method, payment_network, provider_ref,
   status, expected_complete_at, auto_release_at, released_at, payout_due_at,
-  fee_amount, metadata, created_at, updated_at
+  fee_amount, tax_amount, discount_amount, provider_fee_amount,
+  reserve_amount, reserve_until,
+  completion_event, auto_complete_after_hours, clearing_days,
+  metadata, created_at, updated_at
 `
+
+/**
+ * The completion policy is three flat columns in Postgres and one nested object
+ * on the wire, because §14's create payload nests it and a client should be
+ * able to send back what it was given.
+ */
+function shapeDeal(row: Record<string, unknown>): Deal {
+  const {
+    completion_event,
+    auto_complete_after_hours,
+    clearing_days,
+    ...rest
+  } = row
+
+  return {
+    ...rest,
+    completion_policy: {
+      completion_event: (completion_event ?? null) as string | null,
+      auto_complete_after_hours: (auto_complete_after_hours ?? null) as number | null,
+      clearing_days: (clearing_days ?? null) as number | null,
+    },
+  } as unknown as Deal
+}
 
 async function getDeal(
   db: SupabaseClient,
@@ -67,7 +95,7 @@ async function getDeal(
     .maybeSingle()
 
   if (!data) throw new PayHoldError('not_found', `Deal ${id} not found`)
-  return data as unknown as Deal
+  return shapeDeal(data as Record<string, unknown>)
 }
 
 /** The confirmations belong to the deal as far as a client is concerned. */
@@ -179,6 +207,17 @@ async function create(
       provider: defaultProviderFor(buyerCountry, presentmentCurrency),
       status: 'created',
       expected_complete_at: body.expected_complete_at ?? null,
+      // §7. Presentment currency, set by the client — they know their own tax
+      // rules and their own discounts, and we know neither.
+      tax_amount: body.tax_amount ?? 0,
+      discount_amount: body.discount_amount ?? 0,
+      // §14. Locked at creation for the same reason `fee_amount` is: §27 says
+      // in-flight deals keep the settings they were created with, and a
+      // clearance window that moved mid-rental is exactly that surprise.
+      completion_event: body.completion_policy?.completion_event ?? null,
+      auto_complete_after_hours:
+        body.completion_policy?.auto_complete_after_hours ?? null,
+      clearing_days: body.completion_policy?.clearing_days ?? null,
       // Frozen at creation. Changing the tenant's fee later must not reprice a
       // deal that already exists — spec §8.
       fee_amount: feeFor(body.amount, settings),
@@ -191,7 +230,7 @@ async function create(
     throw new PayHoldError('policy_violation', 'Could not create that deal')
   }
 
-  const deal = data as unknown as Deal
+  const deal = shapeDeal(data as Record<string, unknown>)
 
   await db.rpc('write_audit', {
     p_tenant: caller.tenant_id,
@@ -233,9 +272,10 @@ async function create(
  * §4 mentions for `confirm` are not built yet, and inventing an auth scheme
  * here would be the wrong place to do it.
  *
- * Nothing about the deal's state changes. `funded_held` comes from the
- * provider's webhook and only after we re-fetch the transaction — starting a
- * charge is not evidence that one succeeded.
+ * The deal moves to `payment_pending` and no further. `funded_held` comes from
+ * the provider's webhook and only after we re-fetch the transaction — starting
+ * a charge is not evidence that one succeeded, which is the whole reason §6
+ * gives the attempt a state of its own rather than letting it look like money.
  */
 async function pay(
   req: Request,
@@ -257,7 +297,11 @@ async function pay(
 
   const deal = await getDeal(db, caller, id)
 
-  if (deal.status !== 'created') {
+  // `payment_failed` is here so a declined card can be retried without the
+  // client having to create a second deal for the same booking. `payment_pending`
+  // is not: a buyer who is mid-payment on one rail must not be started on
+  // another, or two charges race for one hold.
+  if (!['created', 'checkout_started', 'payment_failed'].includes(deal.status)) {
     throw new PayHoldError(
       'invalid_state',
       `This deal is ${deal.status} — a payment has already been started`,
@@ -293,7 +337,14 @@ async function pay(
   // The rail is recorded now so the dashboard shows where the payment went
   // even while it is still pending. The reference and the hold wait for the
   // webhook.
-  await db.from('deals').update({ provider: rail }).eq('id', deal.id)
+  //
+  // The status write happens after the provider call, not before: a charge that
+  // threw never started, and a deal left in `payment_pending` by a rail that
+  // refused it would be unretryable — `/pay` declines that state on purpose.
+  await db
+    .from('deals')
+    .update({ provider: rail, status: 'payment_pending' })
+    .eq('id', deal.id)
 
   await db.rpc('write_audit', {
     p_tenant: caller.tenant_id,
@@ -379,19 +430,53 @@ async function refund(
   caller: Caller,
   id: string,
 ): Promise<Response> {
-  const body = await readJson<{ reason?: string }>(req)
+  const body = await readJson<{
+    reason?: string
+    /** §7.1.5. Omitted means everything still refundable — V1's only option. */
+    amount?: Money
+    /** The client's own breakdown of what they are giving back. */
+    line_items?: unknown
+  }>(req)
   const deal = await getDeal(db, caller, id)
+
+  if (body.amount !== undefined) {
+    if (!Number.isInteger(body.amount) || body.amount <= 0) {
+      throw new PayHoldError(
+        'policy_violation',
+        'amount must be a positive integer in minor units (1000 = 10.00)',
+      )
+    }
+  }
 
   // Return the buyer's money at the provider FIRST. A ledger that says
   // "refunded" while the provider still holds the funds is the one direction
   // this must never fail in — the reverse is recoverable by re-running.
-  if (deal.provider_ref) {
+  //
+  // Skipped once the seller has been paid: §7.1.4 books a receivable instead,
+  // because there is nothing left at the provider to send and asking a rail to
+  // refund money it no longer holds fails in a way that helps nobody.
+  if (deal.provider_ref && deal.status !== 'paid_out') {
     const { provider } = await loadProvider(db, caller.tenant_id, deal.provider)
+
+    if (body.amount !== undefined && !provider.capabilities.supportsPartialRefund) {
+      throw new PayHoldError(
+        'policy_violation',
+        `${deal.payment_method ?? 'This rail'} cannot refund part of a payment — ` +
+          'refund the whole amount or resolve it with the buyer directly',
+      )
+    }
+
     await provider.refund({
       provider_ref: deal.provider_ref,
-      amount: deal.presentment_amount,
+      // The whole thing when no amount was named. `refund_deal` decides what
+      // "the whole thing" means against its own cumulative guard; this is the
+      // provider call, and a rail asked for more than it holds refuses loudly.
+      amount: body.amount ?? deal.presentment_amount,
       currency: deal.presentment_currency,
-      idempotency_key: `refund:${deal.id}`,
+      // Partial refunds are not one event per deal, so the key cannot be one
+      // per deal either. Two different amounts must not collapse into one
+      // provider-side refund.
+      idempotency_key: `refund:${deal.id}:${body.amount ?? 'full'}`,
     })
   }
 
@@ -399,6 +484,8 @@ async function refund(
     p_deal_id: deal.id,
     p_reason: body.reason ?? 'Refunded by the client',
     p_actor: caller.actor,
+    p_amount: body.amount ?? null,
+    p_line_items: body.line_items ?? null,
   })
   if (error) throw rpcError(error, 'refund')
 
@@ -538,7 +625,9 @@ Deno.serve(handler(async (req) => {
     if (status) query = query.in('status', status.split(','))
 
     const { data } = await query
-    return json(req, { deals: data ?? [] })
+    return json(req, {
+      deals: ((data ?? []) as Record<string, unknown>[]).map(shapeDeal),
+    })
   }
 
   if (!id) {
@@ -546,7 +635,17 @@ Deno.serve(handler(async (req) => {
   }
 
   if (req.method === 'GET' && !action) {
-    return json(req, await withConfirmations(db, await getDeal(db, caller, id)))
+    const deal = await withConfirmations(db, await getDeal(db, caller, id))
+
+    // §7: every value separately, derived from the ledger. Alongside the deal
+    // rather than inside it — the list endpoint returns deals too, and one
+    // aggregate query per row there is how a list of a hundred becomes slow.
+    const { data: amounts } = await db.rpc('deal_amounts', { p_deal: deal.id })
+
+    return json(req, {
+      ...deal,
+      amounts: (amounts as DealAmounts[] | null)?.[0] ?? null,
+    })
   }
 
   if (req.method !== 'POST') {

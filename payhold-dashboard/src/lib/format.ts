@@ -103,10 +103,45 @@ export const DEAL_STATUS_META: Record<DealStatus, StatusMeta> = {
     tone: 'neutral',
     hint: 'The deal exists but the buyer has not paid yet.',
   },
+  checkout_started: {
+    label: 'At checkout',
+    tone: 'neutral',
+    hint: 'The buyer opened the payment page. Nothing has been charged.',
+  },
+  payment_pending: {
+    label: 'Payment started',
+    tone: 'neutral',
+    hint: 'The buyer is paying. Money is only held once the provider confirms it.',
+  },
+  payment_failed: {
+    label: 'Payment failed',
+    tone: 'danger',
+    hint: 'The charge did not go through. The buyer can try again.',
+  },
+  expired: {
+    label: 'Expired',
+    tone: 'neutral',
+    hint: 'Nobody paid in time. Nothing was charged and nothing is owed.',
+  },
+  canceled: {
+    label: 'Cancelled',
+    tone: 'neutral',
+    hint: 'Called off before any money moved.',
+  },
   funded_held: {
     label: 'Funds held',
     tone: 'held',
     hint: 'The buyer has paid. The money is held and neither side can touch it.',
+  },
+  in_progress: {
+    label: 'In progress',
+    tone: 'held',
+    hint: 'The work has started. The money stays held until both sides confirm.',
+  },
+  revision_requested: {
+    label: 'Changes asked for',
+    tone: 'held',
+    hint: 'The buyer asked for something to be put right. The money is still held.',
   },
   confirmed_buyer: {
     label: 'Buyer confirmed',
@@ -118,10 +153,20 @@ export const DEAL_STATUS_META: Record<DealStatus, StatusMeta> = {
     tone: 'confirmed',
     hint: 'Waiting on the buyer to confirm before funds release.',
   },
-  released: {
-    label: 'Released',
+  clearing: {
+    label: 'Clearing',
     tone: 'released',
     hint: 'Both sides confirmed. Funds are clearing before payout.',
+  },
+  released: {
+    label: 'Ready to pay out',
+    tone: 'released',
+    hint: 'The clearance window has passed. The payout can go.',
+  },
+  payout_pending: {
+    label: 'Payout sending',
+    tone: 'pending',
+    hint: 'The transfer is with the provider and has not settled yet.',
   },
   paid_out: {
     label: 'Paid out',
@@ -132,6 +177,11 @@ export const DEAL_STATUS_META: Record<DealStatus, StatusMeta> = {
     label: 'Refunded',
     tone: 'pending',
     hint: 'The money went back to the buyer.',
+  },
+  partially_refunded: {
+    label: 'Partly refunded',
+    tone: 'pending',
+    hint: 'Some of the money went back to the buyer. The rest follows the deal.',
   },
   disputed: {
     label: 'Disputed',
@@ -166,6 +216,19 @@ export const PAYOUT_STATUS_META: Record<PayoutStatus, StatusMeta> = {
     label: 'Held for review',
     tone: 'pending',
     hint: 'A risk rule stopped this one. Someone needs to look before it sends.',
+  },
+  // The two stops nobody approves. Both say what has to change instead of who
+  // has to decide, because in neither case is a decision what is missing —
+  // §12's check has not been done, or §5.1 has nowhere eligible to send it.
+  needs_verification: {
+    label: 'Needs verification',
+    tone: 'pending',
+    hint: 'Something about this seller is outstanding. Verifying them releases it.',
+  },
+  blocked: {
+    label: 'Blocked',
+    tone: 'danger',
+    hint: 'No eligible payout route, or the deal is disputed. The money is untouched.',
   },
 }
 

@@ -115,12 +115,15 @@ describe('what gets notified', () => {
     runCron(db)
 
     const events = deliveriesFor(id).map((d) => d.event)
+    // §10.2's vocabulary, and one more event than V1 emitted: the clearance
+    // window now has an end a client can see as well as a start.
     expect(events).toEqual([
-      'deal.funded_held',
-      'deal.confirmed',
-      'deal.confirmed',
-      'deal.released',
-      'deal.paid_out',
+      'order.funded_held',
+      'order.accepted',
+      'order.delivered',
+      'order.clearing_started',
+      'order.released',
+      'payout.paid',
     ])
   })
 
@@ -131,7 +134,7 @@ describe('what gets notified', () => {
     fundDeal(db, id)
     refundDeal(db, id, 'Host cancelled')
 
-    expect(deliveriesFor(id).map((d) => d.event)).toContain('deal.refunded')
+    expect(deliveriesFor(id).map((d) => d.event)).toContain('refund.succeeded')
   })
 
   it('emits on dispute', () => {
@@ -139,7 +142,7 @@ describe('what gets notified', () => {
     fundDeal(db, id)
     openDispute(db, id, 'buyer', 'Never delivered')
 
-    expect(deliveriesFor(id).map((d) => d.event)).toContain('deal.disputed')
+    expect(deliveriesFor(id).map((d) => d.event)).toContain('dispute.opened')
   })
 
   it('emits on deposit capture', () => {
@@ -158,7 +161,7 @@ describe('what gets notified', () => {
     confirmDeal(db, id, 'buyer')
     confirmDeal(db, id, 'buyer')
 
-    const confirmed = deliveriesFor(id).filter((d) => d.event === 'deal.confirmed')
+    const confirmed = deliveriesFor(id).filter((d) => d.event === 'order.accepted')
     expect(confirmed).toHaveLength(1)
   })
 
@@ -285,7 +288,7 @@ describe('the envelope', () => {
     fundDeal(db, id)
 
     const { payload } = deliveriesFor(id)[0]!
-    expect(payload.event).toBe('deal.funded_held')
+    expect(payload.event).toBe('order.funded_held')
     expect(payload.deal_id).toBe(id)
     expect(payload.occurred_at).toBeTruthy()
     expect(payload.data.amount).toBe(requireDeal(db, id).amount)

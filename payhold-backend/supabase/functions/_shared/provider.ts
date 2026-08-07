@@ -66,6 +66,17 @@ export interface VerifiedTransaction {
   status: 'pending' | 'successful' | 'failed'
   method: PaymentMethod | null
   network: string | null
+  /**
+   * What the rail charged us for taking this payment, in the same currency —
+   * §7's "provider fee", and the one figure in this breakdown that only the
+   * provider knows.
+   *
+   * Zero on a rail that does not itemise it. Booking it here rather than
+   * guessing at a rate matters: unbooked, it is the difference between our
+   * ledger and the provider's balance, which the reconciliation pass reads as
+   * drift and answers by freezing the tenant's payouts.
+   */
+  fee: Money
 }
 
 export interface PayoutRequest {
@@ -115,8 +126,35 @@ export interface TokenizeResult {
 // The interface
 // ---------------------------------------------------------------------------
 
+/**
+ * §9: "each adapter must expose capabilities rather than letting the UI guess."
+ *
+ * This is what makes "no caller may branch on `provider.name`" enforceable
+ * rather than aspirational — a caller that needs to know whether a partial
+ * refund is possible has somewhere to ask that is not the provider's identity.
+ *
+ * §7.1.6 is the immediate reason two of these exist: Alipay and WeChat Pay
+ * refund asynchronously, and Stripe documents Alipay refunds up to 90 days
+ * after payment. "All methods refund the same way" is a promise the product
+ * must not make.
+ *
+ * The routing matrix that reads the rest of these is Phase 6.
+ */
+export interface ProviderCapabilities {
+  supportsCapture: boolean
+  supportsPartialRefund: boolean
+  supportsMarketplacePayout: boolean
+  supportsSellerOnboarding: boolean
+  supportsDispute: boolean
+  supportsLocalCurrency: boolean
+  supportsMobileMoney: boolean
+  /** The refund is acknowledged now and settles later, by webhook. */
+  supportsAsyncRefund: boolean
+}
+
 export interface PaymentProvider {
   readonly name: Provider
+  readonly capabilities: ProviderCapabilities
 
   /** Collect from the buyer. Returns where to send them to pay. */
   charge(req: ChargeRequest): Promise<ChargeResult>
@@ -175,6 +213,22 @@ export interface PaymentProvider {
 export class FakeProvider implements PaymentProvider {
   readonly name = 'fake' as const
 
+  /**
+   * Everything, because the fake exists so a full lifecycle works with zero
+   * keys (§12) and a capability it refused would make a demo path unreachable
+   * for a reason that is not true of any real rail.
+   */
+  readonly capabilities: ProviderCapabilities = {
+    supportsCapture: true,
+    supportsPartialRefund: true,
+    supportsMarketplacePayout: true,
+    supportsSellerOnboarding: true,
+    supportsDispute: true,
+    supportsLocalCurrency: true,
+    supportsMobileMoney: true,
+    supportsAsyncRefund: false,
+  }
+
   /** Everything charged in this process, so `verify()` can answer honestly. */
   private readonly issued = new Map<string, VerifiedTransaction>()
 
@@ -195,6 +249,7 @@ export class FakeProvider implements PaymentProvider {
       status: 'pending',
       method: req.method,
       network: req.network ?? null,
+      fee: 0,
     })
     return Promise.resolve({
       provider_ref,
@@ -218,6 +273,10 @@ export class FakeProvider implements PaymentProvider {
       status: 'pending',
       method: null,
       network: null,
+      // The fake charges nothing, which is the truth about it. §12 requires a
+      // full lifecycle with zero keys, and inventing a fee would make demo
+      // balances stop adding up for no gain.
+      fee: 0,
     })
   }
 
@@ -238,6 +297,7 @@ export class FakeProvider implements PaymentProvider {
       status: 'pending',
       method: 'card',
       network: 'Visa',
+      fee: 0,
     })
     return Promise.resolve({
       provider_ref,

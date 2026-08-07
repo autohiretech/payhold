@@ -169,11 +169,31 @@ backend written most recently:
   confirmation does not queue two, retries back off and then stop, and a client
   holding the secret can verify the signature. The backend's counterpart is
   `payhold-backend/tests/webhooks-risk-reconciliation.test.ts`.
+
+  **Event names are spec §10.2's and were renamed in Phase 1** —
+  `order.funded_held`, `order.delivered` / `order.accepted`,
+  `order.clearing_started`, `order.released`, `refund.succeeded`,
+  `dispute.opened`, `payout.paid`. One event per transition: there is no
+  per-event subscription, so shipping the old name alongside the new would
+  double every client's delivery volume rather than ease a migration.
+- The clearance suite in `engine.test.ts` — `clearing` is where the second
+  confirmation lands and where the release entry is written; `released` is the
+  far side of the window; a dispute opened during clearing freezes both the
+  promotion and the payout. Backend counterpart:
+  `payhold-backend/tests/lifecycle.test.ts`.
 - `risk.test.ts` — a rule can hold a payout and do nothing else; only a person
   clears the hold; cron and retry cannot.
 - `reconciliation.test.ts` — drift is *found* by comparing against a provider
   balance, not handed to the dashboard. One alert per rail, refreshed. Drift
   freezes; nothing unfreezes itself.
+
+  **`providerReportedBalance` is now derived independently**, from entries that
+  genuinely crossed the provider boundary (`hold`, `provider_fee`, `refund`,
+  `payout`). It used to be our own expected figure plus injected drift, which
+  made the comparison self-fulfilling — and is why the mock could not have
+  noticed that the platform fee made every released deal drift. `release`,
+  `fee`, `tax`, `reserve` and `reserve_release` appear nowhere in it, which is
+  exactly the property the six-bucket maths has to satisfy for the two to agree.
 
 ## Intelligence (root spec §12)
 
@@ -201,9 +221,13 @@ person decides**:
 - Approving is a `useMoneyMutation`; drafting and chat use `useAiMutation`,
   which invalidates only the three AI queries. A deal list that refreshed
   because someone asked a question would be a small lie about what happened.
-- There is no `split` recommendation. v1 has no partial-refund primitive, so a
-  case the evidence divides comes back `escalate` rather than in terms the
-  engine cannot execute.
+- **There is a `partial_refund` recommendation as of Phase 3.** It carries a
+  `refund_amount` in presentment minor units, validated against what the buyer
+  paid — a split naming more than that is discarded, not shown (§24.5).
+  `escalate` still exists and goes back to meaning what it says: the file does
+  not settle the question, and no split resolves it either. Approving a split
+  refunds that much and releases the rest, and the dispute is labelled
+  `dispute_split` so §24.4 does not learn the buyer won outright.
 
 The assistant is a **corner panel, not a page** (`components/assistant.tsx`):
 ⌘K or the launcher from anywhere, `?ask=1` to deep-link it open. It docks
@@ -404,12 +428,64 @@ Seller age is measured **at the deal's creation**, not at payout time. With a
 seven-day clearance window, every seller is a week old by the time their first
 payout comes due, so measuring at payout would make that rule unfireable.
 
+## Payout routing (spec §5.1)
+
+`src/api/mock/routing.ts` is the mirror of
+`payhold-backend/supabase/migrations/20260807000009_payout_routing.sql` —
+`routeEvaluation`, `routePayout`, `routeReasonText`, `payoutDisplayStatus`, same
+order and same reason codes. A change to either is a change to both.
+
+**Which rail carries a payout is data.** `db.payout_routes` is §5's launch
+matrix as rows, and `platformPayoutRoutes()` is the seed. A `tenant_id` of null
+is the platform default; a tenant row for the same rail **replaces** it, or
+switching a rail off for one company would leave the platform's enabled row
+still eligible. The dev panel and §5.2's eighth case both turn on that: disable
+a corridor and the next payout blocks, with no code changed.
+
+**A route is never a fallback for another route.** §5.1 forbids silently
+redirecting funds to another destination, and a destination is a token minted
+for one rail — so the fallback is the seller's **backup destination**, gated on
+a failed primary, `payout_primary_attempts`, `payout_backup_enabled`, and the
+backup being verified and out of its security hold. Taking it emits
+`payout.route_changed` once.
+
+**Destinations are their own table.** `seller_destinations` is the record;
+`Seller.beneficiary_token` and `masked_destination` are the primary's copy,
+which the backend keeps in step with a trigger. `seedPrimaryDestination` is that
+trigger's mirror and every path that creates a seller must call it — a seller
+without a destination is unpayable for a reason nobody chose.
+
+**Two new payout statuses, separated by who ends them.** `held_for_review` needs
+a named approval; `needs_verification` (§12) needs an attestation and is
+deliberately *not* approvable, which is what closes the hole where an operator
+could wave a payout past a seller nobody had verified; `blocked` (§5.1's
+no-route case, and a disputed deal) ends when a route exists or the dispute
+resolves. Both new ones are in the cron's `DISPATCHABLE`, because neither waits
+on a decision and re-asking overrules nobody.
+
+`payoutDisplayStatus` derives §5.1's seven-state seller-facing vocabulary.
+`clearing` and `available` come from the *deal's* window, not from the payout —
+storing them would be one fact with two writers. `frozen` and `held_for_review`
+both read as `blocked`, because to a seller they are the same thing and naming
+a review queue at them invites them to fix what is not theirs to fix.
+
+`routing.test.ts` mirrors `payhold-backend/tests/payout-routing.test.ts` case
+for case, §5.2's eight included.
+
 ## Payment rails
 
 `src/lib/rails.ts` is the routing table: which provider handles which payment
 method, in which market, for collection and for payout. Everything rail-related
 reads from it — the checkout method picker, the deal form's preview, the Rails
 screen, seller registration.
+
+**Payouts no longer route through it.** §5.1 moved that to `payout_routes` rows,
+because §12 requires a corridor to be switchable without a deploy. This file
+keeps its other job — refusing a destination at registration, before it is
+stored — and `PAYOUT_PROVIDER_LABEL` lives here, where the "never inline a
+provider name in a screen" convention says rail vocabulary belongs. Three copies
+of that map used to sit in screens, which is exactly the failure the convention
+exists to prevent: §5.1 added five rails at once.
 
 **Every row is `verified: false`.** The table encodes the *plan* from the build
 spec, not a checked capability list. Before any rail carries live money, confirm
@@ -430,8 +506,17 @@ Two rules are structural rather than configurable:
 
 ## Conventions
 
+- **Refunds take an optional amount** (§7.1). `refundDeal(id, reason, amount?,
+  lineItems?)` — omitted means everything still refundable. A partial refund
+  does **not** change the deal's status (§29.8); `computeDealAmounts(...).refunded`
+  is where "partly refunded" is read from.
 - **Money is integer minor units everywhere.** Only `lib/format.ts` divides by
   100. Forms take major units and convert at the boundary.
+- **Balances have six buckets** (spec §7): `held`, `pending_clearance`,
+  `available`, `reserved`, `fees_retained`, `paid_out`. Only the last is money
+  that left. `computeDealAmounts` is the per-deal breakdown, and
+  `POOL_DEDUCTIONS` in `engine.ts` must stay identical to the backend's
+  `POOL_ENTRY_TYPES` and to `rail_balances`' `clearing` expression.
 - Rail vocabulary (`METHOD_LABEL`, `COUNTRY_LABEL`, `PROVIDER_LABEL`) lives in
   `lib/rails.ts`. Never inline a provider or method name in a screen.
 - **Light theme only.** There is no dark mode and no theme toggle. Don't add
@@ -445,8 +530,18 @@ Two rules are structural rather than configurable:
   `brand-soft`, which is the active nav item and every selected chip.
 - Form controls use `border-line-strong` (3:1 against white). `--line` is for
   decorative dividers only.
+- **Payout status is two vocabularies.** `PAYOUT_STATUS_META` covers
+  `Payout.status`, which keeps every distinction an operator needs;
+  `payoutDisplayStatus` derives §5.1's seven seller-facing states. Public pages
+  get the second, the Payouts screen gets the first.
 - Status vocabulary lives in `DEAL_STATUS_META` / `PAYOUT_STATUS_META`. Labels
-  and plain-language hints are defined once, never inline.
+  and plain-language hints are defined once, never inline. `DEAL_STATUSES` is in
+  **the Postgres enum's declaration order**, so `order by status` reads as the
+  lifecycle; keep the two in step.
+- `HOLDING_STATUSES` is money still in the hold; `PAST_HOLD_STATUSES` is
+  `clearing | released | payout_pending | paid_out`. Reach for the second
+  wherever V1 code said `['released', 'paid_out']` — that question now has four
+  answers, and `clearing` is the one people forget.
 - Money mutations use `useMoneyMutation` / `useMoneyAction`, which invalidate
   every query — a release touches the deal, ledger, balance, payouts and audit
   at once.

@@ -28,7 +28,7 @@ import { PayHoldError, type Payout } from '../_shared/types.ts'
 
 const PAYOUT_COLUMNS =
   'id, tenant_id, deal_id, seller_id, amount, currency, status, scheduled_for, ' +
-  'paid_at, failure_reason, attempts, provider_ref, review_held_at, ' +
+  'paid_at, failure_reason, attempts, provider_ref, destination_id, review_held_at, ' +
   'review_held_by, review_hold_reason, review_approved_by, review_approved_at, created_at'
 
 async function getPayout(
@@ -48,18 +48,44 @@ async function getPayout(
   return data as unknown as Payout
 }
 
-/** The signals behind a hold, so an approver sees what they are overriding. */
+/**
+ * The signals behind a hold, so an approver sees what they are overriding — and
+ * the routing decision behind where it was going.
+ *
+ * §5.1 wants a payout decision auditable after the fact and the display status
+ * shown "with the reason and the next action", so both travel with the payout
+ * rather than being a second call somebody has to know to make.
+ */
 async function withSignals(
   db: SupabaseClient,
   payout: Payout,
 ): Promise<Record<string, unknown>> {
-  const { data } = await db
-    .from('risk_signals')
-    .select('signal, severity, value, explanation, created_at')
-    .eq('deal_id', payout.deal_id)
-    .order('created_at', { ascending: false })
+  const [{ data: signals }, { data: routing }, { data: display }] = await Promise.all([
+    db
+      .from('risk_signals')
+      .select('signal, severity, value, explanation, created_at')
+      .eq('deal_id', payout.deal_id)
+      .order('created_at', { ascending: false }),
+    db
+      .from('payout_decisions')
+      .select('route_id, destination_id, provider, payout_provider, method, ' +
+        'currency, amount, ranking_score, fee_estimate, fx_source, fx_rate, ' +
+        'is_fallback, reason_code, checks, created_at')
+      .eq('payout_id', payout.id)
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle(),
+    db.rpc('payout_display_status', { p_payout: payout.id }),
+  ])
 
-  return { ...payout, risk_signals: data ?? [] }
+  return {
+    ...payout,
+    // §5.1's seven-state vocabulary, derived. `status` keeps every distinction
+    // an operator needs; this is the one a seller is shown.
+    display_status: display ?? null,
+    risk_signals: signals ?? [],
+    routing: routing ?? null,
+  }
 }
 
 /**
@@ -170,6 +196,15 @@ async function retry(
     throw new PayHoldError(
       'invalid_state',
       'This payout is held for review — approve it to send it',
+    )
+  }
+  // `blocked` is deliberately not refused: re-attempting is exactly what a
+  // person wants once they have enabled a route or resolved a dispute, and the
+  // dispatch path re-asks both questions before it sends anything.
+  if (payout.status === 'needs_verification') {
+    throw new PayHoldError(
+      'invalid_state',
+      'This seller has something outstanding — verify them to send it',
     )
   }
 

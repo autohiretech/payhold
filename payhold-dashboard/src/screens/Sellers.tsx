@@ -8,6 +8,7 @@ import {
   countryFlag,
   countryName,
   defaultCurrencyFor,
+  PAYOUT_PROVIDER_LABEL,
   payoutRoute,
 } from '@/lib/rails'
 import {
@@ -29,12 +30,6 @@ import {
 } from '@/components/ui'
 import { formatDate } from '@/lib/format'
 import { useMoneyAction, useSellers } from '@/lib/queries'
-
-const PAYOUT_LABEL: Record<PayoutProvider, string> = {
-  flutterwave_momo: 'Mobile money',
-  flutterwave_bank: 'Bank transfer',
-  stripe_connect: 'Stripe Connect',
-}
 
 /**
  * Payout destinations available in a market, derived from the registry rather
@@ -113,7 +108,7 @@ export function SellersPage() {
                       {countryFlag(s.country)} {countryName(s.country)}
                     </Td>
                     <Td className="text-fg-muted">
-                      {PAYOUT_LABEL[s.payout_provider]}
+                      {PAYOUT_PROVIDER_LABEL[s.payout_provider]}
                     </Td>
                     <Td>
                       <Mono>{s.masked_destination}</Mono>
@@ -248,7 +243,7 @@ function AddSellerForm({ onClose }: { onClose: () => void }) {
               ) : (
                 available.map((p) => (
                   <option key={p} value={p}>
-                    {PAYOUT_LABEL[p]}
+                    {PAYOUT_PROVIDER_LABEL[p]}
                   </option>
                 ))
               )}
