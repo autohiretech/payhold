@@ -5,8 +5,8 @@
   "scripts": {
     "test": "vitest run && npm run test:functions",
     "test:sql": "vitest run",
-    "test:functions": "deno test --allow-env supabase/functions/_shared/",
-    "typecheck": "deno check supabase/functions/_shared/*.ts supabase/functions/*/index.ts",
+    "test:functions": "deno test --config supabase/functions/deno.json --allow-env supabase/functions/_shared/",
+    "typecheck": "deno check --config supabase/functions/deno.json supabase/functions/_shared/*.ts supabase/functions/*/index.ts",
     "db": "supabase"
   },
   "keywords": [],

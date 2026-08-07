@@ -24,6 +24,18 @@ npx supabase functions deploy account deals payment-options sellers balance \
 
 `deno` must be on `PATH` (`~/.deno/bin` on this machine).
 
+**Both Deno scripts pass `--config supabase/functions/deno.json`, and must.**
+Deno looks for its config from the *working directory*, not from the files named
+on the command line, and these run from the project root — where there is no
+`deno.json`, only `package.json`. Without the flag Deno never sees
+`nodeModulesDir: "auto"`, never installs `npm:@supabase/supabase-js@2`, and
+fails on the first `_shared` file that imports it.
+
+This passed locally for a long time while failing every CI run, and the reason is
+worth knowing: `supabase/functions/node_modules` is gitignored, so a dev machine
+that had once resolved those imports kept a directory a fresh checkout never has.
+A green local run is not evidence here — check against a clean copy.
+
 ## Deploying
 
 `.github/workflows/deploy-backend.yml`. **Supabase, not Cloudflare** — the
