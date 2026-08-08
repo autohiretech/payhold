@@ -20,7 +20,7 @@
  */
 
 import type { AuthBackend } from '@/auth'
-import type { DealListFilter, PayHoldClient } from './client'
+import type { DealListFilter, PayHoldClient, PayoutRouting } from './client'
 import {
   PayHoldError,
   type Balance,
@@ -36,6 +36,7 @@ import {
   type PublicCheckout,
   type RailBalance,
   type Refund,
+  type RiskSignal,
   type Seller,
   type SellerWallet,
 } from './types'
@@ -321,6 +322,67 @@ export class MoneyHttpClient implements PayHoldClient {
   async listPayouts(): Promise<Payout[]> {
     const { payouts } = await this.#call<{ payouts: Payout[] }>('/payouts')
     return payouts
+  }
+
+  /**
+   * §5.1's recorded decision for one payout — the state, and why it is that.
+   *
+   * Read rather than re-derived. `payout_decisions` exists because the choice
+   * has to be auditable after the fact, and re-running the routing engine now
+   * would answer "what would we do today" instead of "what did we do".
+   */
+  async getPayoutRouting(id: string): Promise<PayoutRouting> {
+    const { display_status, decision } = await this.#call<{
+      display_status: PayoutRouting['display_status']
+      decision: PayoutRouting['decision']
+    }>(`/payouts/${id}`)
+    return { display_status, decision }
+  }
+
+  /**
+   * A person's retry. **One more attempt, not a fresh series** — the endpoint
+   * re-arms the clock and deliberately leaves `attempts` alone, because
+   * `route_payout` reads that counter to decide whether the seller's verified
+   * backup destination may be used, and zeroing it would send the next attempt
+   * back to the primary that has been failing.
+   */
+  async retryPayout(id: string): Promise<Payout> {
+    const { payout } = await this.#call<{ payout: Payout }>(
+      `/payouts/${id}/retry`,
+      { method: 'POST' },
+    )
+    return payout
+  }
+
+  /**
+   * Invariant 11's narrow alternative to freezing a whole account. Takes a
+   * reason, because the next person to look at the row has nothing else to go
+   * on — but **not** the name: `heldBy` is ignored here and the endpoint takes
+   * the actor from the session, for the reason `verifySeller` does. A caller
+   * that can name its own actor can forge one.
+   */
+  async holdPayout(id: string, _heldBy: string, reason: string): Promise<Payout> {
+    const { payout } = await this.#call<{ payout: Payout }>(
+      `/payouts/${id}/hold`,
+      { method: 'POST', body: JSON.stringify({ reason }) },
+    )
+    return payout
+  }
+
+  /** Clear a hold — a rule's or a person's. Refuses an API key server-side. */
+  async approvePayoutReview(id: string, _approvedBy: string): Promise<Payout> {
+    const { payout } = await this.#call<{ payout: Payout }>(
+      `/payouts/${id}/approve-review`,
+      { method: 'POST' },
+    )
+    return payout
+  }
+
+  async listRiskSignals(dealId?: string): Promise<RiskSignal[]> {
+    const { risk_signals } = await this.#call<{ risk_signals: RiskSignal[] }>(
+      `/risk-signals${dealId ? `?deal_id=${encodeURIComponent(dealId)}` : ''}`,
+    )
+    return risk_signals
   }
 
   // -- Sellers -------------------------------------------------------------
