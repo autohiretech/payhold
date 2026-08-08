@@ -134,11 +134,30 @@ src/api/
 Screens import `api` from `@/api` and nothing else. When `HttpClient` exists,
 `src/api/index.ts` picks it based on an env flag and no screen changes.
 
-**The backend is arriving in slices, and the first one is here.**
-`AiHttpClient` is a decorator: it takes the mock and overrides the eight
-Intelligence methods with calls to the real Edge Functions, leaving every other
-screen on the simulation. `VITE_PAYHOLD_AI_LIVE=1`, alongside the Supabase pair,
-turns it on.
+**The backend is arriving in slices, and two are here.** Each is a decorator
+that takes a client and overrides the methods it can serve, so the cut-over
+lands incrementally instead of in one commit that has to be right about fifty
+endpoints at once. They compose innermost-first in `index.ts`: the mock answers
+whatever nobody has replaced, then `MoneyHttpClient`, then `AiHttpClient`.
+
+- `AiHttpClient` — the eight Intelligence methods. `VITE_PAYHOLD_AI_LIVE=1`.
+- `MoneyHttpClient` — deals, balances, payouts, sellers and seller wallets.
+  `VITE_PAYHOLD_MONEY_LIVE=1`. **Reads, plus `createDeal`**: a wrong read shows
+  a wrong number and a wrong write moves money, so the one write in this slice
+  is the one that charges nothing when it returns.
+
+Three places it does not paper over a difference, deliberately:
+`listDeals`'s `search` is filtered client-side because the endpoint offers no
+such parameter and a query string the backend ignores would be a filter that
+silently does nothing; `listRefunds` **refuses** a call with no deal id rather
+than returning `[]`, because §7.1's records hang off a deal and an empty array
+would look like an answer; and `getDeal` drops the `amounts` the endpoint
+embeds, so a screen asking what was agreed and a screen asking what happened
+still go through different methods.
+
+**Each slice keeps its own flag, and that is not timidity.** Turning one on is a
+claim that the backend holds *this account's* data — the mock's `dsp_0007` is
+not a row in anybody's Postgres — and the dashboard cannot check that for you.
 
 That flag is deliberately *not* the Supabase pair. Real sessions and a real
 ledger move together; real drafts over mock deals do not work at all, because
