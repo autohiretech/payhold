@@ -58,8 +58,29 @@ jobs:
       - name: Test
         run: npm test
 
+      # Vite inlines `VITE_*` at build time, and the build happens *here* —
+      # wrangler below only uploads the finished `dist`. So this is the only
+      # place pointing the dashboard at a backend can be done; the same names
+      # set in Cloudflare's own project settings would never be read, because
+      # Cloudflare is serving static files it did not build.
+      #
+      # Repository **variables**, not secrets. Both end up in the shipped
+      # bundle, and calling something a secret that anyone can read out of the
+      # JavaScript teaches the wrong lesson about which of these is dangerous.
+      # The anon key grants nothing on its own — RLS is what stands behind it.
+      # The service-role key has no `VITE_` name it could hide behind and must
+      # never appear in this file.
+      #
+      # Unset is the honest default: the build falls back to the in-browser
+      # mock, which is a simulation and says so, rather than to a half-pointed
+      # dashboard.
       - name: Build
         run: npm run build
+        env:
+          VITE_SUPABASE_URL: ${{ vars.VITE_SUPABASE_URL }}
+          VITE_SUPABASE_ANON_KEY: ${{ vars.VITE_SUPABASE_ANON_KEY }}
+          VITE_PAYHOLD_MONEY_LIVE: ${{ vars.VITE_PAYHOLD_MONEY_LIVE }}
+          VITE_PAYHOLD_AI_LIVE: ${{ vars.VITE_PAYHOLD_AI_LIVE }}
 
       # Skipped, not failed, until the secrets exist. This workflow lands on
       # main before the Cloudflare project does, and a red X on a commit that
@@ -83,4 +104,4 @@ jobs:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           workingDirectory: payhold-dashboard
-          command: pages deploy dist --project-name=payhold-dashboard --branch=main
+          command: pages deploy dist --project-name=payhold --branch=main
