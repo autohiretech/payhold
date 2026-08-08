@@ -189,7 +189,18 @@ export class StripeProvider implements PaymentProvider {
       // Pinned, because an account's default version moves when Stripe says so
       // and an adapter that changed shape on their schedule is one nobody can
       // reason about.
-      'stripe-version': '2026-06-30.basil',
+      //
+      // **The release-name suffix is part of the version and belongs here.**
+      // Stripe's versions are `YYYY-MM-DD.<train>`; stripping it does not give a
+      // valid version, it gives a different invalid one. What was wrong with the
+      // previous value was the value: `2026-06-30.basil` names a date Stripe has
+      // no release on, on a train that ended at `2025-08-27.basil`. Every call
+      // this adapter made was refused before it reached an endpoint, which is
+      // why no test caught it — they all run against an intercepted fetch.
+      //
+      // Check https://docs.stripe.com/changelog before changing this. A version
+      // that does not exist fails every request identically, whatever the key.
+      'stripe-version': '2026-07-29.dahlia',
     }
     if (options.idempotencyKey) headers['idempotency-key'] = options.idempotencyKey
 
