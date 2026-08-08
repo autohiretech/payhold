@@ -163,7 +163,16 @@ export function SettingsPage() {
           <Card>
             <CardHeader
               title="Currencies"
-              subtitle="A deal can only be created in a currency enabled here."
+              // Selecting none is not "none allowed" — the deals endpoint only
+              // filters when the list is non-empty, so an empty selection is
+              // the absence of a restriction rather than the strictest one.
+              // Saying "only a currency enabled here" was false in exactly the
+              // state every new company starts in.
+              subtitle={
+                currencies.length
+                  ? 'A deal can only be created in a currency enabled here.'
+                  : 'Nothing selected means no restriction — a deal may be created in any currency. Select some to narrow that.'
+              }
             />
             <div className="flex flex-wrap gap-2 px-6 py-5">
               {ALL_CURRENCIES.map((c) => {

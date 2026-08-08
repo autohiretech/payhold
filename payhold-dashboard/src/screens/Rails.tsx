@@ -20,7 +20,6 @@ import {
   Badge,
   Card,
   CardHeader,
-  EmptyState,
   PageHeader,
   Select,
   Skeleton,
@@ -116,6 +115,14 @@ export function RailsPage() {
   const statusFor = (p: Provider) => railStatus.data?.find((r) => r.provider === p)
   const anyConnected = railStatus.data?.some((r) => r.connected && r.provider !== 'fake')
   const currencies = settings.data?.currencies ?? []
+  // **An empty list is "no restriction", not "nothing enabled."** `deals`
+  // only filters when the list is non-empty — `settings.currencies.length > 0
+  // && !settings.currencies.includes(...)` — so a company that has never opened
+  // the Settings screen can create a deal in any currency. This table used to
+  // render an empty state for that case, which told an operator the opposite of
+  // what was true and sent them to Settings to enable something that was
+  // already unrestricted.
+  const restricted = currencies.length > 0
   // The first configured currency is the tenant's home currency — everything
   // else is a foreign balance with its own settlement rules.
   const homeCurrency = currencies[0] ?? 'RWF'
@@ -259,11 +266,13 @@ export function RailsPage() {
       <Card className="mb-6">
         <CardHeader
           title="Full coverage table"
-          subtitle="Every configured rail, filtered to the currencies you accept."
+          subtitle={
+            currencies.length
+              ? 'Every configured rail, filtered to the currencies you accept.'
+              : 'Every configured rail. You have set no currency restriction, so a deal may be created in any of them.'
+          }
         />
-        {!currencies.length ? (
-          <EmptyState title="No currencies enabled" body="Enable one in Settings." />
-        ) : (
+        {(
           <Table>
             <thead>
               <tr>
@@ -276,7 +285,7 @@ export function RailsPage() {
             </thead>
             <tbody>
               {RAILS.filter(
-                (r) => r.collect && r.currencies.some((c) => currencies.includes(c)),
+                (r) => r.collect && (!restricted || r.currencies.some((c) => currencies.includes(c))),
               ).map((rail) => (
                 <tr
                   key={`${rail.country}-${rail.method}-${rail.provider}`}
@@ -299,9 +308,10 @@ export function RailsPage() {
                     )}
                   </Td>
                   <Td className="text-fg-muted">
-                    {rail.currencies
-                      .filter((c) => currencies.includes(c))
-                      .join(' · ')}
+                    {(restricted
+                      ? rail.currencies.filter((c) => currencies.includes(c))
+                      : rail.currencies
+                    ).join(' · ')}
                   </Td>
                   <Td>
                     <ProviderChip provider={rail.provider} />
