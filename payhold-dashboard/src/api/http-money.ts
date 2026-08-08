@@ -29,6 +29,7 @@ import {
   type ConfirmSide,
   type CreateDealInput,
   type CreateDealResult,
+  type CreateSellerInput,
   type Deal,
   type DealAmounts,
   type PaymentMethod,
@@ -38,6 +39,8 @@ import {
   type Refund,
   type RiskSignal,
   type Seller,
+  type SellerCapabilities,
+  type SellerDestination,
   type SellerWallet,
 } from './types'
 
@@ -390,6 +393,57 @@ export class MoneyHttpClient implements PayHoldClient {
   async listSellers(): Promise<Seller[]> {
     const { sellers } = await this.#call<{ sellers: Seller[] }>('/sellers')
     return sellers
+  }
+
+  /**
+   * The raw destination crosses the wire exactly once, to be tokenized, and is
+   * never stored — §6. What comes back is the token's mask.
+   */
+  async createSeller(input: CreateSellerInput): Promise<Seller> {
+    const { seller } = await this.#call<{ seller: Seller }>('/sellers', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    })
+    return seller
+  }
+
+  async getSellerCapabilities(sellerId: string): Promise<SellerCapabilities> {
+    return await this.#call<SellerCapabilities>(
+      `/sellers/${sellerId}/capabilities`,
+    )
+  }
+
+  async listSellerDestinations(sellerId?: string): Promise<SellerDestination[]> {
+    if (!sellerId) {
+      // §5.1's destinations hang off a seller and there is no account-wide
+      // list. Returning [] would read as "this account has none".
+      throw new PayHoldError(
+        'policy_violation',
+        'Destinations are read per seller — pass a seller id',
+      )
+    }
+
+    const { destinations } = await this.#call<{
+      destinations: SellerDestination[]
+    }>(`/sellers/${sellerId}/destinations`)
+    return destinations
+  }
+
+  /**
+   * §12's attestation. `verifiedBy` is **not sent** — the endpoint takes the
+   * actor from the session, and it refuses an API key outright, because a
+   * client that could verify its own sellers has turned KYC into a field it
+   * sets. The argument stays for the mock, which has no session to read.
+   */
+  async verifySeller(
+    sellerId: string,
+    _verifiedBy: string,
+    verified: boolean,
+  ): Promise<Seller> {
+    return await this.#call<Seller>(`/sellers/${sellerId}/verify`, {
+      method: 'POST',
+      body: JSON.stringify({ verified }),
+    })
   }
 }
 
