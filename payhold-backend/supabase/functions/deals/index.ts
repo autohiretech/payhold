@@ -619,6 +619,28 @@ Deno.serve(handler(async (req) => {
     throw new PayHoldError('policy_violation', `${req.method} is not supported here`)
   }
 
+  // §7.1's refund records. Its own read rather than a field on the deal,
+  // because a refund has a *lifetime*: §7.1.6 has Alipay and WeChat Pay
+  // settling asynchronously up to 90 days out, so "how much went back" and
+  // "what is still in flight" are different questions and only this one
+  // answers the second.
+  //
+  // `getDeal` first, and the 404 it raises is the tenant scoping — a refund
+  // list must not confirm that another account's deal exists.
+  if (req.method === 'GET' && action === 'refunds') {
+    await getDeal(db, caller, id)
+
+    const { data } = await db
+      .from('refunds')
+      .select('id, deal_id, amount, currency, reason, line_items, status, ' +
+        'actor, provider_ref, created_at, settled_at')
+      .eq('deal_id', id)
+      .eq('tenant_id', caller.tenant_id)
+      .order('created_at', { ascending: false })
+
+    return json(req, { refunds: data ?? [] })
+  }
+
   if (req.method === 'GET' && !action) {
     const deal = await withConfirmations(db, await getDeal(db, caller, id))
 

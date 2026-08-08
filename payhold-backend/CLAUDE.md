@@ -1313,22 +1313,35 @@ violated by one row, and Postgres does not promise which it reports.
   AI methods behind `VITE_PAYHOLD_AI_LIVE`. The rest is still one file plus one
   line in `src/api/index.ts`. Its sign-in is already real code against
   `functions/account/` — `src/auth/supabase.ts` — behind the same env switch.
-- **Four reads Phase 10's screens now expect, and this side does not serve.**
-  The dashboard's mock implements them and its screens call them, so they are
-  the shape `HttpClient` will need:
+- ~~Four reads Phase 10's screens expect and this side does not serve.~~
+  **All four are served now**, which is what unblocks `HttpClient`:
 
-  | Client method | Wants | Behind it |
-  |---|---|---|
-  | `getDealAmounts` | `GET /v1/deals/:id/amounts` | `deal_amounts(deal)`, which exists |
-  | `listRefunds` | `GET /v1/deals/:id/refunds` | the `refunds` table, which exists |
-  | `listSellerDestinations` | `GET /v1/sellers/:id/destinations` | `seller_destinations`, which exists |
-  | `listCheckoutSessions` | `GET /v1/checkout/sessions` | `checkout_sessions`, which exists |
+  | Client method | Endpoint |
+  |---|---|
+  | `getDealAmounts` | embedded as `amounts` on `GET /v1/deals/:id` |
+  | `listRefunds` | `GET /v1/deals/:id/refunds` |
+  | `listSellerDestinations` | `GET /v1/sellers/:id/destinations` |
+  | `listCheckoutSessions` | `GET /v1/checkout/sessions[?deal_id=]` |
 
-  Every one is a select over something already built — routing and shaping, not
-  schema. The session list is the only one with a judgement in it: **strip the
-  token on anything not live.** A withdrawn or expired token opens nothing, so
-  carrying it would be a plaintext credential in a list that outlives the
-  sessions themselves. The mock does that already.
+  Each is a select over something already built. Three things they do that are
+  worth not undoing:
+
+  **The session list strips the token on anything not live.** A token *is* the
+  credential — `/checkout/public/:token` takes no other — so a dead one in a
+  list would be a plaintext credential outliving the session it belonged to.
+  Liveness comes from `state()`, this file's mirror of SQL's
+  `checkout_session_state`, rather than from the function itself: that function
+  takes a **row**, so reaching it per session would be a round trip each on a
+  page whose purpose is showing them together.
+
+  **The destinations list never selects `beneficiary_token`.** A screen needs
+  the mask; the token is what money moves against, and a list endpoint is
+  exactly where one would leak.
+
+  **Both seller and deal reads scope through the existing 404 first**
+  (`ownSeller`, `getDeal`), so a sub-resource cannot confirm that another
+  account's row exists — invariant 8, which a new sub-route is the easiest
+  place to forget.
 - **A counter-statement column.** §8's respondent files their case as evidence
   of kind `message` rather than into a field of its own. Worth knowing when
   reading a draft that says the seller never replied — it may mean they replied

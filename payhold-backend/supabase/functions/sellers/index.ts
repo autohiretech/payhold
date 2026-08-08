@@ -381,6 +381,29 @@ Deno.serve(handler(async (req) => {
     return await readCapabilities(req, db, caller, id)
   }
 
+  // §5.1's preferred destination and verified backup — which one pair of
+  // columns on the seller could not express, and which the payout path now
+  // reads instead of `sellers.beneficiary_token`.
+  //
+  // `beneficiary_token` is **not** selected. It is the provider-side handle
+  // money moves against; a screen needs the mask and never the token, and a
+  // list endpoint is exactly where one would leak.
+  if (req.method === 'GET' && id && action === 'destinations') {
+    await ownSeller(db, caller, id)
+
+    const { data } = await db
+      .from('seller_destinations')
+      .select('id, seller_id, label, country, payout_currency, payout_provider, ' +
+        'masked_destination, is_primary, is_backup, verified_at, ' +
+        'security_hold_until, created_at')
+      .eq('seller_id', id)
+      .eq('tenant_id', caller.tenant_id)
+      .order('is_primary', { ascending: false })
+      .order('created_at', { ascending: true })
+
+    return json(req, { destinations: data ?? [] })
+  }
+
   if (req.method === 'GET' && id && action === 'balance') {
     return await readWallet(req, db, caller, id)
   }

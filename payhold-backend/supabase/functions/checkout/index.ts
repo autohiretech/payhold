@@ -357,6 +357,58 @@ Deno.serve(handler(async (req) => {
   const caller = await resolveCaller(db, req)
 
   if (req.method === 'POST' && !key) return await create(req, db, caller)
+
+  /**
+   * Every link issued, newest first — including the withdrawn and the expired.
+   *
+   * A live session is already reachable from its deal. This answers a different
+   * question: "which links has this account handed out", which is a record
+   * rather than a state, and is where a support conversation about a payment
+   * link starts.
+   *
+   * **The token is stripped from anything not live, and that is the one
+   * judgement in this endpoint.** A token *is* the credential — `/checkout/
+   * public/:token` takes no other — so carrying a dead one in a list would put
+   * a plaintext credential in a response that outlives the session it belonged
+   * to. A withdrawn or expired token opens nothing today, and the reason to
+   * withhold it is that "opens nothing" is a property of the session's state
+   * rather than of the string, and states get changed.
+   *
+   * Liveness comes from `state()`, never from the stored status — expiry is
+   * derived for the same reason it is derived everywhere else, because a stored
+   * value would need a writer and the writer would be a sweep that had not run
+   * yet. `state()` is this file's existing mirror of SQL's
+   * `checkout_session_state`, and it is used rather than the function itself
+   * because that function takes a **row**: reaching it per session would be a
+   * round trip each, on a page whose whole purpose is showing them together.
+   */
+  if (req.method === 'GET' && !key) {
+    const dealId = new URL(req.url).searchParams.get('deal_id')
+
+    let query = db
+      .from('checkout_sessions')
+      .select('id, deal_id, token, status, return_url, method, network, ' +
+        'provider, provider_ref, payment_link, expires_at, completed_at, created_at')
+      .eq('tenant_id', caller.tenant_id)
+      .order('created_at', { ascending: false })
+
+    if (dealId) query = query.eq('deal_id', dealId)
+
+    const { data, error } = await query
+    if (error) throw new Error(`checkout session list failed: ${error.message}`)
+
+    const sessions = ((data ?? []) as unknown as CheckoutSession[]).map((row) => {
+      const current = state(row)
+      return {
+        ...row,
+        state: current,
+        token: current === 'open' ? row.token : null,
+      }
+    })
+
+    return json(req, { sessions })
+  }
+
   if (req.method === 'GET' && key && !action) return await show(req, db, caller, key)
   if (req.method === 'POST' && key && action === 'cancel') {
     return await cancel(req, db, caller, key)
