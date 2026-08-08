@@ -108,7 +108,7 @@ Deno.test('a charge creates an order and hands back where to send the buyer', as
       deal_id: 'deal-1',
       amount: 10_000,
       currency: 'USD',
-      method: 'card',
+      method: 'wallet',
       return_url: 'https://pay.example/done',
       three_d_secure: true,
       idempotency_key: 'idem-1',
@@ -256,9 +256,10 @@ Deno.test('verify reads the capture, and reports their fee separately', async ()
     // The rail genuinely took it, so it is a provider_fee and reduces what
     // reconciliation expects — it belongs in no retained bucket.
     assertEquals(v.fee, 349)
-    // PayPal does not say how the buyer funded their wallet, and guessing
-    // would put a claim in the record nobody made.
-    assertEquals(v.method, null)
+    // A PayPal payment is a wallet payment. How the buyer funded *their*
+    // wallet is PayPal's business and they do not tell us — so `wallet` is
+    // the whole honest answer, and it used to be null for want of the value.
+    assertEquals(v.method, 'wallet')
   } finally {
     restore()
   }

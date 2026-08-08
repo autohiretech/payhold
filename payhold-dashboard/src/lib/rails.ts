@@ -179,12 +179,14 @@ export const SUPPORTED_CURRENCIES: Currency[] = [
 
 export const METHOD_LABEL: Record<PaymentMethod, string> = {
   card: 'Card',
+  wallet: 'Wallet',
   mobile_money: 'Mobile money',
   bank_transfer: 'Bank transfer',
 }
 
 export const METHOD_BLURB: Record<PaymentMethod, string> = {
   card: 'Visa or Mastercard. Verified with 3D Secure.',
+  wallet: 'Pay from your PayPal, Cash App or Alipay balance.',
   mobile_money: 'Pay from your wallet. You will get a prompt on your phone.',
   bank_transfer: 'Transfer directly from your bank account.',
 }

@@ -346,6 +346,16 @@ function paymentOptionsFor(method: PaymentMethod): string {
       return 'mobilemoneyrwanda,mobilemoneyghana,mobilemoneyuganda,mobilemoneyzambia,mpesa'
     case 'bank_transfer':
       return 'banktransfer,account'
+    case 'wallet':
+      // §9's wallet rails are PayPal's, Stripe's and a China partner's — none
+      // of them Flutterwave's. Routing should never have sent this here, and
+      // failing loudly beats quietly offering a card to somebody who chose a
+      // wallet, which is the same refusal `StripeProvider` makes for mobile
+      // money in the opposite direction.
+      throw new PayHoldError(
+        'policy_violation',
+        'Flutterwave cannot collect a wallet payment',
+      )
   }
 }
 

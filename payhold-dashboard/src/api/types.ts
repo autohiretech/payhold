@@ -51,7 +51,18 @@ export type Provider =
  * method: there are a dozen of them across ten countries and they all behave
  * identically to the engine.
  */
-export type PaymentMethod = 'card' | 'mobile_money' | 'bank_transfer'
+/**
+ * How the buyer paid.
+ *
+ * `wallet` covers §9's wallet rails — PayPal, Venmo, Cash App Pay, Alipay,
+ * WeChat Pay. They have no card scheme, are not 3DS-eligible and dispute
+ * through a different process, so recording one as a `card` would put a
+ * claim in the ledger nobody made.
+ *
+ * Stripe Link is **not** one: it is card-backed and disputes as a card does,
+ * so it is a faster way to present a card rather than a different instrument.
+ */
+export type PaymentMethod = 'card' | 'wallet' | 'mobile_money' | 'bank_transfer'
 
 
 // ---------------------------------------------------------------------------

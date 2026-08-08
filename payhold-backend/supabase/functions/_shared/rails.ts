@@ -56,6 +56,7 @@ export const SCHEME_LABEL: Record<CardScheme, string> = {
 }
 
 export const METHOD_LABEL: Record<PaymentMethod, string> = {
+  wallet: 'Wallet',
   card: 'Card',
   mobile_money: 'Mobile money',
   bank_transfer: 'Bank transfer',
@@ -64,6 +65,7 @@ export const METHOD_LABEL: Record<PaymentMethod, string> = {
 /** What a buyer is told about a method, in their words rather than ours. */
 export const METHOD_BLURB: Record<PaymentMethod, string> = {
   card: 'Visa or Mastercard. Verified with 3D Secure.',
+  wallet: 'Pay from your PayPal, Cash App or Alipay balance.',
   mobile_money: 'Pay from your wallet. You will get a prompt on your phone.',
   bank_transfer: 'Transfer directly from your bank account.',
 }

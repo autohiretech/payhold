@@ -284,9 +284,10 @@ export class PayPalProvider implements PaymentProvider {
    * difference between a payment and a hold against damage.
    */
   async charge(req: ChargeRequest): Promise<ChargeResult> {
-    if (req.method !== 'card' && req.method !== 'bank_transfer') {
-      // A wallet rail has no mobile money. Refused rather than silently
-      // charged some other way — the same refusal `StripeProvider` makes.
+    if (req.method !== 'wallet' && req.method !== 'card') {
+      // A wallet rail has no mobile money and no bank debit. Refused rather
+      // than silently charged some other way — the same refusal
+      // `StripeProvider` makes for mobile money in the other direction.
       throw new PayHoldError(
         'policy_violation',
         `PayPal cannot take a ${req.method} payment`,
@@ -370,9 +371,11 @@ export class PayPalProvider implements PaymentProvider {
       amount: amount ? fromValue(amount.value, currency) : 0,
       currency,
       status: toStatus(capture?.status ?? orderStatus),
-      // PayPal does not tell us how the buyer funded their wallet, and
-      // guessing 'card' would put a claim in the record nobody made.
-      method: null,
+      // A PayPal payment is a wallet payment. How the buyer funded *their*
+      // wallet is PayPal's business and they do not tell us — guessing 'card'
+      // would put a claim in the record nobody made, which is the gap
+      // `payment_method`'s `wallet` value exists to close.
+      method: 'wallet',
       network: 'paypal',
       fee,
     }

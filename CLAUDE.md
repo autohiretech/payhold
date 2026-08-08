@@ -250,15 +250,31 @@ interface PaymentProvider {
   no degraded mode. **Built is not enabled**: no signed agreement, and §16 wants
   written payout confirmation per market, so the capability row stays off and
   `payout_routes_require_live_provider` keeps its routes refused.
-- `cash_app_pay`, `china_wallet_partner` — **declared and unbuilt**, and neither
-  is waiting on code the way PayPal was. Cash App Pay is not an API of its own:
-  it is reached through Square or offered by Stripe as a payment-method type,
-  and which of those it is decides whether it is an adapter at all or a method
-  on one we already have. `china_wallet_partner` names a partner nobody has
+- **Cash App Pay rides Stripe, and is deliberately not an adapter.** It has no
+  API of its own — Square or Stripe — and Square would mean a fourth set of
+  credentials, a fourth webhook function and a fourth balance for `reconcile`
+  to compare per rail, to buy collection only, since Cash App cannot receive a
+  marketplace payout from us. Through Stripe it is a payment-method type on an
+  adapter that already exists, in a market Stripe already covers. Enabling it
+  is a Stripe dashboard setting plus a US/USD route, not a class, so its
+  capability row stays `implemented = false` — the honest reading of that column
+  is "is there a class behind this enum value", and there should not be.
+- `china_wallet_partner` — **declared and unbuilt**, and not waiting on code the
+  way PayPal was. `china_wallet_partner` names a partner nobody has
   chosen — Antom, Adyen and Airwallex are different APIs — behind §5's bar on
   promising cross-border payout until an approved local structure exists, which
-  is a legal arrangement rather than an adapter. `loadProvider` throws for both
+  is a legal arrangement rather than an adapter. `loadProvider` throws for it
   rather than falling back to the fake.
+
+**`wallet` is a payment method as of `20260808000004`**, and its absence was a
+real gap rather than an oversight found late. §9 names five wallet rails and
+`payment_method` had nowhere to put any of them, so every one would have arrived
+as a `card` — false in a way that matters, since a wallet payment has no card
+scheme, is not 3DS-eligible, and disputes through a different process. Stripe's
+`toMethod` had been mapping `cashapp` to null rather than lie, which meant a deal
+funded by Cash App Pay recorded no method at all. **Stripe Link stays `card`**:
+it is card-backed and disputes as a card does, so it is a faster way to present
+one rather than a different instrument.
 
 **What each adapter can do is a row, not a branch.** `provider_capabilities`
 carries §9's eight flags plus `implemented` and `enabled`, and those two are

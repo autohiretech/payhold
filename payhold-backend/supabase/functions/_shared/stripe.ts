@@ -96,7 +96,17 @@ function form(params: Record<string, unknown>, prefix = ''): string[] {
 /** Their payment-method vocabulary, mapped to ours. */
 function toMethod(type: string | null | undefined): PaymentMethod | null {
   if (!type) return null
+  // Link is card-backed: it carries a scheme, it is 3DS-eligible and it
+  // disputes as a card does. A faster way to present a card, not a different
+  // instrument — so it stays `card` while the true wallets below do not.
   if (type === 'card' || type === 'link') return 'card'
+  // §9's wallet rails that reach us through Stripe. `cashapp` is the one that
+  // made this necessary: it used to fall through to null, so a deal funded by
+  // Cash App Pay recorded no method at all.
+  if (type === 'cashapp' || type === 'paypal' || type === 'alipay' ||
+      type === 'wechat_pay') {
+    return 'wallet'
+  }
   if (type === 'us_bank_account' || type === 'sepa_debit' || type === 'acss_debit') {
     return 'bank_transfer'
   }
