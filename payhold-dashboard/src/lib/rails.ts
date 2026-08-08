@@ -292,10 +292,12 @@ export const PROVIDER_BLURB: Record<Provider, string> = {
   stripe:
     'International card acquiring. Charges a card issued anywhere in the world, but can only pay out in the countries Stripe operates in.',
   fake: 'No provider keys configured. Payments are simulated end to end so the product works without a live account.',
-  // Declared, not built — §29.3. The blurb says so rather than describing a
-  // capability nobody can use yet.
+  // Built but not enabled, which is the distinction `implemented` and `enabled`
+  // were split to draw — and the blurb has to draw it too, because the two need
+  // different next actions. Saying "not built" here while a connect form sits
+  // underneath would be the card contradicting itself.
   paypal:
-    'Declared so a seller who picks PayPal or Venmo gets a specific answer. No adapter is built and no agreement is signed.',
+    'Wallet payments and payouts in ~200 markets, and the rail that carries Venmo. You can connect an account, but the rail stays switched off until a payout agreement is signed.',
   cash_app_pay:
     'Declared for the United States. No adapter is built and no agreement is signed.',
   china_wallet_partner:
