@@ -221,6 +221,27 @@ export class PayPalProvider implements PaymentProvider {
     return this.token.value
   }
 
+  /**
+   * Prove the client id and secret work, and nothing else.
+   *
+   * Public because connecting an account has to check the credentials before
+   * storing them, and the token exchange is the *only* call that tests exactly
+   * the credentials. `balances()` is the equivalent probe on the other two
+   * rails, but here it reads `/v1/reporting/balances`, which needs a reporting
+   * permission an app can perfectly well be missing while still being able to
+   * take and send money — refusing a connection on that would turn away a
+   * working account.
+   *
+   * It doubles as the mode check. Sandbox and live are different *hosts* on
+   * this rail, so a sandbox client id simply does not authenticate against the
+   * live one. That is a stronger check than the key-prefix inspection the other
+   * two rails get rather than a weaker one, and it is why `connect` has no
+   * prefix test to run here.
+   */
+  async authenticate(): Promise<void> {
+    await this.accessToken()
+  }
+
   private async call<T>(
     path: string,
     options: {
@@ -712,5 +733,43 @@ export class PayPalProvider implements PaymentProvider {
     } catch {
       return false
     }
+  }
+}
+
+/**
+ * Confirm a credential set actually works before it is stored.
+ *
+ * Same contract as `validateStripeCredentials` and its Flutterwave twin:
+ * storing unvalidated keys moves the failure to the first real charge, in front
+ * of a buyer.
+ *
+ * Two differences from the other two, both consequences of the rail:
+ *
+ *   - **The probe is the token exchange**, not `balances()`. See
+ *     `authenticate()` — reporting is a separate permission here, and an app
+ *     without it can still take and send money.
+ *   - **`currencies` is best-effort.** The caller uses `ok` and `reason`; the
+ *     list is informational, so a missing reporting permission returns an empty
+ *     one rather than failing a connection that is fine.
+ */
+export async function validatePayPalCredentials(
+  creds: PayPalCredentials,
+): Promise<{ ok: true; currencies: Currency[] } | { ok: false; reason: string }> {
+  const provider = new PayPalProvider(creds, '')
+
+  try {
+    await provider.authenticate()
+  } catch (err) {
+    return {
+      ok: false,
+      reason: err instanceof PayHoldError ? err.message : 'Could not reach PayPal',
+    }
+  }
+
+  try {
+    const balances = await provider.balances()
+    return { ok: true, currencies: balances.map((b) => b.currency) }
+  } catch {
+    return { ok: true, currencies: [] }
   }
 }

@@ -107,7 +107,12 @@ export function RailsPage() {
   const railStatus = useRailStatus()
   const requirements = useProviderRequirements()
 
-  const providers: Provider[] = ['flutterwave', 'stripe']
+  // The rails with an adapter behind them, which is what makes a connect form
+  // meaningful. `requirements` is the backend's own list and the source of
+  // truth for the *fields*; this order is the one an operator reads them in.
+  // Anything declared and unbuilt has no class to validate credentials, so it
+  // is deliberately absent rather than rendered as a form that cannot succeed.
+  const providers: Provider[] = ['flutterwave', 'stripe', 'paypal']
   const statusFor = (p: Provider) => railStatus.data?.find((r) => r.provider === p)
   const anyConnected = railStatus.data?.some((r) => r.connected && r.provider !== 'fake')
   const currencies = settings.data?.currencies ?? []

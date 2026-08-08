@@ -39,31 +39,46 @@ against provider test keys.
 
 ## Deploying
 
-Cloudflare Pages, published by `.github/workflows/deploy-dashboard.yml` on a
-push to `main` that touches this directory. Tests and typecheck run first and
-the publish depends on them — which is the reason to use Actions rather than
-Cloudflare's own Git integration, since that builds whatever is on main whether
-or not it works.
+**What actually publishes the site is Cloudflare's own Git integration, not the
+GitHub workflow.** The `payhold` Pages project is connected to this repository
+and runs `npm run build` in `payhold-dashboard` on every push to `main`. That is
+worth knowing before changing anything here, because this file used to describe
+the opposite and the difference cost a broken production deploy: the workflow
+builds and tests, then **skips** the publish, because `CLOUDFLARE_API_TOKEN` has
+never been set as a GitHub secret.
 
-One-time setup, none of which can be done from here:
+So there are two build environments and they do not share variables:
 
-1. **Create the Pages project.** Cloudflare dashboard → Workers & Pages →
-   Create → Pages → *Direct Upload*, named `payhold-dashboard`. Direct upload,
-   not Git — the workflow uploads the build, so connecting Git as well would
-   give you two pipelines racing to publish.
-2. **Create an API token** with the *Cloudflare Pages: Edit* permission.
-3. **Add two GitHub secrets** under Settings → Secrets and variables → Actions:
-   `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID`.
+| | Where its `VITE_*` come from | What it does |
+|---|---|---|
+| Cloudflare Pages (Git) | the **project's** build environment variables, set in the Cloudflare dashboard or via the API | builds and publishes |
+| `.github/workflows/deploy-dashboard.yml` | GitHub repository *variables* | typechecks, tests, builds, and skips publishing while the token is unset |
 
-Until those exist the workflow builds and tests and skips the publish, rather
-than failing.
+**Both `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY` must be set on the
+Pages project itself**, for production *and* preview. They were not, which is
+why the first build after the mock was deleted shipped a bundle that threw
+`VITE_SUPABASE_URL must be set at build time` before rendering a pixel. Setting
+them in GitHub does nothing for the deployed site.
+
+The consequence to be deliberate about: **nothing gates the publish.**
+Cloudflare builds whatever is on `main` whether or not the tests pass. The
+workflow's suites are a signal you have to go and read. Closing that is a
+choice between two shapes, and neither is free:
+
+1. **Keep the Git integration** and treat the workflow as CI. Simple, one
+   pipeline, no token to manage — and a red suite still ships.
+2. **Disconnect Git in Cloudflare** and give the workflow
+   `CLOUDFLARE_API_TOKEN` + `CLOUDFLARE_ACCOUNT_ID` so the publish depends on
+   the tests. That is what this file originally described and what the workflow
+   was written for. Leaving *both* connected is the one option that is simply
+   wrong: two pipelines race to publish and the slower one wins, which is the
+   older one.
 
 `.env.example` is the whole configuration surface, and all of it is public by
-design. `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY` are set at build time
-as repository *variables*, not secrets, since they end up in the bundle either
-way. **Both are required and the build fails without them** — there is no
-fallback to simulate against. The service-role key has no `VITE_` name it could
-hide behind and must never appear here.
+design — the anon key grants nothing on its own, and the service-role key has no
+`VITE_` name it could hide behind. **Both values are required and there is no
+fallback to simulate against**, which is the whole point: a build that cannot
+reach a backend fails loudly instead of rendering invented numbers.
 
 `public/_redirects` is what makes client-side routing work: without it a buyer
 opening `/pay/:token` from an email gets Cloudflare's 404, because there is no
@@ -737,6 +752,35 @@ it against the provider's own country/method documentation and the signed
 account agreement, then flip the flag. A wrong row means a charge that cannot be
 collected — or money collected that cannot be paid out. `rails.test.ts` asserts
 nothing is marked verified, so flipping one forces a deliberate update.
+
+### Connecting one
+
+`components/ConnectProvider.tsx` is the form, and `Rails.tsx` decides which
+rails get one: Flutterwave, Stripe and **PayPal**. The *fields* are never
+hardcoded — `listProviderRequirements` returns the backend's own
+`REQUIRED_FIELDS`, so a rail that gains a credential does not need a screen
+change. What lives here is the vocabulary around them.
+
+Three things the form does deliberately, beyond the three in its header:
+
+- **Hints are keyed by rail, not by field name.** The map used to be flat, which
+  showed Flutterwave's `FLWSECK_TEST-` hint to somebody pasting a Stripe secret
+  key. A wrong hint is worse than none: it sends you back to the provider's
+  dashboard to look for a value that does not exist.
+- **Only the secret fields are masked.** A publishable key is printed in a
+  checkout page's own JavaScript and a webhook id names a resource; dots over
+  them buy nothing and cost you the ability to check a pasted string against the
+  provider's dashboard. Masking everything is also how the one field that *is*
+  dangerous stops standing out.
+- **The live-mode hint says it will be refused.** §16's gate rejects live
+  credentials until the checklist is signed off, and finding that out before
+  fetching a live key is friendlier than finding out after pasting one.
+
+**Connecting PayPal will not make PayPal work**, and the screen should not
+imply otherwise. Its `provider_capabilities.enabled` is false, so a stored and
+validated account still gets `paypal is switched off` from `loadProvider`.
+Turning it on is an operator's row change gated on a signed agreement, not
+anything this dashboard can do.
 
 Two rules are structural rather than configurable:
 

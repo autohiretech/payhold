@@ -9,8 +9,11 @@ import './index.css'
 const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
-      // The mock is local, so refetching costs nothing — and it keeps every
-      // screen honest after a simulated cron run moves money underneath it.
+      // Nothing here is cached across a mutation: a cron pass, a provider
+      // webhook or another operator can move money underneath a screen at any
+      // moment, and a stale balance is the one number that must not be shown
+      // with confidence. `retry: false` because a failed money read should
+      // surface rather than be retried quietly into looking fine.
       staleTime: 0,
       retry: false,
       refetchOnWindowFocus: false,

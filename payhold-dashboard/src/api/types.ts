@@ -1161,6 +1161,21 @@ export interface TenantSettings {
    * zero would block every payout on the first transient error a rail has.
    */
   payout_retry_max_attempts?: number
+  /**
+   * `wallet` stops the cron sending cleared money nobody has asked for. It
+   * changes **when**, not whether: money still clears on the same window and
+   * still lands in `available`, and `request_withdrawal` is what stamps it due.
+   */
+  payout_mode?: 'auto' | 'wallet'
+  /** §12's two AI features, switchable without switching the layer off. */
+  ai_dispute_assistant?: boolean
+  ai_risk_narrator?: boolean
+  /** §5.1's change protection: how long a moved destination holds a payout. */
+  destination_hold_hours?: number
+  /** After this, a sanctions screening is stale and the gate holds the payout. */
+  sanctions_max_age_days?: number
+  /** §10.1: how long a hosted payment link lives. */
+  checkout_session_hours?: number
 }
 
 /**

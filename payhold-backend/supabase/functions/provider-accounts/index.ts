@@ -27,6 +27,10 @@ import {
   type FlutterwaveCredentials,
 } from '../_shared/flutterwave.ts'
 import {
+  validatePayPalCredentials,
+  type PayPalCredentials,
+} from '../_shared/paypal.ts'
+import {
   validateStripeCredentials,
   type StripeCredentials,
 } from '../_shared/stripe.ts'
@@ -151,15 +155,24 @@ async function connect(
   )
 
   // A live secret key connected as "test" would move real money on the
-  // sandbox walkthrough. Flutterwave marks test keys explicitly, so this is
-  // checkable rather than a matter of trust.
-  const isTestKey = body.provider === 'flutterwave'
+  // sandbox walkthrough. Both key-based rails mark the mode in the key itself,
+  // so this is checkable rather than a matter of trust.
+  //
+  // **PayPal is absent on purpose, and returns null rather than false.** It has
+  // no secret key to inspect — the credential is an OAuth2 client id and secret
+  // that look identical in both modes — and sandbox and live are different
+  // *hosts*. So the mode is proven by the token exchange in
+  // `validatePayPalCredentials` instead: a sandbox client id does not
+  // authenticate against the live host. Reading a missing `secret_key` here is
+  // what used to make this line throw for that rail.
+  const isTestKey: boolean | null = body.provider === 'flutterwave'
     ? credentials.secret_key.includes('_TEST-')
-    // Stripe marks the mode in the key prefix, `sk_test_` against `sk_live_`,
-    // which makes this checkable on both rails rather than a matter of trust.
-    : credentials.secret_key.startsWith('sk_test_')
+    : body.provider === 'stripe'
+    // Stripe marks the mode in the key prefix, `sk_test_` against `sk_live_`.
+    ? credentials.secret_key.startsWith('sk_test_')
+    : null
 
-  if (isTestKey !== (body.mode === 'test')) {
+  if (isTestKey !== null && isTestKey !== (body.mode === 'test')) {
     throw new PayHoldError(
       'policy_violation',
       isTestKey
@@ -171,11 +184,19 @@ async function connect(
 
   // Prove the keys work BEFORE storing them. Storing unvalidated credentials
   // moves the failure to the first real charge, in front of a buyer.
+  //
+  // PayPal is handed the mode because its adapter picks a host from it, which
+  // is also what makes the call above unnecessary for that rail.
   const check = body.provider === 'flutterwave'
     ? await validateFlutterwaveCredentials(
       credentials as unknown as FlutterwaveCredentials,
     )
-    : await validateStripeCredentials(credentials as unknown as StripeCredentials)
+    : body.provider === 'stripe'
+    ? await validateStripeCredentials(credentials as unknown as StripeCredentials)
+    : await validatePayPalCredentials({
+      ...(credentials as unknown as PayPalCredentials),
+      mode: body.mode,
+    })
 
   if (!check.ok) {
     throw new PayHoldError(

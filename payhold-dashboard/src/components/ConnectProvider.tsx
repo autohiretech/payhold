@@ -27,19 +27,59 @@ import { Button, Card, Field, Input, Select, cx } from './ui'
 const FIELD_LABEL: Record<string, string> = {
   secret_key: 'Secret key',
   public_key: 'Public key',
+  publishable_key: 'Publishable key',
   encryption_key: 'Encryption key',
   webhook_hash: 'Webhook secret hash',
   webhook_secret: 'Webhook signing secret',
+  client_id: 'Client ID',
+  client_secret: 'Client secret',
+  webhook_id: 'Webhook ID',
 }
 
-/** What a correct value looks like, so a mispaste is obvious before submitting. */
-const FIELD_HINT: Record<string, string> = {
-  secret_key: 'Starts FLWSECK_TEST- for test, FLWSECK- for live',
-  public_key: 'Starts FLWPUBK',
-  encryption_key: 'Shown next to your API keys',
-  webhook_hash: 'The value you set as the secret hash on the webhook page',
-  webhook_secret: 'Starts whsec_',
+/**
+ * What a correct value looks like, so a mispaste is obvious before submitting.
+ *
+ * **Keyed by rail, because `secret_key` means different things on each.** This
+ * map used to be flat, which showed Flutterwave's `FLWSECK_TEST-` hint to
+ * somebody pasting a Stripe key — a hint that is wrong is worse than none,
+ * since it tells you to go back and find a value that does not exist.
+ */
+const FIELD_HINT: Record<string, Record<string, string>> = {
+  flutterwave: {
+    secret_key: 'Starts FLWSECK_TEST- for test, FLWSECK- for live',
+    public_key: 'Starts FLWPUBK',
+    encryption_key: 'Shown next to your API keys',
+    webhook_hash: 'The value you set as the secret hash on the webhook page',
+  },
+  stripe: {
+    secret_key: 'Starts sk_test_ for test, sk_live_ for live',
+    publishable_key: 'Starts pk_test_ or pk_live_',
+    webhook_secret: 'Starts whsec_ — the signing secret for the endpoint, not its URL',
+  },
+  paypal: {
+    client_id: 'Sandbox and Live are separate apps with separate credentials',
+    client_secret: 'Shown once when the app is created. Generate a new one if you no longer have it',
+    webhook_id: 'Starts WH-. From the same app’s Webhooks section — the id, not the URL',
+  },
 }
+
+/**
+ * Which values are actually secret, and therefore masked.
+ *
+ * The rest are public by design — a publishable key is printed in a checkout
+ * page's own JavaScript, and a webhook id names a resource rather than
+ * authorising anything. Masking them would be theatre with a cost: you cannot
+ * check a long pasted string against the provider's dashboard through dots, and
+ * treating everything as dangerous is how the one field that *is* dangerous
+ * stops standing out.
+ */
+const SECRET_FIELDS = new Set([
+  'secret_key',
+  'encryption_key',
+  'webhook_hash',
+  'webhook_secret',
+  'client_secret',
+])
 
 export function ConnectProvider({
   provider,
@@ -114,7 +154,15 @@ export function ConnectProvider({
           label="Mode"
           hint={
             selectedMode === 'live'
-              ? 'Live keys move real money on the first charge.'
+              // Live is refused outright until §16's checklist is signed off,
+              // and saying so here is friendlier than the rejection that
+              // follows — the operator finds out before fetching a live key
+              // rather than after pasting one into a form.
+              ? 'Live keys move real money on the first charge, and are refused ' +
+                'until the launch checklist is signed off.'
+              : provider === 'paypal'
+              ? 'Sandbox credentials, from your sandbox app. PayPal keeps sandbox ' +
+                'and live as separate accounts, so these are not your live ones.'
               : 'Test keys move no real money. Use these for the sandbox walkthrough.'
           }
         >
@@ -131,12 +179,13 @@ export function ConnectProvider({
           <Field
             key={field}
             label={FIELD_LABEL[field] ?? field}
-            hint={FIELD_HINT[field]}
+            hint={FIELD_HINT[provider]?.[field]}
           >
             <Input
-              // `password` so keys are not shoulder-read, and browsers do not
-              // offer to remember them.
-              type="password"
+              // `password` on the values that are genuinely secret, so they are
+              // not shoulder-read and browsers do not offer to remember them.
+              // See SECRET_FIELDS for why the others are deliberately legible.
+              type={SECRET_FIELDS.has(field) ? 'password' : 'text'}
               autoComplete="off"
               spellCheck={false}
               value={values[field] ?? ''}

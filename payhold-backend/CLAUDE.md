@@ -590,6 +590,38 @@ any form; the only reader is `loadProvider`, which hands back a
 `PaymentProvider` interface rather than a key. A tenant with no row falls back
 to `FakeProvider`, which is how demo mode stays true.
 
+### Three rails connect, and PayPal proves its mode differently
+
+`REQUIRED_FIELDS` names each rail's fields, and `GET /v1/provider-accounts`
+returns that list as `available` so the dashboard renders a form without
+hardcoding provider knowledge. PayPal was in that list before it could be
+connected, which made the form reachable and the submit a 500.
+
+**Rule 2 above is checked twice, by two different means.** Flutterwave and
+Stripe mark the mode inside the key — `_TEST-`, `sk_test_` — so a string test
+catches a live key submitted as test *before* anything is sent anywhere. PayPal
+has no such string: the credential is an OAuth2 client id and secret that look
+identical in both modes, and sandbox and live are different **hosts**. So its
+mode check is the token exchange in `validatePayPalCredentials`, which cannot
+succeed against the wrong host. Reading `credentials.secret_key` for that rail
+is what used to throw — there is no such field — so the check now yields `null`
+for "not answerable by inspection" rather than `false`, which would have meant
+"this is a live key".
+
+`validatePayPalCredentials` probes with `authenticate()` rather than
+`balances()`, and that is the one place it departs from the other two. Their
+`/balance` call is the cheapest thing that proves a secret key; PayPal's
+equivalent reads `/v1/reporting/balances`, which needs a reporting permission an
+app can lack while still taking and sending money perfectly well. Failing a
+connection on it would turn away a working account, so the balance read is
+attempted for its currency list and its failure is not fatal.
+
+**Connecting PayPal does not make PayPal work**, and the split is the point:
+`provider_capabilities.enabled` is still false, so `loadProvider` throws
+`paypal is switched off` for a stored, validated account. Turning it on is a row
+an operator changes deliberately, gated on a signed agreement and §16's written
+payout confirmation per market — a legal fact no code can check.
+
 ## Outbound webhooks are queued by triggers, not by the money functions
 
 `enqueue_webhooks` is called from triggers on `deals`, `confirmations`,
@@ -1355,11 +1387,14 @@ violated by one row, and Postgres does not promise which it reports.
   `FakeProvider`, an intercepted `fetch`, or PGlite. `stripe.test.ts` pins the
   request shapes and the signature check without touching the network, which is
   as far as CI should go.
-- **§9's other three adapters.** `paypal`, `cash_app_pay` and
-  `china_wallet_partner` have enum values, capability rows and payout routes,
-  and no classes. `loadProvider` throws for them by name rather than falling
-  back to the fake, because a deal routed to an adapter that silently collected
-  nothing would be worse than a loud failure.
+- **§9's other two adapters.** `cash_app_pay` and `china_wallet_partner` have
+  enum values, capability rows and payout routes, and no classes. `loadProvider`
+  throws for them by name rather than falling back to the fake, because a deal
+  routed to an adapter that silently collected nothing would be worse than a
+  loud failure. **PayPal has a class as of `20260808000003`** and is connectable
+  — see below — but its capability row stays `enabled = false`, so
+  `loadProvider` throws for it too, by the *second* of those two branches. That
+  is the distinction `implemented`/`enabled` was split to draw.
 - Seed: AutoHire as tenant #1.
 - **Invitations.** `POST /account/signup` creates a company and its owner;
   there is no path for a second person to join one that exists. `tenant_users`
