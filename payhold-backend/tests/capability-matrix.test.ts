@@ -30,8 +30,13 @@ afterAll(() => h.close())
 beforeEach(async () => {
   await h.db.query(`delete from payment_markets`)
   await h.db.query(`delete from payout_routes where tenant_id is not null`)
+  // The state the migrations actually leave, not a synthetic one. PayPal is
+  // built as of `20260808000003` and deliberately still off — no signed
+  // agreement — so a fixture that enabled everything implemented would be
+  // testing a configuration that does not exist.
   await h.db.query(
-    `update provider_capabilities set enabled = implemented`,
+    `update provider_capabilities
+        set enabled = implemented and provider <> 'paypal'`,
   )
   await h.db.query(
     `update payout_routes r
@@ -83,12 +88,27 @@ describe('§9 — adapters declare what they can do', () => {
     ])
   })
 
-  test('three are built and three are declared', async () => {
+  test('four are built and two are declared', async () => {
     const { rows } = await h.db.query<{ provider: string }>(
       `select provider::text from provider_capabilities
         where implemented order by provider::text`,
     )
-    expect(rows.map((r) => r.provider)).toEqual(['fake', 'flutterwave', 'stripe'])
+    // `paypal` joined in `20260808000003` — `_shared/paypal.ts` exists and
+    // `loadProvider` returns it, which is the whole claim `implemented` makes.
+    expect(rows.map((r) => r.provider)).toEqual([
+      'fake', 'flutterwave', 'paypal', 'stripe',
+    ])
+  })
+
+  test('a built adapter is still not an enabled one', async () => {
+    // The distinction the two columns exist for. PayPal has a class now and is
+    // still off: no signed agreement, and §16 wants written payout confirmation
+    // per market. Building the code is not the same act as turning the rail on,
+    // and `implemented` moving must not drag `enabled` with it.
+    const { rows } = await h.db.query<{ enabled: boolean }>(
+      `select enabled from provider_capabilities where provider = 'paypal'`,
+    )
+    expect(rows[0].enabled).toBe(false)
   })
 
   test('nothing unbuilt can be switched on', async () => {
@@ -98,7 +118,8 @@ describe('§9 — adapters declare what they can do', () => {
     await rejects(
       () =>
         h.db.query(
-          `update provider_capabilities set enabled = true where provider = 'paypal'`,
+          `update provider_capabilities set enabled = true
+            where provider = 'china_wallet_partner'`,
         ),
       /enabled_needs_an_implementation/,
     )
@@ -140,10 +161,17 @@ describe('§15 phase 3 — an adapter going down takes only its own routes', () 
     expect((await evaluate(tenant, 'US', 'USD', 'stripe_connect')).eligible).toBe(true)
   })
 
-  test('an unbuilt adapter reads differently from a disabled corridor', async () => {
-    // Two facts an operator has to tell apart at 3am: "there is no code behind
-    // this" and "we switched this corridor off". Same sentence to the seller,
-    // different next action for us.
+  test('an unavailable adapter reads differently from a disabled corridor', async () => {
+    // Two facts an operator has to tell apart at 3am: "this rail cannot carry
+    // anything right now" and "we switched this corridor off". Same sentence to
+    // the seller, different next action for us.
+    //
+    // Venmo rides PayPal, which has a class as of `20260808000003` and is still
+    // switched off commercially. Note that it reads the same as a rail with no
+    // code at all: `route_evaluation` asks whether the adapter is *usable*, and
+    // implemented-but-disabled and unbuilt are both "no" to that question. The
+    // difference between them lives on the capability row, which is where an
+    // operator reads it and where `enabled_needs_an_implementation` binds.
     expect((await evaluate(tenant, 'US', 'USD', 'venmo')).reason_code)
       .toBe('provider_unavailable')
 

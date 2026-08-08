@@ -63,6 +63,15 @@ const REQUIRED_FIELDS: Record<string, { fields: string[]; where: string }> = {
     where: 'Stripe dashboard → Developers → API keys, and Developers → Webhooks ' +
       'for the signing secret',
   },
+  // `webhook_id` rather than a signing secret, because PayPal verifies a
+  // signature by API call and that call names the webhook being checked. A
+  // connection without it can take money and cannot prove an inbound event
+  // came from them, which invariant 2 does not allow.
+  paypal: {
+    fields: ['client_id', 'client_secret', 'webhook_id'],
+    where: 'PayPal Developer dashboard → Apps & Credentials for the client id ' +
+      'and secret, and the same app\'s Webhooks section for the webhook id',
+  },
 }
 
 async function listAccounts(

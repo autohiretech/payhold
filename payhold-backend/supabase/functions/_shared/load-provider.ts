@@ -16,6 +16,7 @@ import type { SupabaseClient } from 'npm:@supabase/supabase-js@2'
 import { decryptCredentials } from './crypto.ts'
 import { FlutterwaveProvider, type FlutterwaveCredentials } from './flutterwave.ts'
 import { FakeProvider, type PaymentProvider } from './provider.ts'
+import { PayPalProvider, type PayPalCredentials } from './paypal.ts'
 import { StripeProvider, type StripeCredentials } from './stripe.ts'
 import { PayHoldError, type Provider } from './types.ts'
 
@@ -110,6 +111,19 @@ export async function loadProvider(
       return {
         provider: new StripeProvider(
           credentials as unknown as StripeCredentials,
+          publicUrl(),
+        ),
+        mode: data.mode,
+        connected: true,
+      }
+    case 'paypal':
+      return {
+        provider: new PayPalProvider(
+          // The mode is carried on the credentials rather than read from the
+          // row inside the adapter, because sandbox and live are different
+          // *hosts* on this rail — not a flag on a request, the way they are
+          // on the other two.
+          { ...(credentials as unknown as PayPalCredentials), mode: data.mode },
           publicUrl(),
         ),
         mode: data.mode,

@@ -432,6 +432,47 @@ be branching on Stripe's internals. It reads `amount_received` rather than
 `amount`: on a manual-capture intent they differ until capture, and booking the
 second would credit a §22 deposit as though it were a payment.
 
+## PayPalProvider — migration `20260808000003`
+
+`_shared/paypal.ts`. §9's third adapter, and the reason `verifySignature` was
+allowed to return a promise in the first place.
+
+Four shapes differ from Stripe, all in the file header and all load-bearing:
+
+- **Amounts are major-unit decimal strings.** `"100.00"`, not `10000`. `Money`
+  is minor units everywhere in PayHold, so every figure crosses
+  `toValue`/`fromValue` here. Stripe's adapter has no conversion *deliberately*
+  — its API is already minor units — and the asymmetry is what to keep straight
+  reading the two together. `ZERO_DECIMAL` is **PayPal's list, not ours**: HUF
+  and TWD are decimal currencies their API refuses fractions in.
+- **Auth is OAuth2.** The token is cached on the instance and shaded by sixty
+  seconds, because an adapter is constructed per request and a fetch per call
+  would double every round trip. A failed exchange never quotes their body back
+  — their text can contain the client id.
+- **Webhook verification is a network call.** No HMAC exists to compute; the
+  supported check hands the headers and body back to PayPal. So the raw body is
+  parsed here, uniquely, and only to re-serialise it into their request —
+  nothing is trusted from it before the answer returns. `cert_url` is checked
+  against their own host first, because an unchecked one is an attacker naming
+  where a key comes from. **Any failure returns false.**
+- **A capture id is not an order id.** `verify` accepts either, so no caller
+  branches on PayPal's internals. Refunds go against the *capture*.
+
+`tokenize` is `async` with no `await` in it, on purpose: it throws, and a method
+typed as returning a promise that throws synchronously sails straight past a
+caller's `.catch()`. `paypal.test.ts` caught that.
+
+**`implemented` moved and `enabled` did not**, which is the whole reason the two
+columns are separate. The class exists; the signed agreement does not, and §16
+wants written payout confirmation per market before live money moves.
+`payout_routes_require_live_provider` reads `enabled`, so turning the rail on
+stays a row an operator changes deliberately.
+
+The other two stay unbuilt and their notes now say what each is actually waiting
+on — Cash App Pay is a method reached through Square or Stripe rather than an
+API of its own, and `china_wallet_partner` names a partner nobody has chosen
+behind a legal bar rather than a coding one.
+
 ## The capability matrix
 
 Migrations `20260807000010` (the adapter enum values) and `20260807000011`.

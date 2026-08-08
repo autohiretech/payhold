@@ -620,10 +620,15 @@ describe('§17 — no promise that every method works everywhere', () => {
       `select provider::text from provider_capabilities
         where not implemented order by provider::text`,
     )
+    // PayPal left this list in `20260808000003` — it has a class now. The two
+    // that remain are not waiting on code in the way it was: Cash App Pay is a
+    // payment method reached through Square or Stripe rather than an API of its
+    // own, and `china_wallet_partner` names a partner nobody has chosen, behind
+    // §5's bar on promising cross-border payout without an approved local
+    // structure. Neither is an afternoon's work, and the notes say so.
     expect(rows.map((r) => r.provider)).toEqual([
       'cash_app_pay',
       'china_wallet_partner',
-      'paypal',
     ])
   })
 

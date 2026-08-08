@@ -240,9 +240,25 @@ interface PaymentProvider {
   Stripe's `automatic` default — letting Radar decide *is* the silent downgrade
   §6 forbids.
 - `FakeProvider` — **demo mode with zero keys must work end-to-end.**
-- `paypal`, `cash_app_pay`, `china_wallet_partner` — §9's remaining adapters,
-  **declared and unbuilt**. They exist so a rail can be named and refused with a
-  reason; `loadProvider` throws for them rather than falling back to the fake.
+- `PayPalProvider` — **built**. Orders v2 for collection (`AUTHORIZE` for §22's
+  deposits), Payouts v1 for sending, and it carries Venmo. Three shapes differ
+  from Stripe and all three are in the file header: amounts are major-unit
+  decimal strings, auth is an OAuth2 token that expires and is cached, and
+  **webhook verification is a network call** rather than an HMAC we can compute
+  — which is the rail `verifySignature`'s promise-returning shape was designed
+  for. An unreachable PayPal means *unverified*, never verified; invariant 2 has
+  no degraded mode. **Built is not enabled**: no signed agreement, and §16 wants
+  written payout confirmation per market, so the capability row stays off and
+  `payout_routes_require_live_provider` keeps its routes refused.
+- `cash_app_pay`, `china_wallet_partner` — **declared and unbuilt**, and neither
+  is waiting on code the way PayPal was. Cash App Pay is not an API of its own:
+  it is reached through Square or offered by Stripe as a payment-method type,
+  and which of those it is decides whether it is an adapter at all or a method
+  on one we already have. `china_wallet_partner` names a partner nobody has
+  chosen — Antom, Adyen and Airwallex are different APIs — behind §5's bar on
+  promising cross-border payout until an approved local structure exists, which
+  is a legal arrangement rather than an adapter. `loadProvider` throws for both
+  rather than falling back to the fake.
 
 **What each adapter can do is a row, not a branch.** `provider_capabilities`
 carries §9's eight flags plus `implemented` and `enabled`, and those two are
