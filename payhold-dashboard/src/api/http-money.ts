@@ -24,11 +24,16 @@ import type { DealListFilter, PayHoldClient } from './client'
 import {
   PayHoldError,
   type Balance,
+  type CheckoutSession,
+  type CheckoutSessionState,
+  type ConfirmSide,
   type CreateDealInput,
   type CreateDealResult,
   type Deal,
   type DealAmounts,
+  type PaymentMethod,
   type Payout,
+  type PublicCheckout,
   type RailBalance,
   type Refund,
   type Seller,
@@ -55,10 +60,12 @@ async function toError(response: Response): Promise<PayHoldError> {
 export class MoneyHttpClient implements PayHoldClient {
   #base: string
   #auth: AuthBackend
+  #anonKey: string
 
-  constructor(base: string, auth: AuthBackend, inner: PayHoldClient) {
+  constructor(base: string, anonKey: string, auth: AuthBackend, inner: PayHoldClient) {
     this.#base = `${base.replace(/\/+$/, '')}/functions/v1`
     this.#auth = auth
+    this.#anonKey = anonKey
 
     return new Proxy(this, {
       get: (target, prop, receiver) => {
@@ -80,6 +87,32 @@ export class MoneyHttpClient implements PayHoldClient {
       ...init,
       headers: {
         authorization: `Bearer ${token}`,
+        ...(init?.body ? { 'content-type': 'application/json' } : {}),
+        ...init?.headers,
+      },
+    })
+
+    if (!response.ok) throw await toError(response)
+    return await response.json() as T
+  }
+
+  /**
+   * The buyer's two calls, which carry **no credential at all**.
+   *
+   * Whoever opens a payment link from an email has no PayHold account, so the
+   * token in their URL *is* the authorisation — `/checkout/public/:token` takes
+   * nothing else and must not be sent a bearer token, which would be a
+   * dashboard session travelling to a page a stranger is looking at.
+   *
+   * Supabase's gateway still wants its anon key to route the request. That key
+   * is public by design and grants nothing on its own; it is not a credential
+   * for the session, which is exactly the distinction being kept here.
+   */
+  async #public<T>(path: string, init?: RequestInit): Promise<T> {
+    const response = await fetch(`${this.#base}${path}`, {
+      ...init,
+      headers: {
+        apikey: this.#anonKey,
         ...(init?.body ? { 'content-type': 'application/json' } : {}),
         ...init?.headers,
       },
@@ -163,6 +196,86 @@ export class MoneyHttpClient implements PayHoldClient {
       `/deals/${dealId}/refunds`,
     )
     return refunds
+  }
+
+  /** Both sides present → atomic release, decided in SQL under a row lock. */
+  async confirmDeal(id: string, side: ConfirmSide): Promise<Deal> {
+    return await this.#call<Deal>(`/deals/${id}/confirm`, {
+      method: 'POST',
+      body: JSON.stringify({ side }),
+    })
+  }
+
+  /**
+   * §7.1. `amount` omitted means everything still refundable, which is what
+   * every caller meant before partial refunds existed — so it is left out of
+   * the body rather than sent as null, and the endpoint keeps its own default.
+   */
+  async refundDeal(
+    id: string,
+    reason: string,
+    amount?: number,
+    lineItems?: unknown,
+  ): Promise<Deal> {
+    return await this.#call<Deal>(`/deals/${id}/refund`, {
+      method: 'POST',
+      body: JSON.stringify({
+        reason,
+        ...(amount === undefined ? {} : { amount }),
+        ...(lineItems === undefined ? {} : { line_items: lineItems }),
+      }),
+    })
+  }
+
+  // -- Hosted checkout (§10.1) ---------------------------------------------
+
+  async openCheckoutSession(
+    dealId: string,
+    options?: { hours?: number; returnUrl?: string },
+  ): Promise<CheckoutSession> {
+    return await this.#call<CheckoutSession>('/checkout/sessions', {
+      method: 'POST',
+      body: JSON.stringify({
+        deal_id: dealId,
+        ...(options?.hours === undefined ? {} : { hours: options.hours }),
+        ...(options?.returnUrl === undefined ? {} : { return_url: options.returnUrl }),
+      }),
+    })
+  }
+
+  async getCheckoutSession(id: string): Promise<CheckoutSession> {
+    return await this.#call<CheckoutSession>(`/checkout/sessions/${id}`)
+  }
+
+  async cancelCheckoutSession(id: string): Promise<CheckoutSession> {
+    return await this.#call<CheckoutSession>(`/checkout/sessions/${id}/cancel`, {
+      method: 'POST',
+    })
+  }
+
+  async listCheckoutSessions(dealId?: string): Promise<CheckoutSession[]> {
+    const { sessions } = await this.#call<{ sessions: CheckoutSession[] }>(
+      `/checkout/sessions${dealId ? `?deal_id=${encodeURIComponent(dealId)}` : ''}`,
+    )
+    return sessions
+  }
+
+  // The buyer's two. No session, no API key — the token is the credential.
+  async getPublicCheckout(token: string): Promise<PublicCheckout> {
+    return await this.#public<PublicCheckout>(`/checkout/public/${token}`)
+  }
+
+  async payCheckout(
+    token: string,
+    choice: { method: PaymentMethod; network?: string },
+  ): Promise<{ status: CheckoutSessionState; payment_link: string | null }> {
+    return await this.#public<{
+      status: CheckoutSessionState
+      payment_link: string | null
+    }>(`/checkout/public/${token}/pay`, {
+      method: 'POST',
+      body: JSON.stringify(choice),
+    })
   }
 
   // -- Money ---------------------------------------------------------------

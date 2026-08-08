@@ -141,10 +141,17 @@ endpoints at once. They compose innermost-first in `index.ts`: the mock answers
 whatever nobody has replaced, then `MoneyHttpClient`, then `AiHttpClient`.
 
 - `AiHttpClient` — the eight Intelligence methods. `VITE_PAYHOLD_AI_LIVE=1`.
-- `MoneyHttpClient` — deals, balances, payouts, sellers and seller wallets.
-  `VITE_PAYHOLD_MONEY_LIVE=1`. **Reads, plus `createDeal`**: a wrong read shows
-  a wrong number and a wrong write moves money, so the one write in this slice
-  is the one that charges nothing when it returns.
+- `MoneyHttpClient` — the whole payment lifecycle plus the money reads: create,
+  hosted checkout, confirm, refund, balances, payouts, sellers and seller
+  wallets. `VITE_PAYHOLD_MONEY_LIVE=1`.
+
+  **`getPublicCheckout` and `payCheckout` go out with no bearer token**, and
+  that is the one thing in this file not to 'fix'. Whoever opens a payment link
+  from an email has no PayHold account, so the token in their URL *is* the
+  authorisation — sending a dashboard session to a page a stranger is looking
+  at would be the opposite of what §10.1 arranged. They carry Supabase's anon
+  key, which the gateway needs to route the request and which grants nothing on
+  its own.
 
 Three places it does not paper over a difference, deliberately:
 `listDeals`'s `search` is filtered client-side because the endpoint offers no

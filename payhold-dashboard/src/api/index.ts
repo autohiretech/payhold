@@ -42,7 +42,7 @@ const mock = new MockClient()
  */
 let client: PayHoldClient = mock
 if (url && anonKey) {
-  if (moneyLive) client = new MoneyHttpClient(url, auth, client)
+  if (moneyLive) client = new MoneyHttpClient(url, anonKey, auth, client)
   if (aiLive) client = new AiHttpClient(url, auth, client)
 }
 
