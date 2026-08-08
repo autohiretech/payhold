@@ -71,16 +71,17 @@ jobs:
       # The service-role key has no `VITE_` name it could hide behind and must
       # never appear in this file.
       #
-      # Unset is the honest default: the build falls back to the in-browser
-      # mock, which is a simulation and says so, rather than to a half-pointed
-      # dashboard.
+      # **Both are required and the build fails without them.** There used to be
+      # three more flags here choosing how much of the dashboard ran against the
+      # real backend and how much against an in-browser mock; the mock is gone,
+      # so an unset URL is a misconfiguration rather than a demo build, and it
+      # is better caught here than shipped as a dashboard full of numbers
+      # nobody can trace.
       - name: Build
         run: npm run build
         env:
           VITE_SUPABASE_URL: ${{ vars.VITE_SUPABASE_URL }}
           VITE_SUPABASE_ANON_KEY: ${{ vars.VITE_SUPABASE_ANON_KEY }}
-          VITE_PAYHOLD_MONEY_LIVE: ${{ vars.VITE_PAYHOLD_MONEY_LIVE }}
-          VITE_PAYHOLD_AI_LIVE: ${{ vars.VITE_PAYHOLD_AI_LIVE }}
 
       # Skipped, not failed, until the secrets exist. This workflow lands on
       # main before the Cloudflare project does, and a red X on a commit that

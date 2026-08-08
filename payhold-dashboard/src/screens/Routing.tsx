@@ -56,7 +56,6 @@ import {
 } from '@/lib/rails'
 import {
   keys,
-  simNow,
   usePayoutRoutes,
   usePayouts,
   useSellerDestinations,
@@ -84,7 +83,7 @@ export function RoutingPage() {
   const routes = usePayoutRoutes()
   const sellers = useSellers()
   const destinations = useSellerDestinations()
-  const now = simNow()
+  const now = new Date()
 
   const stuck = (payouts.data ?? []).filter((p) => STUCK.includes(p.status))
 

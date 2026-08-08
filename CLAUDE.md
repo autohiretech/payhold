@@ -27,7 +27,7 @@ the same habit so nothing leaks by copy-paste.
 ```
 PayHold/
 ├── payhold-backend/     Supabase project mwnbjjlilqrwdmwutbxr — schema, money
-│                        engine, 22 Edge Functions and 4 cron jobs built ✅
+│                        engine, 28 Edge Functions and 4 cron jobs built ✅
 └── payhold-dashboard/   React + Vite + Tailwind on Cloudflare Pages  ✅
 ```
 
@@ -44,11 +44,20 @@ running inside Postgres transactions, and Workers has no equivalent.
 The dashboard is a *client of the public API* — it holds no secrets and has no
 direct database write access.
 
-**We built frontend-first.** The dashboard runs against a mock backend
-(`payhold-dashboard/src/api/mock/`) that implements the full v1 contract as a
-real state machine in the browser. It keeps running against the mock until the
-Edge Functions exist; then `HttpClient` slots in behind the same
-`PayHoldClient` interface and no screen changes.
+**We built frontend-first, and that is over.** The dashboard used to run
+against a mock backend in `payhold-dashboard/src/api/mock/` — the full v1
+contract as a state machine in the browser, with a dev panel that funded deals
+and advanced the clock. It is **deleted**. `HttpClient` (`src/api/http.ts`) is
+the only implementation of `PayHoldClient`, every screen reads real rows, and a
+build with no `VITE_SUPABASE_URL` throws at import rather than falling back to a
+simulation: a misconfigured deploy that renders invented numbers is
+indistinguishable from a working demo, and the demo was the thing worth losing.
+
+What went with it is worth knowing, because none of it is coming back as a
+client feature: funding a deal, advancing time, running cron, forcing a payout
+failure and injecting drift are all things only a provider webhook or a
+scheduled job may cause. Signing in went the same way — there is one auth
+backend now, Supabase's.
 
 **Money logic lives in SQL, not TypeScript.** The atomic-release guard is only
 meaningful inside the transaction that writes the release, so `release_deal`,
@@ -56,8 +65,10 @@ meaningful inside the transaction that writes the release, so `release_deal`,
 Postgres functions. Edge Functions own FX, fees, provider calls and auth, and
 pass already-converted figures in. See `payhold-backend/CLAUDE.md`.
 
-The mock's invariant tests (`src/api/mock/engine.test.ts`) are the backend's
-acceptance spec — reproduce every one of them against the real Edge Functions.
+The invariants the mock's tests pinned are now pinned by
+`payhold-backend/tests/` against real Postgres, and the end-to-end proof is
+`payhold-backend/scripts/sandbox-walkthrough.md`, which is run by a person
+against a provider's own dashboard.
 
 ## Money model
 
@@ -337,6 +348,10 @@ Auth: `X-Api-Key`, hashed at rest, rate-limited per key.
 | `GET /v1/sellers/wallets` | Every seller's wallet in one query |
 | `POST /v1/sellers/:id/withdraw` | Ask for the cleared money. Stamps and dispatches; screens, routes and books exactly as the cron does |
 | `GET /v1/balance` | held / pending clearance / available / paid out |
+| `GET /v1/ledger` | the entries those buckets are made of. Append-only; there is no writer |
+| `GET /v1/audit-log` | who did what, including everything that moved no money |
+| `GET /v1/settings` `PATCH /v1/settings` | §8's per-tenant settings. Refuses an API key on the write — a client that could set its own service fee has turned our commission into a field it fills in |
+| `GET /v1/api-keys` `POST` `DELETE` | the credential a client's server holds. Person-only, and the plaintext is returned exactly once |
 | `POST /v1/webhooks-endpoints` | Client registers their endpoint for signed notifications |
 | `GET /v1/webhook-deliveries` | Every attempt, with status and signature — the answer to "did you tell us?" |
 | `GET /v1/payout-routes` | §5.1's routing table — which rails reach where, and which are on |
@@ -351,6 +366,7 @@ Auth: `X-Api-Key`, hashed at rest, rate-limited per key.
 | `POST /ai-dispute` `/ai-risk-narrator` `/ai-support` | Draft, brief, answer. Advisory; each writes a suggestion and nothing else |
 | `POST /ai-decisions` | A person approves or rejects a draft. The only path from model output to money |
 | `GET /v1/launch` `POST /v1/launch/:code/sign-off` | §16's checklist, and what stands between us and live money. PayHold staff only; refuses an API key |
+| `/admin/tenants` `/admin/reconciliation-alerts` `/admin/reconciliation-runs` | The master-admin console: every account, every drift case, every pass. Run one now, sign one off, freeze or unfreeze an account. **PayHold staff only** — the one function whose reads are not tenant-scoped, which is why it is a function of its own |
 | `/flutterwave-webhook/:tenant` `/stripe-webhook/:tenant` | Inbound provider webhooks. Signature checked against *that tenant's* own secret, then the transaction re-fetched |
 
 **Dashboard access is separate from all of that.** A company signs up, and its

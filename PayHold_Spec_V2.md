@@ -70,8 +70,9 @@ Functions covering the V1 API surface, dashboard auth, the AI layer, and four
 cron jobs. `FlutterwaveProvider` and `FakeProvider`. RLS. The signed outbound
 webhook path with retry. Per-rail reconciliation with automatic payout freeze.
 The deterministic risk rules and the manual payout hold. Fifteen dashboard
-screens running against a mock backend that implements the full v1 contract as a
-real state machine.
+screens, which ran against an in-browser mock of the full v1 contract until the
+Edge Functions caught up and are now clients of the real API — the mock is
+deleted, and `src/api/http.ts` is the only implementation of `PayHoldClient`.
 
 **Not built.** Everything this document adds beyond V1 — see §15 for the phase
 list. Plus, carried over from V1's own backlog: `StripeProvider` and Stripe's
@@ -863,13 +864,14 @@ inside the window, `released` past it and payable (§5.1's `available`), then
 `payout_pending` while the transfer is with the provider. When money moves did
 not change.
 
-Implemented 2026-08-07. `payhold-backend/tests/lifecycle.test.ts` and the
-mock's `engine.test.ts` are the acceptance spec.
+Implemented 2026-08-07. `payhold-backend/tests/lifecycle.test.ts` is the
+acceptance spec; the mock's `engine.test.ts` was the other half of it until the
+dashboard cut over and the mock was deleted.
 
 ## 29.2 The object is a `deal`, not an `order` — Part II wins
 
-`deal` is the name in the enum, every SQL function, the mock engine, all fifteen
-screens and the public API. Renaming buys nothing functional and breaks
+`deal` is the name in the enum, every SQL function, all fifteen screens and the
+public API. Renaming buys nothing functional and breaks
 AutoHire's integration. §10.1 carries the mapping.
 
 Webhook **event names** do take §10.2's `order.*` vocabulary, and that was a
@@ -986,8 +988,8 @@ Both new states are machine-recoverable and are in `DISPATCHABLE`, deliberately.
 A rule is not *sending* anything when it re-screens and finds the reason gone;
 it is the same shape as `frozen` clearing once reconciliation is resolved.
 
-Implemented 2026-08-07. `payhold-backend/tests/payout-routing.test.ts` and
-`payhold-dashboard/src/api/mock/routing.test.ts` are the acceptance spec.
+Implemented 2026-08-07. `payhold-backend/tests/payout-routing.test.ts` is the
+acceptance spec — its dashboard mirror went with the mock.
 
 ## 29.10 A route is never a fallback for another route — Part II reading of §5.1
 

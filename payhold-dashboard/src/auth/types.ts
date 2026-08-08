@@ -6,16 +6,10 @@
  * public v1 one every client codes against, and signing in is a dashboard
  * concern that no API client has.
  *
- * The shape mirrors `PayHoldClient` — one interface, two implementations, one
- * line in `index.ts` that picks between them:
- *
- *   `MockAuthBackend`      accounts simulated in the browser, for the build
- *                          that runs against the mock API
- *   `SupabaseAuthBackend`  real Supabase Auth, and the `account` Edge Function
- *                          for the half a browser is not allowed to write
- *
- * Both must land together with `HttpClient`: an app holding a real session and
- * a simulated ledger would be lying about which one it is.
+ * One interface, one implementation — `SupabaseAuthBackend`, real Supabase Auth
+ * plus the `account` Edge Function for the half a browser is not allowed to
+ * write. The simulated backend that used to sit beside it went with the mock
+ * API it belonged to.
  */
 
 /** What a person is allowed to do inside their company. Mirrors `tenant_role`. */
@@ -45,6 +39,21 @@ export interface AuthAccount {
   role: TenantRole
 }
 
+/**
+ * The string the backend records for this session — `user:<email>`, exactly as
+ * `resolveCaller` builds it for `audit_log.actor`.
+ *
+ * Screens display a person's name; this is for comparing against an actor that
+ * was **recorded**, and §8's conflict-of-interest control is the case that
+ * matters. An operator who already spoke for a side cannot decide the dispute,
+ * and the screen has to say so before they reach for the button — comparing a
+ * display name against a stored actor would quietly never match, and the
+ * warning would simply never appear.
+ */
+export function actorId(account: AuthAccount | null): string {
+  return account?.email ? `user:${account.email}` : ''
+}
+
 export interface SignUpInput {
   company_name: string
   email: string
@@ -53,13 +62,6 @@ export interface SignUpInput {
 }
 
 export interface AuthBackend {
-  /**
-   * True when accounts here are a browser simulation rather than real ones.
-   * The sign-in screen says so out loud — a page that asks for a password
-   * without saying where it goes has told the person something false.
-   */
-  readonly simulated: boolean
-
   /** The session left over from last time, if it is still good. */
   restore(): Promise<AuthAccount | null>
   signIn(email: string, password: string): Promise<AuthAccount>

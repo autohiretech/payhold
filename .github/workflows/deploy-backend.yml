@@ -99,6 +99,7 @@ jobs:
         run: |
           supabase functions deploy \
             account deals checkout payment-options sellers balance payouts risk-signals \
+            ledger audit-log payout-routes settings api-keys admin \
             disputes launch webhook-endpoints flutterwave-webhook stripe-webhook provider-accounts \
             webhook-dispatch reconcile auto-release payout-dispatch \
             ai-dispute ai-risk-narrator ai-support ai-decisions \

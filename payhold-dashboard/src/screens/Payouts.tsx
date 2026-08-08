@@ -2,7 +2,6 @@ import { useState } from 'react'
 import { Link } from 'react-router-dom'
 import { api, type PayoutStatus } from '@/api'
 import { AiSuggestionCard, SparkIcon } from '@/components/ai'
-import { useAuth } from '@/auth/AuthProvider'
 import {
   Badge,
   Button,
@@ -21,7 +20,6 @@ import {
 } from '@/components/ui'
 import { PAYOUT_STATUS_META, formatMoney, formatRelative } from '@/lib/format'
 import {
-  simNow,
   useAiMutation,
   useAiSuggestions,
   useAiUsage,
@@ -39,23 +37,17 @@ export function PayoutsPage() {
   const settings = useSettings()
   const tenant = useTenant()
   const signals = useRiskSignals()
-  const now = simNow()
-
-  // Who the approval is recorded as. It comes from the session and never from a
-  // form: invariant 11 wants a person, and a caller that can name its own
-  // approver can name somebody who was not there.
-  const { account } = useAuth()
-  const me = account?.full_name ?? account?.email ?? ''
+  const now = new Date()
 
   const retry = useMoneyMutation((id: string) => api.retryPayout(id))
-  const approve = useMoneyMutation((id: string) => api.approvePayoutReview(id, me))
+  const approve = useMoneyMutation((id: string) => api.approvePayoutReview(id))
 
   // Stopping one payout, for the operator who knows something the rules do not.
   // The alternative before this existed was freezing the whole account, which
   // stops every honest seller to stop one.
   const [holding, setHolding] = useState<string | null>(null)
   const hold = useMoneyMutation((args: { id: string; reason: string }) =>
-    api.holdPayout(args.id, me, args.reason),
+    api.holdPayout(args.id, args.reason),
   )
 
   /** The rules that stopped this one, in the words they were written in. */

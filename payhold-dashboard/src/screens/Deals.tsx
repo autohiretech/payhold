@@ -28,7 +28,7 @@ import {
   countryFlag,
   marketSummary,
 } from '@/lib/rails'
-import { simNow, useDeals, useMoneyAction, useSellers, useSettings } from '@/lib/queries'
+import { useDeals, useMoneyAction, useSellers, useSettings } from '@/lib/queries'
 import { api } from '@/api'
 
 /** Coarse groupings, because "show me what's live" beats picking eight statuses. */
@@ -67,7 +67,7 @@ export function DealsPage() {
     search: search || undefined,
   })
   const sellers = useSellers()
-  const now = simNow()
+  const now = new Date()
 
   const sellerName = (id: string) =>
     sellers.data?.find((s) => s.id === id)?.name ?? id

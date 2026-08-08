@@ -15,7 +15,8 @@ npm run test:functions       # Deno tests for crypto and the providers
 npm run typecheck            # deno check across the functions
 npx supabase db push         # apply migrations to the linked project
 npx supabase functions deploy account deals checkout payment-options sellers \
-                              balance \
+                              balance ledger audit-log payout-routes settings \
+                              api-keys admin \
                               payouts risk-signals disputes launch webhook-endpoints \
                               flutterwave-webhook stripe-webhook provider-accounts \
                               webhook-dispatch reconcile auto-release \
@@ -73,6 +74,12 @@ environment or a build log.
 | `payment-options` | what a buyer in a market can pay with; the catalogue a client renders its checkout from |
 | `sellers` | register a tokenized payout destination, list, `/wallets`, `/:id/capabilities`, `/:id/balance`, `/:id/withdraw`, `/:id/verify` (person-only) |
 | `balance` | four buckets per currency, or `?by=rail` |
+| `ledger` | the entries behind those buckets, filterable by deal. No writer, on any method |
+| `audit-log` | who did what, including every act that moved no money |
+| `payout-routes` | §5.1's table: the platform's rows plus this tenant's overrides. Read-only |
+| `settings` | §8's per-tenant settings, `GET` and `PATCH`. Refuses an API key on the write |
+| `api-keys` | issue, list and revoke the credential a client's server holds. Session only, and the plaintext is returned exactly once |
+| `admin` | the master-admin console: tenants, drift cases, §13's runs, run-now, sign-off, freeze and unfreeze. `platformAdminFromJwt`, and the only function whose reads are not tenant-scoped |
 | `webhook-endpoints` | register (secret shown once), list, `?deliveries=1`, disable |
 | `flutterwave-webhook` | inbound, at `/flutterwave-webhook/:tenant` |
 | `stripe-webhook` | inbound, at `/stripe-webhook/:tenant`. The same five steps, with a real HMAC instead of a shared secret |
@@ -89,12 +96,56 @@ environment or a build log.
 handler filters on the tenant it resolves, and a row belonging to someone else
 is a 404 — a 403 would confirm it exists.
 
-`launch` is the exception and uses `platformAdminFromJwt` instead. A third
+`launch` and `admin` are the exceptions and use `platformAdminFromJwt` instead. A third
 caller kind rather than a variation on the other two: a tenant `owner` is the
 most senior person *inside one company*, and whether PayHold may take live money
 is not their statement to make. `platform_admins` is the separate axis the RLS
 layer already draws for exactly this, and a caller who is not on it gets the same
 404 as a caller who is nobody.
+
+## The six functions the cut-over needed
+
+The dashboard used to serve settings, API keys, the ledger, the audit log, the
+routing table and the whole admin console from its own mock. Deleting the mock
+meant building them, and four of the six are a select with a tenant filter.
+The two that are not are worth reading before changing.
+
+### `settings`, and why a flag is stored as a number
+
+`_shared/settings.ts` now carries one spec — every key, its kind, its bounds and
+its default — and both views derive from it: `readSettings` for the endpoint,
+`loadSettings` for the money paths that need eight of them. There used to be two
+lists, and the second went stale exactly as you would expect: `clearance_days`
+sat at V1's 7 in TypeScript while every SQL reader had moved to §6.1's 14. A
+default nothing reads is a default nobody can catch being wrong.
+
+**A boolean setting is written as `1` or `0`, never as a JSON `true`.**
+`setting_num` resolves a value with `(value #>> '{}')::numeric`, so a literal
+`false` in that column does not fall back to the default — it raises on the
+cast, inside whichever money function asked. `encode` in that file is the only
+writer and is where this is enforced; `decode` still reads either form, because
+refusing to render a legacy row would make the settings screen unopenable over a
+value nothing else reads.
+
+The endpoint refuses an API key on the write path. A client that could set its
+own `service_fee_rate` has turned our commission into a field it fills in.
+
+### `admin`, and the second way a freeze is lifted
+
+Every route reads across tenants, which is why they are one function rather than
+a few more handlers next to scoped ones — a cross-tenant query in a file whose
+neighbours all filter on `caller.tenant_id` is the shape a leak takes.
+
+`reconcileAll` moved to `_shared/reconciliation.ts` so the nightly cron and the
+Admin screen's "run now" share one definition of what our books agreeing means.
+`reconcile/index.ts` is now the schedule's authentication and nothing else.
+
+**`POST /admin/tenants/:id/unfreeze` is refused while any reconciliation case on
+that account is open** — the same condition `resolve_reconciliation_run`
+enforces before it lifts one, checked here rather than assumed. Freezing is
+arithmetic and automatic; lifting one is a judgement about whether the
+difference has been explained, and the only reason this route exists beside the
+run sign-off is that a freeze placed by hand has no run to sign off.
 
 ## Getting in
 
@@ -130,8 +181,13 @@ Three things worth knowing before changing it:
 There is no invitation path yet: a second person joining an existing company has
 nowhere to be created from. Until there is, one company means one login.
 
-The acceptance spec is `payhold-dashboard/src/auth/mock.test.ts` — same
-arrangement as the money paths, where the mock's tests are the backend's.
+There is no dashboard-side acceptance spec for this any more —
+`src/auth/mock.test.ts` described a simulated sign-in and went with it. The
+sandbox walkthrough covers the way in end to end: sign up, land in an empty
+company, sign out, sign back in, and prove that a call with no bearer token is
+401 and one carrying another company's session returns that company's nothing.
+RLS is only provable against the real project, so that is where the check
+belongs.
 
 **The funding path is four steps and none of them are optional.** `POST /deals`
 creates it, `POST /deals/:id/pay` starts the charge on the rail the buyer's
@@ -556,8 +612,10 @@ never fail a release.
 `openWebhookSecret`). An API key is only ever compared, so hashing it is
 strictly safer; a signing secret has to be *used* on every delivery.
 `crypto.test.ts` pins the exact header bytes against a digest computed
-independently, and the dashboard mock pins the same construction from the other
-side — a client who develops against the mock must not break on the real API.
+independently. It used to be pinned from the dashboard's side too, by a mock
+that signed for real; that mock is deleted, so this test is now the only thing
+between a client's verification code and a silent change to the header format.
+Treat it as a published contract rather than a unit test.
 
 ## The lifecycle, and where `clearing` came from
 
@@ -638,7 +696,8 @@ The three-way distinction is the thing to hold on to:
 | `provider_fee` | **yes** — the rail took it | no |
 
 `amountLeaving` in `_shared/figures.ts` has a matching list, `POOL_ENTRY_TYPES`,
-and so does the dashboard mock's `POOL_DEDUCTIONS`. **All three must agree.** A
+and **the two must agree** — there was a third copy in the dashboard mock, and
+deleting it removed a way for them to disagree rather than a safeguard. A
 deduction in `rail_balances` and missing from `amountLeaving` sends a seller
 money the pool says is spoken for — a tax we owe onward, or a reserve still
 carved out.
@@ -1308,11 +1367,13 @@ violated by one row, and Postgres does not promise which it reports.
   not a schema change.
 - **Password reset.** GoTrue does it, and it needs the same SMTP sender email
   confirmation is waiting on.
-- The dashboard still runs on its mock, except for Intelligence: `AiHttpClient`
-  (`src/api/http-ai.ts`) is the first slice of `HttpClient` and covers the eight
-  AI methods behind `VITE_PAYHOLD_AI_LIVE`. The rest is still one file plus one
-  line in `src/api/index.ts`. Its sign-in is already real code against
-  `functions/account/` — `src/auth/supabase.ts` — behind the same env switch.
+- ~~The dashboard still runs on its mock.~~ **It does not, as of the cut-over.**
+  `src/api/http.ts` implements the whole of `PayHoldClient` against these
+  functions, `src/api/mock/` is deleted, and a build without
+  `VITE_SUPABASE_URL` throws instead of simulating. The consequence for this
+  repository is that **the acceptance specs moved here**: `tests/` against
+  PGlite is what pins the invariants, and `scripts/sandbox-walkthrough.md` is
+  what proves them end to end.
 - ~~Four reads Phase 10's screens expect and this side does not serve.~~
   **All four are served now**, which is what unblocks `HttpClient`:
 
@@ -1356,6 +1417,10 @@ violated by one row, and Postgres does not promise which it reports.
   test runs against the validators, the corpus and PGlite; nothing in CI calls
   Claude, and nothing should.
 
-The acceptance spec for all of it is
-`payhold-dashboard/src/api/mock/engine.test.ts` — reproduce every one of those
-invariants here.
+The acceptance spec for all of it used to be
+`payhold-dashboard/src/api/mock/engine.test.ts`. That file is gone with the mock
+it tested, and `tests/` here is what took the claim over — every invariant it
+pinned in a browser is pinned against real Postgres now. What no automated
+suite covers is `scripts/sandbox-walkthrough.md`, and that is deliberate: half
+of it is watching what happens on a provider's own dashboard, and a script that
+could green-light itself is the thing the launch gate exists to prevent.

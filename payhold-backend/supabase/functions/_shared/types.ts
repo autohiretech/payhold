@@ -572,22 +572,14 @@ export interface Tenant {
   created_at: Timestamp
 }
 
-export interface TenantSettings {
-  tenant_id: string
-  service_fee_rate: number
-  buyer_fee: Money
-  clearance_days: number
-  auto_release_days: number
-  currencies: Currency[]
-}
-
-/** The documented defaults — spec §8. A tenant missing a row behaves like this. */
-export const DEFAULT_SETTINGS: Omit<TenantSettings, 'tenant_id' | 'currencies'> = {
-  service_fee_rate: 0.1,
-  buyer_fee: 0,
-  clearance_days: 7,
-  auto_release_days: 3,
-}
+/*
+ * Settings live in `_shared/settings.ts`, type and defaults together.
+ *
+ * They used to be declared here with a copy of the documented defaults, and the
+ * copy went stale: `clearance_days` stayed at V1's 7 while every SQL reader
+ * moved to §6.1's 14. A default that nothing reads is a default that cannot be
+ * caught being wrong, so there is now one spec and both views derive from it.
+ */
 
 export interface ApiKey {
   id: string

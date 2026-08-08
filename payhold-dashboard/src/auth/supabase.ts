@@ -53,8 +53,6 @@ interface TokenResponse {
 }
 
 export class SupabaseAuthBackend implements AuthBackend {
-  readonly simulated = false
-
   #url: string
   #anonKey: string
   #session: StoredSession | null = null

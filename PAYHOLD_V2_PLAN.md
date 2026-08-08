@@ -3,8 +3,9 @@
 Bringing the built system up to the Manus AI handoff specification
 ("PayHold Marketplace Payments Platform", 17 sections).
 
-**Status:** phases 0–9 and 11 done; 10 all but its `Admin`/`Audit` checkout-session
-list (2026-08-08). Phases execute one at a time, on request.
+**Status:** phases 0–11 done, plus **Phase 12, the cut-over** (2026-08-08) — the
+dashboard's mock backend is deleted and every screen reads the real Edge
+Functions. Phases execute one at a time, on request.
 
 Phase 11 landing before 8, 9 and 10 finished is not an ordering mistake: the
 gate it builds ships **shut**, and the work those phases still owed is on it as
@@ -727,6 +728,63 @@ Tests: 35 new SQL (`launch-gate.test.ts`), 24 new dashboard
 - Test mode first. Live keys stay disabled until §16 is signed off.
 
 </details>
+
+---
+
+## Phase 12 — The cut-over ✅ done 2026-08-08
+
+Not in the original plan, because the original plan assumed the mock would be
+replaced slice by slice until nothing was left. Two slices had landed
+(`AiHttpClient`, `MoneyHttpClient`, each behind its own flag) and the remainder
+turned out to be one piece of work rather than five: what was left needed six
+endpoints that did not exist, and the flags themselves were the risk.
+
+**Deleted from `payhold-dashboard`:** `src/api/mock/` entire (the engine, seed,
+risk, routing, checkout, resolution, launch, AI and webhook modules, and ~4,000
+lines of tests), `src/app/DevPanel.tsx`, `src/auth/mock.ts`, `src/auth/password.ts`,
+`src/lib/hmac.ts`, `src/lib/slug.ts`, and the `VITE_PAYHOLD_AI_LIVE` /
+`VITE_PAYHOLD_MONEY_LIVE` flags. `src/api/http.ts` is now the only implementation
+of `PayHoldClient`.
+
+**Built in `payhold-backend`**, because six client methods had no endpoint:
+
+| Function | Why it did not exist |
+|---|---|
+| `settings` | §8's settings were read by the money paths and never written by anyone but a fixture |
+| `api-keys` | the mock minted its own; nothing had ever issued a real one from a session |
+| `ledger`, `audit-log` | `balance` served the sums and nothing served the rows |
+| `payout-routes` | the routing table was read by the engine and had no reader for a person |
+| `admin` | the whole master-admin console — cross-tenant, and the one function whose reads are not tenant-scoped |
+
+Four decisions worth recording:
+
+- **The flags went with the mock, and unset is now a hard failure.** An unset
+  `VITE_SUPABASE_URL` used to mean "run the simulation", which made a
+  misconfigured deploy indistinguishable from a working demo — every screen
+  rendered, every number invented, nothing said so. `@/config` throws at import.
+- **The actor parameters are gone from `PayHoldClient`.** `verifySeller`,
+  `holdPayout`, `approvePayoutReview`, `resolveDispute`, `signOffLaunchItem`,
+  `decideAiSuggestion` and `resolveReconciliationRun` all took a name because
+  the mock had no session to read. Every real endpoint takes it from the token,
+  so the argument was inert and forgeable-looking; removing it is what makes the
+  interface honest. `actorId(account)` is what a screen compares against a
+  recorded actor, since the backend writes `user:<email>` and the §8
+  conflict-of-interest warning would never have fired against a display name.
+- **One settings spec, not two.** `_shared/settings.ts` had defaults that had
+  gone stale against SQL's — `clearance_days` sat at V1's 7 while every SQL
+  reader used §6.1's 14 — so both views now derive from one table of keys. A
+  boolean is stored as `1`/`0`, because `setting_num` casts to numeric and a
+  literal `false` raises inside whichever money function reads it.
+- **`admin`'s unfreeze is refused while a case is open**, matching
+  `resolve_reconciliation_run` exactly. The dashboard's per-tenant unfreeze had
+  been the blunt path since before §13, and the Admin screen's copy said so;
+  this closes it rather than describing it.
+
+The acceptance specs moved with the code: `payhold-backend/tests/` (440 SQL,
+134 Deno) is what pins the invariants the mock's suites used to, and
+`scripts/sandbox-walkthrough.md` is the end-to-end proof. What is still tested
+in the dashboard is what only exists there — the route gate, and the rails
+table.
 
 ---
 

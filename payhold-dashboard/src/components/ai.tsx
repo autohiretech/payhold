@@ -22,7 +22,6 @@ import { Link } from 'react-router-dom'
 import type { AiSuggestion, AiUsage, Dispute, DisputeEvidence } from '@/api'
 import { Button, ErrorNote, Mono, cx } from '@/components/ui'
 import { formatDateTime, formatMoney, formatRelative } from '@/lib/format'
-import { simNow } from '@/lib/queries'
 
 // ---------------------------------------------------------------------------
 
@@ -232,7 +231,7 @@ function Provenance({ suggestion }: { suggestion: AiSuggestion }) {
         )}
         <span>{formatMoney(suggestion.cost_usd, 'USD')}</span>
         <span aria-hidden>·</span>
-        <span>{formatRelative(suggestion.created_at, simNow())}</span>
+        <span>{formatRelative(suggestion.created_at, new Date())}</span>
         <span className="ml-auto font-medium text-fg-muted group-open:hidden">
           Details
         </span>
@@ -282,7 +281,7 @@ export function DecidedSuggestion({ suggestion }: { suggestion: AiSuggestion }) 
           {suggestion.decision === 'approved' ? 'Approved' : 'Rejected'}
         </span>
         <span className="hidden shrink-0 text-xs text-fg-subtle sm:inline">
-          {formatRelative(suggestion.decided_at, simNow())}
+          {formatRelative(suggestion.decided_at, new Date())}
         </span>
       </button>
 

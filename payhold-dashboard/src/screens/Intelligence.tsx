@@ -16,9 +16,6 @@ import {
   useMoneyMutation,
 } from '@/lib/queries'
 
-/** Who the approval is recorded as. Real auth will supply this. */
-const ME = 'grace@autohire.rw'
-
 /**
  * A queue, not a dashboard.
  *
@@ -37,7 +34,7 @@ export function IntelligencePage() {
   // funds, so it has to invalidate everything a release would.
   const decide = useMoneyMutation(
     ({ id, decision }: { id: string; decision: 'approved' | 'rejected' }) =>
-      api.decideAiSuggestion(id, decision, ME),
+      api.decideAiSuggestion(id, decision),
   )
 
   const pending = suggestions.data?.filter((s) => s.decision === null) ?? []

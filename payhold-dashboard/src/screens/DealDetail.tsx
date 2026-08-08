@@ -42,7 +42,6 @@ import {
 import { COUNTRY_LABEL, METHOD_LABEL, PROVIDER_LABEL } from '@/lib/rails'
 import { formatRate } from '@/lib/fx'
 import {
-  simNow,
   useAudit,
   useCheckoutSessions,
   useDeal,
@@ -62,7 +61,7 @@ export function DealDetailPage() {
   const audit = useAudit(id)
   const amounts = useDealAmounts(id)
   const refunds = useRefunds(id)
-  const now = simNow()
+  const now = new Date()
 
   if (deal.isPending) {
     return (

@@ -15,10 +15,10 @@ import { Link, Navigate, useNavigate } from 'react-router-dom'
 import { useAuth } from '@/auth/AuthProvider'
 import { AuthError, MIN_PASSWORD_LENGTH } from '@/auth/types'
 import { Button, ErrorNote, Field, Input } from '@/components/ui'
-import { AuthLayout, SimulationNote } from './AuthLayout'
+import { AuthLayout } from './AuthLayout'
 
 export function SignupPage() {
-  const { account, loading, simulated, signUp } = useAuth()
+  const { account, loading, signUp } = useAuth()
   const navigate = useNavigate()
 
   const [companyName, setCompanyName] = useState('')
@@ -138,7 +138,6 @@ export function SignupPage() {
         </p>
       </form>
 
-      {simulated && <SimulationNote />}
     </AuthLayout>
   )
 }

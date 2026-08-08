@@ -46,24 +46,3 @@ export function AuthLayout({
     </div>
   )
 }
-
-/**
- * Said on both screens when the build is running against the mock.
- *
- * A page that asks for a password owes the person the truth about where it
- * goes. Here it goes into localStorage in their own browser, and there is no
- * server on the other end of this form at all.
- */
-export function SimulationNote({ children }: { children?: ReactNode }) {
-  return (
-    <div className="mt-6 rounded-xl bg-surface-2 px-4 py-3 text-xs leading-relaxed text-fg-muted ring-1 ring-line ring-inset">
-      <p>
-        <strong className="font-semibold text-fg">Demo build.</strong> This
-        dashboard runs against a simulated backend in your browser. Accounts,
-        deals and balances live in this tab's storage — no real money moves and
-        nothing is sent anywhere.
-      </p>
-      {children}
-    </div>
-  )
-}

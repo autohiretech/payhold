@@ -35,7 +35,6 @@ import {
   payoutRoute,
 } from '@/lib/rails'
 import {
-  simNow,
   useDeals,
   useDisputes,
   useMoneyMutation,
@@ -79,7 +78,7 @@ export function SellerDetailPage() {
   const disputes = useDisputes()
   const signals = useRiskSignals()
   const context = useRequestContext()
-  const now = simNow()
+  const now = new Date()
 
   if (sellers.isPending) {
     return (
@@ -455,7 +454,7 @@ function Onboarding({ seller, now }: { seller: Seller; now: Date }) {
   // that can name its own verifier can forge one.
   const actor = account?.full_name ?? account?.email ?? ''
   const verify = useMoneyMutation((verified: boolean) =>
-    api.verifySeller(seller.id, actor, verified),
+    api.verifySeller(seller.id, verified),
   )
 
   const cap = capabilities.data

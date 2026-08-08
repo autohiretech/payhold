@@ -34,7 +34,7 @@ export function corsHeaders(req: Request): Record<string, string> {
     'Access-Control-Allow-Origin': origin,
     'Access-Control-Allow-Headers':
       'authorization, x-api-key, content-type, x-client-info, apikey',
-    'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
+    'Access-Control-Allow-Methods': 'GET, POST, PATCH, DELETE, OPTIONS',
     // Echoing a single origin means caches must vary on it, or one tenant's
     // CORS decision gets served to another origin.
     'Vary': 'Origin',

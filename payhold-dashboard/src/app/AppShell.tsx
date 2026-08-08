@@ -4,7 +4,6 @@ import { api } from '@/api'
 import { useAuth } from '@/auth/AuthProvider'
 import { cx, LogoMark } from '@/components/ui'
 import { AssistantProvider } from '@/components/assistant'
-import { DevPanel } from './DevPanel'
 
 const NAV = [
   { to: '/', label: 'Overview', end: true, icon: IconHome },
@@ -66,8 +65,6 @@ export function AppShell() {
           <Outlet />
         </div>
       </main>
-
-      <DevPanel />
     </div>
     </AssistantProvider>
   )

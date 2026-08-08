@@ -464,7 +464,13 @@ Deno.serve(handler(async (req) => {
       const url = new URL(req.url)
       let query = db
         .from('disputes')
-        .select(DISPUTE_COLUMNS)
+        // Evidence travels with the list, embedded rather than fetched per
+        // dispute. A screen showing open cases shows what each side filed —
+        // that is most of what a dispute *is* — and asking again per row would
+        // be one round trip each on a page whose purpose is showing them
+        // together. Offers and the timeline stay behind `GET /disputes/:id`,
+        // because those are read while deciding one case rather than scanning.
+        .select(`${DISPUTE_COLUMNS}, evidence:dispute_evidence(${EVIDENCE_COLUMNS})`)
         .eq('tenant_id', caller.tenant_id)
         .order('opened_at', { ascending: false })
         .limit(Math.min(Number(url.searchParams.get('limit') ?? 100), 500))

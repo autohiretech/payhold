@@ -6,7 +6,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   api,
-  isSimulated,
   type DealListFilter,
   type WebhookDeliveryFilter,
 } from '@/api'
@@ -249,9 +248,4 @@ export function useMoneyAction<TResult>(fn: () => Promise<TResult>) {
     mutationFn: fn,
     onSuccess: () => qc.invalidateQueries(),
   })
-}
-
-/** The simulated clock, for relative timestamps that respect time travel. */
-export function simNow(): Date {
-  return isSimulated(api) ? api.sim.now() : new Date()
 }

@@ -23,8 +23,6 @@ interface AuthContextValue {
   account: AuthAccount | null
   /** False once the stored session has been checked, either way. */
   loading: boolean
-  /** True when accounts are a browser simulation — the mock build. */
-  simulated: boolean
   signIn(email: string, password: string): Promise<void>
   signUp(input: SignUpInput): Promise<void>
   signOut(): Promise<void>
@@ -84,7 +82,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [queryClient])
 
   const value = useMemo<AuthContextValue>(
-    () => ({ account, loading, simulated: auth.simulated, signIn, signUp, signOut }),
+    () => ({ account, loading, signIn, signUp, signOut }),
     [account, loading, signIn, signUp, signOut],
   )
 

@@ -478,6 +478,36 @@ verify_jwt = false
 [functions.risk-signals]
 verify_jwt = false
 
+# The ledger and the audit log themselves. `balance` says what the buckets add
+# up to; these say what they are made of, and who did it.
+[functions.ledger]
+verify_jwt = false
+
+[functions.audit-log]
+verify_jwt = false
+
+# §5.1's routing table, read-only. Which corridors are open rests on §16's
+# written provider confirmation per market, so there is no writer here.
+[functions.payout-routes]
+verify_jwt = false
+
+# §8's per-tenant settings, and the API keys a client's server holds. Both
+# refuse an API key on the write path: a key that could mint another is a key
+# whose revocation means nothing, and a client that could set its own service
+# fee has turned our commission into a field it fills in.
+[functions.settings]
+verify_jwt = false
+
+[functions.api-keys]
+verify_jwt = false
+
+# The master-admin console. `platformAdminFromJwt` like `launch`, and for the
+# same reason the gateway cannot help: it knows nothing about `platform_admins`.
+# Every route here reads across tenants, which is why they live in one function
+# rather than beside handlers that are scoped to one.
+[functions.admin]
+verify_jwt = false
+
 # §8's Resolution Center. Party actions take an API key like `/deals/:id/confirm`
 # does; `/resolve` refuses one and wants a signed-in person, checked in the
 # function rather than here.

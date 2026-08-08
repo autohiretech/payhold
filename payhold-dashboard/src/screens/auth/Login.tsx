@@ -11,13 +11,10 @@ import { Link, Navigate, useLocation, useNavigate } from 'react-router-dom'
 import { useAuth } from '@/auth/AuthProvider'
 import { AuthError } from '@/auth/types'
 import { Button, ErrorNote, Field, Input } from '@/components/ui'
-import { AuthLayout, SimulationNote } from './AuthLayout'
-// Fixture logins, so the demo build is reachable without signing up first.
-// This import goes when the mock does.
-import { DEMO_LOGINS } from '@/api/mock/seed'
+import { AuthLayout } from './AuthLayout'
 
 export function LoginPage() {
-  const { account, loading, simulated, signIn } = useAuth()
+  const { account, loading, signIn } = useAuth()
   const navigate = useNavigate()
   const location = useLocation()
 
@@ -101,31 +98,6 @@ export function LoginPage() {
         </Button>
       </form>
 
-      {simulated && (
-        <SimulationNote>
-          <p className="mt-2">
-            Sign in with a fixture company, or create your own — a new account
-            starts empty, the way a real one does.
-          </p>
-          <ul className="mt-2 space-y-1">
-            {DEMO_LOGINS.map((login) => (
-              <li key={login.email}>
-                <button
-                  type="button"
-                  className="font-mono text-[0.6875rem] text-brand hover:underline"
-                  onClick={() => {
-                    setEmail(login.email)
-                    setPassword(login.password)
-                  }}
-                >
-                  {login.email}
-                </button>{' '}
-                <span className="text-fg-subtle">— {login.company}</span>
-              </li>
-            ))}
-          </ul>
-        </SimulationNote>
-      )}
     </AuthLayout>
   )
 }

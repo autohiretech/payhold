@@ -7,26 +7,35 @@ direct database access, ever**.
 See `../CLAUDE.md` for the product rules that bind both repos (the escrow
 wording ban, the money invariants, the API contract).
 
-## Current state: mock backend
+## Current state: a client of the real API
 
-There is no backend yet. `src/api/mock/` implements the entire v1 contract as a
-real state machine in the browser, persisted to localStorage.
+Every screen reads and writes `payhold-backend`'s Edge Functions. There is no
+mock, no fixture data and no dev panel: `src/api/mock/` implemented the whole v1
+contract as a state machine in localStorage, and it is deleted.
 
 ```
-npm run dev        # http://localhost:5173 — sign in first, see below
-npm test           # engine invariant tests
+npm run dev        # http://localhost:5173 — needs .env.local, see below
+npm test           # the route gate, and the rails table
 npm run typecheck
 npm run build
 ```
 
-The dashboard is behind a sign-in. Against the mock, use one of the fixture
-logins printed on the sign-in screen (`owner@autohire.example` /
-`payhold-demo-2026`), or create an account — which gets you an empty company,
-the way a real signup does. See **Signing in** below.
+**`.env.local` is required.** `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY`
+both have to be set, and `@/config` throws at import when either is missing.
+That used to be the switch that chose the mock, which meant a misconfigured
+deploy and a working demo looked identical from the outside — every screen
+rendered, every number was invented, and nothing said so.
 
-The floating **Simulate** button (dev only) is the control panel: fund a deal,
-advance the clock, run cron, force a payout failure, inject ledger drift, switch
-tenant, reset fixtures. Everything a provider webhook or cron job would do.
+The dashboard is behind a sign-in against real Supabase Auth. Create an account
+and you get an empty company, which is what `POST /account/signup` produces; a
+company with deals in it now means somebody made deals.
+
+What the dev panel could do — fund a deal, advance the clock, run cron, force a
+payout failure, inject drift — is not coming back. Each of those is something
+only a provider webhook or a scheduled job may cause, and a dashboard that could
+do any of it would be a dashboard that could move money without a rail agreeing.
+To exercise a lifecycle now, use `payhold-backend/scripts/sandbox-walkthrough.md`
+against provider test keys.
 
 ## Deploying
 
@@ -50,22 +59,20 @@ Until those exist the workflow builds and tests and skips the publish, rather
 than failing.
 
 `.env.example` is the whole configuration surface, and all of it is public by
-design. Pointing a build at the real backend means setting `VITE_SUPABASE_URL`
-and `VITE_SUPABASE_ANON_KEY` at build time — as repository *variables*, not
-secrets, since they end up in the bundle either way. The service-role key has
-no `VITE_` name it could hide behind and must never appear here.
+design. `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY` are set at build time
+as repository *variables*, not secrets, since they end up in the bundle either
+way. **Both are required and the build fails without them** — there is no
+fallback to simulate against. The service-role key has no `VITE_` name it could
+hide behind and must never appear here.
 
 `public/_redirects` is what makes client-side routing work: without it a buyer
 opening `/pay/:token` from an email gets Cloudflare's 404, because there is no
 file at that path. `public/_headers` denies framing — a payment page inside
 someone else's iframe is the setup for a clickjacked confirmation.
 
-**What ships today is the mock.** `src/api/index.ts` hardwires `MockClient`, so
-a deployed build is a browser-side simulation with fixture deals in
-localStorage: it moves no money and talks to no backend. That is fine for a
-demo and wrong for anything else, and the fix is `HttpClient` plus the one line
-that file was written for. The sign-in in front of it is simulated for the same
-reason and by the same switch — see **Signing in**.
+**What ships is the real thing.** `src/api/index.ts` constructs `HttpClient`
+against the project named in the build environment, and the sign-in in front of
+it is Supabase Auth. A deployed build with the variables unset does not start.
 
 ## Signing in
 
@@ -79,45 +86,34 @@ PayHold account and must never be asked for one.
 
 ```
 src/auth/
-├── types.ts         AuthBackend, AuthAccount, MIN_PASSWORD_LENGTH
-├── index.ts         exports `auth`; ONE line picks mock vs real
-├── mock.ts          browser-simulated accounts, over the mock store
-├── supabase.ts      real Supabase Auth + the `account` Edge Function
-├── password.ts      digests for the mock ONLY — see the header comment
+├── types.ts         AuthBackend, AuthAccount, MIN_PASSWORD_LENGTH, actorId
+├── index.ts         exports `auth`
+├── supabase.ts      Supabase Auth + the `account` Edge Function
 └── AuthProvider.tsx context, `useAuth`, `RequireAuth`
 ```
 
-Both seams read the same environment. `VITE_SUPABASE_URL` +
-`VITE_SUPABASE_ANON_KEY` set → real sessions; unset → the simulation. They must
-move together with `HttpClient`: a real session in front of a browser-side
-ledger is a lie about which one you are looking at.
+**Signing in does not go through an Edge Function.** The dashboard posts to
+Supabase Auth's `/auth/v1/token` and holds the JWT; every API call carries it and
+`resolveCaller` verifies it server-side. Signup is the exception and goes to
+`POST /account/signup`, because two things must happen together — the auth user
+and the `tenant_users` row that makes them a *PayHold* user — and a browser can
+only do one of them.
 
-A session resolves to exactly **one tenant**, and signing in is what sets it —
-`current_tenant_id` in the mock, `tenant_users` in Postgres. There is no
-"account with no company": a user that authenticates but has no membership is
-signed straight back out, which is what `/account/me` enforces server-side.
+A session resolves to exactly **one tenant**, and `/account/me` is what turns it
+into one. There is no "account with no company": a user that authenticates but
+has no membership is signed straight back out.
 
-Two things the mock is careful not to fake:
+`mock.ts` and `password.ts` used to sit in that directory — browser-simulated
+accounts over the mock store, and a hand-rolled digest to make them look like
+something. Both are deleted. A password in this repository now has exactly one
+destination, which is the property worth having: real passwords go to Supabase
+Auth and are bcrypt-hashed there, minimum twelve characters, enforced in
+`functions/account/` and in `config.toml` as well as next to the field.
 
-- **Signing up creates an empty company** — no deals, no sellers, no connected
-  rails, exactly what `POST /account/signup` produces. Handing a new account
-  the fixtures would teach the wrong lesson about tenant isolation.
-- **Only `account.created` is audited.** The real backend cannot audit a
-  sign-in; GoTrue handles it and never tells us.
-
-`src/auth/password.ts` is a salted, iterated SHA-256 over the same synchronous
-primitive `lib/hmac.ts` already carries. It is a **simulation**, not a security
-control — real passwords go to Supabase Auth and are bcrypt-hashed there, and
-nothing in `src/` runs in that configuration. The alternative was a fixture file
-with a plaintext password in it and a login screen nobody believes.
-
-The demo build prints its fixture logins on the sign-in screen (`DEMO_LOGINS`
-in `src/api/mock/seed.ts`). That build is a browser simulation with no backend
-behind it; hiding the password to a localStorage fixture would be theatre with
-a support cost. They mean nothing against a real deployment.
-
-`src/auth/mock.test.ts` is the acceptance spec for the `account` Edge Function,
-the same way `engine.test.ts` is for the money paths.
+**Signing out clears the React Query cache**, before the next sign-in rather
+than after. The cache is keyed by query name and not by tenant, so leaving it
+would let the next person on this machine see the last one's deals in the moment
+before the first refetch lands.
 
 ## The seam
 
@@ -125,139 +121,105 @@ the same way `engine.test.ts` is for the money paths.
 src/api/
 ├── types.ts     the v1 domain types — copy verbatim into payhold-backend
 ├── client.ts    PayHoldClient interface — what every screen codes against
-├── index.ts     exports `api`; ONE line changes when the backend lands
-├── http-ai.ts   the first slice of HttpClient — Intelligence, for real
-└── mock/        store (localStorage + simulated clock), seed, engine, ai,
-                 webhooks, risk, accounts, client
+├── http.ts      HttpClient — its one implementation, against the Edge Functions
+└── index.ts     exports `api`
 ```
 
-Screens import `api` from `@/api` and nothing else. When `HttpClient` exists,
-`src/api/index.ts` picks it based on an env flag and no screen changes.
+Screens import `api` from `@/api` and nothing else. The interface stays, even
+with one implementation behind it: it is the list of things the dashboard is
+allowed to ask for, and §17's "no manual mark-as-paid control **anywhere**" is
+partly enforced by `markPayoutPaid` not being on it.
 
-**The backend is arriving in slices, and two are here.** Each is a decorator
-that takes a client and overrides the methods it can serve, so the cut-over
-lands incrementally instead of in one commit that has to be right about fifty
-endpoints at once. They compose innermost-first in `index.ts`: the mock answers
-whatever nobody has replaced, then `MoneyHttpClient`, then `AiHttpClient`.
+**No method takes the name of the person doing it.** Verifying a seller,
+clearing a payout hold, deciding a dispute, signing off a launch item and
+approving an AI draft are all recorded against somebody, and that somebody comes
+from the session on the server. Those parameters existed because the mock had no
+session to read; they are gone rather than ignored, because an argument a caller
+can set is an argument a caller can forge. `actorId(account)` in `@/auth` is
+what a screen compares against a *recorded* actor — the backend writes
+`user:<email>`, and §8's conflict-of-interest warning would never fire against a
+display name.
 
-- `AiHttpClient` — the eight Intelligence methods. `VITE_PAYHOLD_AI_LIVE=1`.
-- `MoneyHttpClient` — the whole payment lifecycle plus the money reads: create,
-  hosted checkout, confirm, refund, balances, payouts, sellers and seller
-  wallets. `VITE_PAYHOLD_MONEY_LIVE=1`.
+Three places `http.ts` does not paper over a difference between the interface
+and the API, deliberately:
 
-  **`getPublicCheckout` and `payCheckout` go out with no bearer token**, and
-  that is the one thing in this file not to 'fix'. Whoever opens a payment link
-  from an email has no PayHold account, so the token in their URL *is* the
-  authorisation — sending a dashboard session to a page a stranger is looking
-  at would be the opposite of what §10.1 arranged. They carry Supabase's anon
-  key, which the gateway needs to route the request and which grants nothing on
-  its own.
+- **`listDeals`'s `search` is filtered client-side**, because the endpoint
+  offers no such parameter and a query string the backend ignores would be a
+  filter that silently does nothing.
+- **`listRefunds` and `listSellerDestinations` refuse a call with no id.** Those
+  records hang off a deal or a seller; returning `[]` would read as an answer.
+- **`getDeal` drops the `amounts` the endpoint embeds**, so a screen asking what
+  was agreed and one asking what happened still go through different methods.
 
-Three places it does not paper over a difference, deliberately:
-`listDeals`'s `search` is filtered client-side because the endpoint offers no
-such parameter and a query string the backend ignores would be a filter that
-silently does nothing; `listRefunds` **refuses** a call with no deal id rather
-than returning `[]`, because §7.1's records hang off a deal and an empty array
-would look like an answer; and `getDeal` drops the `amounts` the endpoint
-embeds, so a screen asking what was agreed and a screen asking what happened
-still go through different methods.
+**`getPublicCheckout` and `payCheckout` go out with no bearer token**, and that
+is the one thing in this file not to 'fix'. Whoever opens a payment link from an
+email has no PayHold account, so the token in their URL *is* the authorisation.
+They carry Supabase's anon key, which the gateway needs to route the request and
+which grants nothing on its own.
 
-**Each slice keeps its own flag, and that is not timidity.** Turning one on is a
-claim that the backend holds *this account's* data — the mock's `dsp_0007` is
-not a row in anybody's Postgres — and the dashboard cannot check that for you.
+**`counter_statement` is always null.** §8's respondent files their side as
+evidence of kind `message` rather than into a field of its own, so the column
+does not exist on the backend and `http.ts` says so plainly rather than leaving
+a screen to conclude the other party never replied.
 
-That flag is deliberately *not* the Supabase pair. Real sessions and a real
-ledger move together; real drafts over mock deals do not work at all, because
-the model would be asked about a dispute that exists in this browser and in no
-database. Switching it on is a claim that the backend holds your tenant's data,
-and the dashboard cannot check that for you — so the default stays off and the
-demo build stays honest.
+## Where the invariants live now
 
-Which half you are looking at is worth being able to tell at a glance: a real
-draft cites `audit_log` uuids and takes a second to arrive; the mock's is
-instant and cites `aud_00xx`.
+`src/api/mock/engine.test.ts` used to be the acceptance spec for the money
+paths, with four suites beside it — webhooks, risk rules, reconciliation, payout
+retry. All of it is deleted, and the claims moved rather than disappearing:
 
-`SimulationApi` (the `sim` property) exists only on the mock. Guard any use of
-it with `isSimulated(api)` so it compiles away against the real client.
+| What was pinned here | Where it is pinned now |
+|---|---|
+| release needs both confirmations, no double release, refund blocked after release | `payhold-backend/tests/lifecycle.test.ts` |
+| balances derived purely from ledger entries, six buckets | `tests/money-breakdown.test.ts`, `tests/seller-wallet.test.ts` |
+| a rule holds a payout and does nothing else; only a person clears it | `tests/manual-hold.test.ts`, `tests/payout-routing.test.ts` |
+| drift is found by comparing against a provider balance; nothing unfreezes itself | `tests/reconciliation-runs.test.ts` |
+| the backoff ladder, and null meaning no machine may retry | `tests/payout-retry.test.ts` |
+| every state change queues one signed notification | `tests/webhooks-risk-reconciliation.test.ts` |
+| the signature a client verifies, byte for byte | `_shared/crypto.test.ts` |
 
-## Engine tests are the backend's spec
+Two of those were only ever provable against real Postgres anyway — RLS and the
+row locks — which is the argument for the move rather than a consolation for it.
+What no automated suite covers is the end-to-end walk, and that is deliberate:
+`payhold-backend/scripts/sandbox-walkthrough.md` is half watching a provider's
+own dashboard, and a script that could green-light itself is what the launch
+gate exists to prevent.
 
-`src/api/mock/engine.test.ts` encodes the invariants: release needs both
-confirmations, no double release, refund blocked after release, timer fires only
-on non-disputed deals, payouts blocked while frozen, deposits capped at the
-pre-auth, balances derived purely from ledger entries. **Reproduce every one of
-these against the real Edge Functions.** If a rule changes, change it here first.
-
-Three more suites sit beside it, and they are the spec for the parts of the
-backend written most recently:
-
-- `webhooks.test.ts` — every state change queues a notification, a repeated
-  confirmation does not queue two, retries back off and then stop, and a client
-  holding the secret can verify the signature. The backend's counterpart is
-  `payhold-backend/tests/webhooks-risk-reconciliation.test.ts`.
-
-  **Event names are spec §10.2's and were renamed in Phase 1** —
-  `order.funded_held`, `order.delivered` / `order.accepted`,
-  `order.clearing_started`, `order.released`, `refund.succeeded`,
-  `dispute.opened`, `payout.paid`. One event per transition: there is no
-  per-event subscription, so shipping the old name alongside the new would
-  double every client's delivery volume rather than ease a migration.
-- The clearance suite in `engine.test.ts` — `clearing` is where the second
-  confirmation lands and where the release entry is written; `released` is the
-  far side of the window; a dispute opened during clearing freezes both the
-  promotion and the payout. Backend counterpart:
-  `payhold-backend/tests/lifecycle.test.ts`.
-- `risk.test.ts` — a rule can hold a payout and do nothing else; only a person
-  clears the hold; cron and retry cannot.
-- `reconciliation.test.ts` — drift is *found* by comparing against a provider
-  balance, not handed to the dashboard. One alert per rail, refreshed. Drift
-  freezes; nothing unfreezes itself.
-
-  **Every pass now writes a run** (§13): one `reconciliation_runs` row per
-  tenant per rail, with the window it covered and what it found. The alerts say
-  what is wrong now and cannot say that we looked.
-  `resolveReconciliationRun` is a person signing one off, and the only path that
-  lifts a freeze — named, audited, refused while any case on that tenant is
-  still open, and with the unfreeze behind its own argument because writing down
-  what happened and declaring the money accounted for are two different claims.
-  `missing` is always zero here and honestly so: the mock has no inbound-event
-  table to have arrears in, and the backend counts `provider_events` that
-  verified and never finished processing.
-- `retry.test.ts` — §13's capped payout backoff, mirroring
-  `payhold-backend/tests/payout-retry.test.ts`. `next_attempt_at` is the whole
-  mechanism and **null means no machine may try this payout again**, which is
-  how "then blocked for operator action" is said without a second status. The
-  helper parks the account's other payouts for the duration of a forced failure,
-  because `fail_next_payout` is one flag and the first payout dispatched in the
-  pass consumes it.
-
-  **`providerReportedBalance` is now derived independently**, from entries that
-  genuinely crossed the provider boundary (`hold`, `provider_fee`, `refund`,
-  `payout`). It used to be our own expected figure plus injected drift, which
-  made the comparison self-fulfilling — and is why the mock could not have
-  noticed that the platform fee made every released deal drift. `release`,
-  `fee`, `tax`, `reserve` and `reserve_release` appear nowhere in it, which is
-  exactly the property the six-bucket maths has to satisfy for the two to agree.
+**What is still tested here is what only exists here.** `src/auth/gate.test.ts`
+mounts the real route table and asserts the gate: no session lands on `/login`,
+a session gets through, and `/pay/:token` is reachable by a stranger. It stubs
+both seams — a session that is present or absent, and an API that answers
+nothing — because reintroducing a mock backend to test a router would be
+maintaining the thing this repository just stopped shipping. `rails.test.ts`
+asserts no rail is marked verified.
 
 ## Intelligence (root spec §12)
 
-`src/api/mock/ai.ts` is to the assistant what `FakeProvider` is to the rails: a
-deterministic stand-in so demo mode with zero keys works end to end. Same
-inputs, same draft, no network.
+The drafts come from `payhold-backend/functions/ai-dispute`,
+`ai-risk-narrator`, `ai-support` and `ai-decisions`. There was a deterministic
+stand-in here — `src/api/mock/ai.ts`, so demo mode with zero keys worked end to
+end — and it is deleted with the rest. `types.ts` is what holds the two sides
+together: the backend's validators mirror `DisputeSuggestionOutput` and
+`RiskSummaryOutput` field for field, and a field added on one side only is a
+screen that renders nothing.
 
-**The real one now exists** — `payhold-backend/functions/ai-dispute`,
-`ai-risk-narrator`, `ai-support`, `ai-decisions` — and it assembles the same
-inputs and returns the same shapes, which is why no screen changed when it
-landed. `types.ts` is what holds the two together: the backend's validators
-mirror `DisputeSuggestionOutput` and `RiskSummaryOutput` field for field, and a
-field added on one side only is a screen that renders nothing.
+With the model behind it for real, two things follow that the stand-in hid.
+Drafting takes a second and can fail, so every AI call is a `useAiMutation` with
+its own pending and error state rather than something that resolves instantly.
+And `ai_enabled: false`, or a spent `ai_monthly_budget_usd`, is a state you now
+reach by setting it on the Settings screen rather than by switching to a fixture
+tenant — the §12.5 claim is that every money path behaves identically either
+way, and that is checkable on any account.
 
 The one rule everything is arranged around is invariant 9 — **it advises, a
 person decides**:
 
 - Drafting and chatting write to `ai_suggestions`, `ai_chat` and `audit_log`.
-  They touch no deal, no ledger entry and no payout, and `ai.test.ts` asserts
-  that by diffing a snapshot of all money state across every AI call.
+  They touch no deal, no ledger entry and no payout — enforced by a Postgres
+  role rather than by convention: the drafting functions connect as
+  `payhold_ai`, which holds execute on nothing that moves money, and
+  `payhold-backend/tests/intelligence.test.ts` asserts the refusal for all nine
+  money functions.
 - `decideAiSuggestion` is the only path that can end in money moving, and only
   on `approved` — it then calls the *same* `resolveDispute` an admin would have
   called by hand, audited as their decision. Rejecting, approving an
@@ -294,8 +256,9 @@ Commands (`/help` lists them) read the whole account: `/queue`, `/deal`,
 in invariant 9: an exact command naming one record is the operator deciding in
 their own session, parsed literally with no inference, recorded against them.
 Anything the model would have to *interpret* — "approve that for me" — is
-refused and answered with the card and its buttons instead. `ai.test.ts` holds
-both halves of that line.
+refused and answered with the card and its buttons instead. The parser is
+`components/assistant.tsx`, and the line it draws is the thing to preserve when
+touching it.
 
 The Intelligence page is a **queue, not a dashboard**: one column, and nothing gets a card
 unless you act on it. Two columns produced an L-shaped hole whenever the queue
@@ -305,52 +268,32 @@ page, `variant="inline"` is the inset panel inside a dispute or a payout row.
 Provenance (prompt version, input hash) collapses behind a Details toggle: it
 is what makes a decision reproducible and it is noise while you are making one.
 
-Two things the fixtures encode deliberately:
-
-- Seeded drafts are produced by running `composeDisputeDraft` over the
-  fixtures, never by hand-copying its wording — a fixture that drifts from the
-  code it illustrates is worse than no fixture.
-- The three seeded disputes produce all three recommendations. The bumper case
-  turns on the buyer having confirmed *before* the seller opened the dispute —
-  if you touch the seeded timestamps, check `ai.test.ts` still passes, because
-  reordering those two events reverses the answer.
-- **Rwanda Equipment Co has `ai_enabled: false`.** Switch tenant in the dev
-  panel to see the degraded state: no drafts, no chat, and every money path
-  behaving identically. That is the §12.5 claim, made checkable.
-
 Dispute evidence carries a **URL, not a file**. The client's site serves the
 images; we store the reference, so a case can be reviewed with the photos in
-front of you while the files stay theirs. `evidence-photos.ts` draws the
-fixtures as inline SVG data URIs — no assets to ship, no network, and
-schematic on purpose, since a convincing fake photograph invites someone to
-treat a fixture as a record of something that happened. Note the split: people
-see the images, **the assistant is given the descriptions**, which is what
-spec §12.2 says it reads.
+front of you while the files stay theirs. There were fixture photos here, drawn
+as inline SVG data URIs precisely so nobody could mistake one for a record of
+something that happened; they went with the seed. Note the split that remains:
+people see the images, **the assistant is given the descriptions**, which is
+what spec §12.2 says it reads.
 
-`deal_outcomes` is written from the money path in `engine.ts`, not from the AI
-code, so the labels come from every resolution including the ones no model saw
-— a training set of only AI-assisted cases would be biased from the first row.
-The backend does the same thing by triggers on `deals` and `disputes` rather
-than by lines inside the money functions, for the reason `enqueue_webhooks` is
-a trigger: a label every future code path must remember is one that gets
-forgotten.
+`deal_outcomes` is written by **triggers on the money path**, not by anything
+AI, so the labels §24.4 will train on cover every resolution including the ones
+no model saw — a training set of only AI-assisted cases would be biased from the
+first row. A trigger for the reason `enqueue_webhooks` is one: a label every
+future code path must remember is one that gets forgotten.
 
-`risk_signals` (spec §12.3) is **not** mocked: the narrator recomputes signals
-per request and they are captured in the suggestion's `output` and
-`input_hash`. The backend persists them at screening time instead —
-`screen_payout` writes them whether or not the rules are switched on — and
-hands the stored rows to the narrator as findings to explain rather than to
-re-derive.
+`risk_signals` (spec §12.3) are persisted at screening time — `screen_payout`
+writes them whether or not the rules are switched on, because the history is
+what a fraud model of our own trains on later and it cannot be backfilled. The
+narrator is handed the stored rows as findings to explain rather than
+re-deriving them.
 
-Two differences to expect when the live flag is on. `input_hash` is a full
-sha-256 there against this file's FNV-1a, because a hash that has to survive an
-audit is not the place for a short one. The gap that used to be here — a real dispute
-draft being thinner than the mock's, because the backend's `disputes` table had
-a reason and no evidence rows — closed in Phase 8. `dispute-assistant@2` reads
-§8's evidence and the offers the parties have already exchanged, and each
-description is handed over wrapped as untrusted, the same way the opening
-statement is: it is written by a member of the public and it is *about* the
-question being asked, which is what makes it the injection surface.
+`dispute-assistant@2` reads §8's evidence and the offers the parties have
+already exchanged, and each description is handed over **wrapped as untrusted**,
+the same way the opening statement is: it is written by a member of the public
+and it is *about* the question being asked, which is what makes it the injection
+surface. Invariant 9 is why a successful injection costs a wasted click rather
+than money.
 
 ## The Fraud screen
 
@@ -379,10 +322,10 @@ this account's honest traffic. And the footer names the three controls that
 never appear here — 3D Secure, tokenisation, Radar — because a fraud screen that
 lists only what it can show implies the other three do not exist.
 
-`request-context.test.ts` asserts the mock exposes no method that *writes* an
-origin. In the real system the only writers are the `/pay` handler and the
-provider webhook; a mock that let a screen invent an address would be teaching a
-capability the backend deliberately withheld.
+**Nothing on this side writes an origin.** `PayHoldClient` has a read and no
+writer, and the only writers anywhere are the `/pay` handler and the provider
+webhook. A client that could invent an address would be a client that could
+manufacture the evidence a rule is checked against.
 
 **The AI on this screen is the risk narrator, and it is on the reading side of
 the line.** "Brief me" on a held payout drafts a summary of the counterparties —
@@ -433,8 +376,9 @@ decision for every payout it has ever made.
 **`routeReasonText` moved to `src/lib/rails.ts`.** It is still the mirror of
 SQL's `route_reason_text`, but both sides of the seam need it now: the engine
 writes it onto `payout.failure_reason`, and this screen turns a *stored* reason
-code back into the same sentence. A screen importing it from `api/mock/` would
-have worked right up until the mock went away. The rail is still interpolated
+code back into the same sentence. It lived in `api/mock/routing.ts` first, and
+moving it is why this screen still works now that the mock is gone — everything
+left in that directory went with it. The rail is still interpolated
 raw rather than through `PAYOUT_PROVIDER_LABEL`, because the string has to match
 what Postgres produces character for character.
 
@@ -472,10 +416,9 @@ Four things are load-bearing:
   Conflating them would put an operator's name on a buyer's request as though
   the operator were the buyer.
 
-**No dispute request is seeded**, deliberately. `dispute-assistant@2` reads the
-offers, so a fixture request would change what the assistant is given, and
-`ai.test.ts` pins the seeded drafts precisely so they cannot drift from the code
-that produces them. The request form on the screen is how you get one.
+**A request is made on this screen or it does not exist.** `dispute-assistant@2`
+reads the offers, so what the assistant is given depends on what the parties
+have actually exchanged — there is no fixture standing in for a conversation.
 
 ## Reconciliation passes on Admin
 
@@ -489,34 +432,31 @@ posted) are different questions and are shown apart.
 lift a freeze: a name, a note, and the unfreeze behind its own checkbox, because
 writing down what happened and declaring the money accounted for are two claims.
 
-**The blunt per-tenant unfreeze is still on the accounts table**, and the copy
-under it now says what it is: it closes an account's open cases with no name and
-no note. It predates §13 and is what the run sign-off was built to replace.
-Removing it is an engine change rather than a screen one, so this phase
-described it rather than deleting it — worth settling before anybody signs
-`operator_screens`.
+**The per-tenant unfreeze on the accounts table is no longer the blunt
+instrument it was.** It used to close an account's open cases with no name and
+no note, which is what the run sign-off was built to replace. The endpoint now
+refuses it while any case on that account is open — the same condition
+`resolve_reconciliation_run` enforces — so what remains of it is the case it is
+actually for: a freeze somebody placed by hand, which has no pass to sign off.
 
-**No pass is seeded either.** `runReconciliation` writes a real row, so "Run
-now" fills the table honestly; a seeded run would be a fixture asserting that a
-nightly control ran.
+**"Run now" runs the real pass**, the same `reconcileAll` the nightly cron
+calls. There is nothing seeded in this table: a row here means a pass happened.
 
 ## Seller wallets
 
-`computeSellerWallets` in `engine.ts` mirrors SQL's `seller_wallet_rows`, entry
-type for entry type — the same arithmetic as `computeRailBalances`, grouped by
-seller rather than by rail. The property `engine.test.ts` pins is that **every
-seller's wallet summed is the tenant's balance**, bucket for bucket, with
-`fees_retained` asserted non-zero so it cannot pass by everything happening to
-be equal. A wallet derived a second way is free to disagree with the figure
-reconciliation checks against a provider, and the number a seller reads would be
-the one nobody checks.
+The Sellers screen renders `listSellerWallets`, which is `seller_wallet_rows` in
+SQL — the same arithmetic as `rail_balances`, grouped by seller rather than by
+rail. The property that makes it trustworthy is that **every seller's wallet
+summed is the tenant's balance**, bucket for bucket, less `fees_retained`;
+`payhold-backend/tests/seller-wallet.test.ts` asserts it with a non-zero
+`fees_retained` so it cannot pass by everything happening to be equal.
 
 `fees_retained` is **absent from the wallet type**, not zeroed. It is our
 commission and collected tax; a wallet is a screen a seller is shown.
 
 `held` is gross and everything past it is net — nothing is struck inside the
-hold, since the fee is booked at release. The Sellers screen labels that column
-**In progress** rather than anything that reads like a drawable balance, and the
+hold, since the fee is booked at release. The screen labels that column **In
+progress** rather than anything that reads like a drawable balance, and the
 footnote says why. `DealAmounts.seller_net` is what a held deal is actually
 worth to them.
 
@@ -552,74 +492,69 @@ one "registered" date. That is the figure the new-seller rule fires on, and
 a seven-day clearance window every seller is a week old by the time their first
 payout comes due, so measuring at payout time would make the rule unfireable.
 
-## Seeded risk fixtures
+## Outbound webhooks, and what a client verifies
 
-The seed screens its due payouts through the real rules on the way out
-(`screenSeededPayouts`), rather than shipping a hand-written hold. A fixture
-hold would be wrong in two directions at once: a demo showing a rule the code
-would not have fired, and wording that drifts from `risk.ts` the first time
-somebody edits an explanation. `seed-risk.test.ts` pins both halves — the hold
-is a real one, and re-deriving the findings reproduces the stored explanations.
+Deliveries are the backend's — `webhook-dispatch` signs each one with the
+endpoint's decrypted secret and records the outcome. There was a real
+synchronous HMAC in `src/lib/hmac.ts` here, because the mock signed for real
+rather than emitting a decorative string; it is deleted, and with it the second
+copy of the header construction.
 
-`sel_0007` exists for this: registered a day before taking a booking, now due a
-first payout, which is the new-seller rule's whole subject. Nothing is wrong
-with them, and that is the point — the rule makes them wait for a person and may
-do nothing else. Two departures from the dispatcher's `screenPayout`: the seed
-queues no webhook delivery (`webhook_deliveries` starts empty by design), and it
-stamps the hold at the payout's due date rather than at seed time.
+What that means for anyone touching the format: `PayHold-Signature:
+t=<unix>,v1=<hmac-sha256>` over `<t>.<raw body>` is now pinned in exactly one
+place, `payhold-backend/_shared/crypto.test.ts`. Treat it as a published
+contract — clients verify against it, and there is no longer a second suite that
+would fail if it moved.
 
-## Outbound webhooks and risk rules
+The Settings screen shows deliveries with their signature and status, and offers
+a retry. **Retrying re-arms the clock rather than sending from the browser**: the
+row comes back `pending` and `webhook-dispatch` sends it within the minute, which
+is what actually happened. Attempts are not reset, so a person's retry is one
+more attempt rather than a fresh series of five against a server that has already
+refused us five times.
 
-`src/lib/hmac.ts` is a real synchronous HMAC-SHA256, not a stand-in. A mock
-that emitted a decorative signature would make invariant 7 untestable — a
-client could not check it and neither could we — so the mock signs for real and
-`webhooks.test.ts` verifies a delivery the way a client's server would. It is
-synchronous because the engine is: an `await` inside `releaseDeal` would be a
-lie about the backend's shape, where that step is one transaction.
+**The signing secret is shown once, at creation, and never again.** It is
+encrypted rather than hashed on the backend because it has to be *used* on every
+delivery, and there is no endpoint that reads it back.
 
-The header format (`t=<unix seconds>,v1=<hex>` over `<t>.<body>`) is pinned
-from both sides — here and in the backend's `crypto.test.ts` — because a client
-who develops against the mock must not break when they point at the real API.
+## Risk rules, and who may stop a payout
 
-**Signing secrets live on the mock's `webhook_endpoints` rows** and never cross
-the client interface; `listWebhookEndpoints` strips them, as the real API will.
-This is the one place the mock deliberately holds a secret, for the same reason
-`FakeProvider` does: it is standing in for the backend, not for a browser.
+The rules are `screen_payout` in SQL and they run in the transaction that then
+holds the payout. A rule can set `held_for_review` and nothing else — no ledger
+write, no transfer, no change to the deal — and `approve_payout_review` is the
+only way out, taking the approver from the session.
 
-`src/api/mock/risk.ts` holds the deterministic rules. They can set a payout to
-`held_for_review` and nothing else — `risk.test.ts` asserts that by checking no
-ledger entry appears. `frozen` and `held_for_review` are separate statuses on
-purpose: the first is the whole account stopped by reconciliation, the second is
+**A person can place that second kind of stop too** — `holdPayout`, the Hold
+button on the Payouts screen. It is the narrow alternative to freezing an
+account, which stops every honest seller to stop one. It takes a reason, because
+the next person to look at the row has nothing else to go on, and
+`review_held_by` is what distinguishes it from a rule's hold wherever a hold is
+read: a name means somebody you can go and ask, null means arithmetic. It
+refuses `paid` and `processing` — money already with the provider is recalled by
+a phone call, not a button.
+
+`frozen` and `held_for_review` are separate statuses and stay separate on the
+screens: the first is the whole account stopped by reconciliation, the second is
 one payout waiting on one person.
 
-**A person can place that second kind too** — `holdPayout`, the Hold button on
-the Payouts screen. It is the narrow alternative to freezing an account, which
-was previously the only way to stop one seller and stops every other seller with
-them. It takes a reason, because the next person to look at the row has nothing
-else to go on, and `review_held_by` is what distinguishes it from a rule's hold
-wherever a hold is read: a name means somebody you can go and ask, null means
-the arithmetic in `risk.ts`. It refuses `paid` and `processing` — money already
-with the provider is recalled by a phone call, not a button. The backend's
-counterpart is `hold_payout` in `20260806000006_manual_hold.sql`, and
-`tests/manual-hold.test.ts` mirrors this suite case for case.
-
 Seller age is measured **at the deal's creation**, not at payout time. With a
-seven-day clearance window, every seller is a week old by the time their first
-payout comes due, so measuring at payout would make that rule unfireable.
+clearance window of a week or more, every seller is old by the time their first
+payout comes due, so measuring at payout would make the new-seller rule
+unfireable. `SellerDetail` shows it per deal for that reason.
 
 ## Payout routing (spec §5.1)
 
-`src/api/mock/routing.ts` is the mirror of
-`payhold-backend/supabase/migrations/20260807000009_payout_routing.sql` —
-`routeEvaluation`, `routePayout`, `routeReasonText`, `payoutDisplayStatus`, same
-order and same reason codes. A change to either is a change to both.
+The engine is `20260807000009_payout_routing.sql`. This side reads two things
+out of it — `GET /v1/payout-routes` for the table, and the recorded
+`payout_decisions` row for one payout — and computes neither. There used to be a
+mirror of the whole thing in `src/api/mock/routing.ts`; it is deleted, and the
+one piece that had to survive is `routeReasonText` in `src/lib/rails.ts`.
 
-**Which rail carries a payout is data.** `db.payout_routes` is §5's launch
-matrix as rows, and `platformPayoutRoutes()` is the seed. A `tenant_id` of null
-is the platform default; a tenant row for the same rail **replaces** it, or
-switching a rail off for one company would leave the platform's enabled row
-still eligible. The dev panel and §5.2's eighth case both turn on that: disable
-a corridor and the next payout blocks, with no code changed.
+**Which rail carries a payout is data.** A `tenant_id` of null is the platform
+default; a tenant row for the same rail **replaces** it, or switching a rail off
+for one company would leave the platform's enabled row still eligible. §12 wants
+a corridor disabled without a redeploy, which is why the screen is read-only:
+enablement is a row an operator changes.
 
 **A route is never a fallback for another route.** §5.1 forbids silently
 redirecting funds to another destination, and a destination is a token minted
@@ -629,10 +564,9 @@ backup being verified and out of its security hold. Taking it emits
 `payout.route_changed` once.
 
 **Destinations are their own table.** `seller_destinations` is the record;
-`Seller.beneficiary_token` and `masked_destination` are the primary's copy,
-which the backend keeps in step with a trigger. `seedPrimaryDestination` is that
-trigger's mirror and every path that creates a seller must call it — a seller
-without a destination is unpayable for a reason nobody chose.
+`Seller.beneficiary_token` and `masked_destination` are the primary's copy, kept
+in step by a trigger with exactly one writer — which is also why creating a
+seller here is one call and not two.
 
 **Two new payout statuses, separated by who ends them.** `held_for_review` needs
 a named approval; `needs_verification` (§12) needs an attestation and is
@@ -642,18 +576,18 @@ no-route case, and a disputed deal) ends when a route exists or the dispute
 resolves. Both new ones are in the cron's `DISPATCHABLE`, because neither waits
 on a decision and re-asking overrules nobody.
 
-`payoutDisplayStatus` derives §5.1's seven-state seller-facing vocabulary.
-`clearing` and `available` come from the *deal's* window, not from the payout —
-storing them would be one fact with two writers. `frozen` and `held_for_review`
-both read as `blocked`, because to a seller they are the same thing and naming
-a review queue at them invites them to fix what is not theirs to fix.
+`display_status` is §5.1's seven-state seller-facing vocabulary, derived on the
+backend and read off `GET /v1/payouts/:id` — `clearing` and `available` come
+from the *deal's* window rather than from the payout, because storing them would
+be one fact with two writers. `frozen` and `held_for_review` both read as
+`blocked` there, since to a seller they are the same thing and naming a review
+queue at them invites them to fix what is not theirs to fix. `PAYOUT_STATUS_META`
+is the other vocabulary, the operator's, and the Payouts screen uses that one.
 
-`routing.test.ts` mirrors `payhold-backend/tests/payout-routing.test.ts` case
-for case, §5.2's eight included.
+`payhold-backend/tests/payout-routing.test.ts` is the acceptance suite, §5.2's
+eight cases included.
 
 ## Hosted checkout sessions (spec §10.1)
-
-`src/api/mock/checkout.ts` mirrors `20260807000012_checkout_sessions.sql`.
 
 **A session is a scoped, expiring credential for one payment on one deal** — so
 a buyer can choose a payment method without holding an API key and without the
@@ -663,15 +597,16 @@ opens a payment link has no session and no tenant, and the token is what
 authorises the read.
 
 **Nothing in it funds a deal.** Completing a session moves the deal to
-`payment_pending` and stops; in the mock, `simulateFunding` is what plays the
-provider webhook afterwards, and it stays a dev-panel action rather than
-something the checkout path can reach. That is §15 phase 2, and
-`checkout.test.ts` is the acceptance spec.
+`payment_pending` and stops. `funded_held` comes only from a provider webhook
+that checked a signature *and* re-fetched the transaction, which is now the only
+way a deal in this dashboard can become funded at all — the dev panel's
+`simulateFunding` was the other, and deleting it removed the last thing in this
+repository that could make money appear.
 
 `checkout.completed` is not the funding event — it says the buyer is done with
 our page, `order.funded_held` says money arrived. Expiry is derived from
-`expires_at` rather than stored, the same way `payoutDisplayStatus` derives
-`clearing` and `available` from the deal's window.
+`expires_at` rather than stored, for the same reason the payout's display status
+is derived from the deal's window.
 
 `PublicCheckout` is curated by hand rather than spread from the deal: whoever
 opens it is unauthenticated, so `buyer_ref`, the fee breakdown and the seller's
@@ -679,16 +614,17 @@ payout details are absent because they were never added.
 
 **The hosted page is `/pay/:token`, not `/pay/:id`** — Phase 10 moved it. The
 old screen read the deal directly, and `getDeal` is tenant-scoped: it only ever
-worked because the mock lives in the same browser. A stranger opening a payment
-link has no credential, so the token has to *be* the credential.
+worked because the mock lived in the same browser as the person reading it,
+which is exactly the class of bug the cut-over was going to expose. A stranger
+opening a payment link has no credential, so the token has to *be* the
+credential.
 
 Two capabilities went with that move, both on purpose:
 
-- **The method list comes from the server.** `PublicCheckout.methods` is
-  `availableMethods`, which reads the capability matrix; the screen no longer
-  calls `collectionRails` for itself. The registry says what is possible and
-  the matrix says what is on (§29.11), and only the backend can read the
-  second.
+- **The method list comes from the server.** `PublicCheckout.methods` is read
+  off the capability matrix by the backend; the screen does not call
+  `collectionRails` for itself. The registry says what is possible and the
+  matrix says what is on (§29.11), and only the backend can read the second.
 - **The country picker is gone.** The old page let a buyer say they were
   elsewhere and re-priced in the browser. A session is one payment at one
   amount, so re-pricing without re-creating the deal would quote a figure
@@ -700,98 +636,77 @@ idempotent, so the button hands back the live one rather than minting a second.
 
 ## The launch gate (spec §16, §17)
 
-`src/api/mock/launch.ts` mirrors `20260807000015_launch_gate.sql` — the same
-items in the same order, the same blocked-cannot-be-signed rule, the same
-append-only history.
-
-**`connectProvider` refuses `mode: 'live'` while a required item is
-outstanding**, and refuses it *before* the credential fields are checked, the
-same way the real endpoint does. The mock enforces this rather than merely
-allowing it, for the reason it already refuses a live secret key submitted as
-"test": a dashboard that looked like it accepted something the real API rejects
-is teaching the wrong thing.
-
-The list ships with nothing signed, and the seed does not sign anything — a
-fixture signature would make a demo teach that live keys are one click away.
-One item ships **blocked** and cannot be signed at all: `email_confirmation`,
-which is waiting on an SMTP sender. `operator_screens` was the other and is not
-any more — Phase 10 built the four screens it names and cleared the blocker, in
-`20260808000001_operator_screens.sql` and in this file's mirror. Clearing one is
-a change to the item, made by whoever does the work, and it is not the same act
-as signing it: the screens existing is a fact, and whether a case can be read
-from them is the judgement the checklist is for.
-
-`signOffLaunchItem(code, signedBy, evidence, signed?)` takes the name as an
-argument here and reads it from the session in the real endpoint — the same
-split `verifySeller` has, and for the same reason: a caller that can name its
-own approver can forge one.
-
-**There is no screen yet**, deliberately. This is PayHold staff's list rather
-than a tenant's — the real endpoint refuses an API key and wants a
+`20260807000015_launch_gate.sql` is the whole of it, and this side barely
+touches it: `getLaunchChecklist` and `signOffLaunchItem` exist on the client
+interface, and **there is no screen**. The endpoints refuse an API key and want a
 `platform_admins` session, which the dashboard's own sign-in does not produce —
-so the contract and the engine are here and the page that reads them is not part
-of the tenant dashboard.
+this is PayHold staff's list rather than a tenant's.
 
-`launch.test.ts` is the acceptance spec, and its §17 half asks a question only
-this side can: not "is there a constraint" but "is there a **method**". A screen
-cannot call what does not exist, so `markPayoutPaid`, `settlePayout`,
-`writeLedger` and `adjustBalance` being absent from `PayHoldClient` is the form
-"no manual mark as paid control" takes at this seam.
+What a tenant sees of the gate is the refusal. **`connectProvider` refuses
+`mode: 'live'` while a required item is outstanding**, and refuses it *before*
+the credential fields are validated — refusing after we have sent a live secret
+key to the provider would be refusing too late. The mock used to enforce that
+itself so the dashboard could not look like it accepted something the real API
+rejects; now there is only the real API, and the refusal arrives as an error on
+the Rails screen with the outstanding items named in it.
 
-## The Resolution Center (spec §8)
+The §17 half of that claim is one this side can still make on its own, and it is
+worth keeping in mind when adding a method: not "is there a constraint" but "is
+there a **method**". A screen cannot call what does not exist, so
+`markPayoutPaid`, `settlePayout`, `writeLedger` and `adjustBalance` being absent
+from `PayHoldClient` is the form "no manual mark-as-paid control **anywhere**"
+takes at this seam. The backend's `paid_needs_a_provider_reference` is the other
+half, and it binds the correction somebody runs by hand at 2am.
 
-`src/api/mock/resolution.ts` mirrors
-`payhold-backend/supabase/migrations/20260807000017_resolution_center.sql`,
-function for function and refusal for refusal.
+## The Resolution Center engine (spec §8)
 
-**Silence lapses a request; it never accepts one.** §8's 48 hours end with the
-offer `expired` and the dispute still open — a clock that refunded a buyer or
-paid a seller would be a machine deciding, which invariants 9 and 11 forbid.
-§15 phase 4 asks that the *window* resolve without a human, and it does.
-`expired` is a separate status from `declined` because declining is an act, and
-§24.3's labels cannot be backfilled.
+The engine is `20260807000017_resolution_center.sql`, and the three decisions
+worth knowing before changing anything on the screen are all enforced there:
 
-**`disputed_amount` bounds the resolution rather than splitting the payout.**
-One payout row exists per deal, so paying the undisputed share now would leave
-nothing to send the rest with if the dispute later went the seller's way.
-`resolveDispute` refuses a full refund when only part was disputed, and a split
-larger than that part.
+- **Silence lapses a request; it never accepts one.** §8's 48 hours end with the
+  offer `expired` and the dispute still open — a clock that refunded a buyer or
+  paid a seller would be a machine deciding, which invariants 9 and 11 forbid.
+  `expired` is a separate status from `declined` because declining is an act,
+  and §24.3's labels cannot be backfilled.
+- **`disputed_amount` bounds the resolution rather than splitting the payout.**
+  One payout row exists per deal, so paying the undisputed share now would leave
+  nothing to send the rest with if the dispute later went the seller's way.
+  `resolveDispute` is refused for a full refund when only part was disputed, and
+  for a split larger than that part.
+- **Conflict of interest is enforced on who acted.** We store no buyer PII and a
+  seller has no login, so there is no identity to join a deciding administrator
+  to. What is recorded is who did what: whoever raised the dispute, made a
+  request or answered one cannot be named as its decider. `both-parties` is the
+  reserved name for an agreement between the two sides, and it is the one actor
+  allowed to have acted.
 
-**Conflict of interest is enforced on who acted.** We store no buyer PII and a
-seller has no login, so there is no identity to join a deciding administrator
-to. What is recorded is who did what: whoever raised the dispute, made a request
-or answered one cannot be named as its decider. `both-parties` is the reserved
-name for an agreement between the two sides, and it is the one actor allowed to
-have acted.
+Two shapes this side has to match. `respondDisputeOffer` and
+`withdrawDisputeOffer` take **the dispute and the offer**, because the request is
+a sub-resource — `/disputes/:id/offers/:offerId/respond` — and it is the dispute
+that scopes the tenant check. And the screen compares against `actorId(account)`
+rather than a display name, because the actor it is comparing to was recorded by
+the backend as `user:<email>`.
 
-Two shapes to know:
-
-- `db.dispute_offers` is its own table rather than an array on the dispute,
-  because "one open request per **order**" has to be asked across disputes.
-- `respondDisputeOffer` takes the resolve function as an argument rather than
-  importing it. The backend gets that separation for free — its
-  `respond_dispute_offer` calls `resolve_dispute` under one lock — and passing
-  it in is how the mock keeps the request path from depending on the money path.
-
-`resolution.test.ts` mirrors `payhold-backend/tests/resolution-center.test.ts`
-case for case.
+`payhold-backend/tests/resolution-center.test.ts` is the acceptance suite.
 
 ## The capability matrix (spec §9, §12)
 
-`platformProviderCapabilities()` and `db.payment_markets` in `routing.ts` mirror
-`20260807000011_capability_matrix.sql`. Two tables, two different questions:
+`20260807000011_capability_matrix.sql` is where this lives; there was a mirror of
+it in the mock and there is not one now. Two tables, two different questions:
 
 - **`provider_capabilities`** — §9's eight flags plus `implemented` and
   `enabled`. Separate because they fail differently: an unbuilt adapter is a
-  roadmap item, a disabled one is an outage. `routeEvaluation` reads them, so
-  switching one off blocks exactly its own rails and nobody else's.
+  roadmap item, a disabled one is an outage. `route_evaluation` reads the row,
+  so switching one off blocks exactly its own rails and nobody else's.
 - **`payment_markets`** — §12's country switch, an **overlay**. A country with
   no row behaves as `lib/countries.ts` says; a row is a deliberate departure
   with a required reason. `collect` and `payout` close independently, and a
   tenant row replaces the platform's in both directions.
 
-**Three adapters are declared and unbuilt** — `paypal`, `cash_app_pay`,
-`china_wallet_partner`. `Provider` names an **adapter**, `PayoutProvider` names
+**Two adapters are declared and unbuilt** — `cash_app_pay` and
+`china_wallet_partner`; PayPal's class exists and its rail is off for want of a
+signed agreement, which is what `implemented` and `enabled` being separate
+columns is for. `Provider` names an **adapter**, `PayoutProvider` names
 a **rail**, and one adapter carries several: Venmo rides PayPal's API and both
 Chinese wallets ride one partner. `provider_unavailable` and `provider_disabled`
 are separate reason codes for that reason — same sentence to the seller,
@@ -816,7 +731,8 @@ of that map used to sit in screens, which is exactly the failure the convention
 exists to prevent: §5.1 added five rails at once.
 
 **Every row is `verified: false`.** The table encodes the *plan* from the build
-spec, not a checked capability list. Before any rail carries live money, confirm
+spec, not a checked capability list. What a client is told is
+`rails_verified` on `/v1/payment-options`, derived from §16's checklist. Before any rail carries live money, confirm
 it against the provider's own country/method documentation and the signed
 account agreement, then flip the flag. A wrong row means a charge that cannot be
 collected — or money collected that cannot be paid out. `rails.test.ts` asserts
@@ -850,9 +766,9 @@ Two rules are structural rather than configurable:
   100. Forms take major units and convert at the boundary.
 - **Balances have six buckets** (spec §7): `held`, `pending_clearance`,
   `available`, `reserved`, `fees_retained`, `paid_out`. Only the last is money
-  that left. `computeDealAmounts` is the per-deal breakdown, and
-  `POOL_DEDUCTIONS` in `engine.ts` must stay identical to the backend's
-  `POOL_ENTRY_TYPES` and to `rail_balances`' `clearing` expression.
+  that left. Every one of them is derived on the backend and read, never
+  computed here — `getDealAmounts` is the per-deal breakdown and it is a call,
+  not a function.
 - Rail vocabulary (`METHOD_LABEL`, `COUNTRY_LABEL`, `PROVIDER_LABEL`) lives in
   `lib/rails.ts`. Never inline a provider or method name in a screen.
 - **Light theme only.** There is no dark mode and no theme toggle. Don't add
@@ -868,8 +784,9 @@ Two rules are structural rather than configurable:
   decorative dividers only.
 - **Payout status is two vocabularies.** `PAYOUT_STATUS_META` covers
   `Payout.status`, which keeps every distinction an operator needs;
-  `payoutDisplayStatus` derives §5.1's seven seller-facing states. Public pages
-  get the second, the Payouts screen gets the first.
+  `PayoutRouting.display_status` is §5.1's seven seller-facing states, derived
+  by the backend. Public pages get the second, the Payouts screen gets the
+  first.
 - Status vocabulary lives in `DEAL_STATUS_META` / `PAYOUT_STATUS_META` /
   `KYC_STATUS_META`. Labels and plain-language hints are defined once, never
   inline. `DEAL_STATUSES` is in **the Postgres enum's declaration order**, so
@@ -890,5 +807,9 @@ Two rules are structural rather than configurable:
 - Money mutations use `useMoneyMutation` / `useMoneyAction`, which invalidate
   every query — a release touches the deal, ledger, balance, payouts and audit
   at once.
+- **Nothing here computes money.** Fees, balances, breakdowns, routing decisions
+  and display statuses are all reads. A screen that derived one would be a
+  second answer to a question the ledger already answers, free to disagree with
+  the figure reconciliation checks against a provider.
 - Public pages (`src/screens/public/`) are seen by buyers and sellers. Plain
   language, no jargon, no status codes.

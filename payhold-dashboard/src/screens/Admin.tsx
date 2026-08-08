@@ -210,14 +210,16 @@ export function AdminPage() {
         )}
       </Card>
 
-      {/* The button above is the blunt instrument and says so. §13 put the
-          recorded path on the pass itself: a name, a note, and a refusal while
-          any other case on that tenant is still open. This one asks for none of
-          that, which is why it is described rather than recommended. */}
+      {/* This used to be the blunt instrument: it closed an account's open
+          cases with no name and no note. The endpoint now refuses to unfreeze
+          while any case on that account is open — the same condition
+          `resolve_reconciliation_run` enforces — so the two paths agree, and
+          this one is what remains for a freeze somebody placed by hand and so
+          has no pass to sign off. */}
       <p className="mt-3 text-xs text-fg-muted">
-        Freezing and unfreezing here closes an account's open cases without recording who
-        decided or why. Prefer signing off the pass that raised the drift — that is the
-        one path that leaves an answer to “who said this was accounted for”.
+        Unfreezing is refused while any reconciliation case on the account is still
+        open. Sign off the pass that raised the drift instead — that is the path that
+        leaves a name, a note, and an answer to “who said this was accounted for”.
       </p>
     </>
   )
@@ -377,7 +379,7 @@ function SignOff({ run, onDone }: { run: ReconciliationRun; onDone: () => void }
   const [unfreeze, setUnfreeze] = useState(false)
 
   const resolve = useMoneyAction(async () => {
-    const result = await api.admin.resolveReconciliationRun(run.id, actor, note, unfreeze)
+    const result = await api.admin.resolveReconciliationRun(run.id, note, unfreeze)
     onDone()
     return result
   })

@@ -46,6 +46,7 @@ import {
   type Money,
 } from '@/api'
 import { useAuth } from '@/auth/AuthProvider'
+import { actorId } from '@/auth'
 import {
   AiSuggestionCard,
   AiUnavailable,
@@ -87,7 +88,6 @@ import {
   useDisputes,
   useMoneyAction,
   useMoneyMutation,
-  simNow,
 } from '@/lib/queries'
 
 export function ResolutionPage() {
@@ -301,7 +301,7 @@ function OpenRequest({
   offer: DisputeOffer
   deal: Deal | undefined
 }) {
-  const now = simNow()
+  const now = new Date()
   const { account } = useAuth()
   const actor = account?.full_name ?? account?.email ?? ''
   const meta = DISPUTE_OFFER_KIND_META[offer.kind]
@@ -310,9 +310,9 @@ function OpenRequest({
   const respond = useMoneyMutation((accept: boolean) =>
     // The **other** party answers: accepting your own request is not agreement,
     // it is a way around the 48 hours. The engine refuses it too.
-    api.respondDisputeOffer(offer.id, other, actor, accept),
+    api.respondDisputeOffer(offer.dispute_id, offer.id, other, accept),
   )
-  const withdraw = useMoneyAction(() => api.withdrawDisputeOffer(offer.id, actor))
+  const withdraw = useMoneyAction(() => api.withdrawDisputeOffer(offer.dispute_id, offer.id))
 
   const lapsed = Date.parse(offer.expires_at) <= now.getTime()
 
@@ -392,7 +392,7 @@ function Requests({
   offers: DisputeOffer[]
   pending: boolean
 }) {
-  const now = simNow()
+  const now = new Date()
 
   if (pending) return <Skeleton className="h-24" />
 
@@ -473,7 +473,7 @@ function MakeRequest({
   const [note, setNote] = useState('')
 
   const make = useMoneyAction(() =>
-    api.makeDisputeOffer(dispute.id, side, actor, kind, {
+    api.makeDisputeOffer(dispute.id, side, kind, {
       amount: kind === 'partial_refund' ? toMinor(amount) : undefined,
       extendTo: kind === 'extension' ? new Date(extendTo).toISOString() : undefined,
       note: note || undefined,
@@ -613,7 +613,6 @@ function Decide({
       dispute.id,
       choice!,
       note,
-      actor,
       choice === 'partial_refund' ? toMinor(amount) : undefined,
     ),
   )
@@ -623,7 +622,7 @@ function Decide({
   const draft = useAiAction(() => api.draftDisputeSuggestion(dispute.id))
   const decide = useMoneyMutation(
     ({ id, decision }: { id: string; decision: 'approved' | 'rejected' }) =>
-      api.decideAiSuggestion(id, decision, actor),
+      api.decideAiSuggestion(id, decision),
   )
 
   const aiOff = usage.data && (!usage.data.enabled || usage.data.over_budget)
@@ -634,10 +633,13 @@ function Decide({
   // §8's conflict-of-interest control, asked before the buttons rather than
   // after. The rule is on who *acted*: there is no identity to join a deciding
   // administrator to, since we store no buyer PII and a seller has no login.
+  // Compared against what was **recorded**, not against the name on screen:
+  // the backend writes `user:<email>` and a display name would never match.
+  const acting = actorId(account)
   const acted =
-    dispute.raised_by_actor === actor ||
+    dispute.raised_by_actor === acting ||
     offers.some(
-      (o) => o.offered_by_actor === actor || o.responded_by_actor === actor,
+      (o) => o.offered_by_actor === acting || o.responded_by_actor === acting,
     )
 
   // A partial dispute cannot end in a full refund — `disputed_amount` is a

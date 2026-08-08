@@ -1,24 +1,25 @@
 /**
- * The one line that swaps a simulated sign-in for a real one.
+ * Sessions, and there is only one kind of them now.
  *
- * Mirrors `src/api/index.ts`, and is governed by the same environment: when
- * `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY` are set, the dashboard is
- * pointed at the real backend and sessions are real. Unset, it is running
- * against `MockClient`, and the sign-in is a simulation that says so.
+ * `SupabaseAuthBackend` is the whole of it: the dashboard exchanges the
+ * password with Supabase Auth directly and holds the JWT, and every API call
+ * carries it. The simulated sign-in that used to sit behind an environment
+ * check is gone with the mock API it belonged to — a session is either real or
+ * it is theatre, and theatre in front of a login is the wrong thing to
+ * practise on.
  *
- * The two must move together. A real session in front of a browser-side ledger
- * would be a lie about which one you are looking at, so `HttpClient` lands with
- * the same environment check and neither ships alone.
+ * Where the project is comes from `@/config`, which both seams read and which
+ * throws when it is unset. One check rather than two, because a real session in
+ * front of an unreachable backend is as broken as no session at all.
  */
 
-import { MockAuthBackend } from './mock'
+import { SUPABASE_ANON_KEY, SUPABASE_URL } from '@/config'
 import { SupabaseAuthBackend } from './supabase'
 import type { AuthBackend } from './types'
 
-const url = import.meta.env.VITE_SUPABASE_URL
-const anonKey = import.meta.env.VITE_SUPABASE_ANON_KEY
-
-export const auth: AuthBackend =
-  url && anonKey ? new SupabaseAuthBackend(url, anonKey) : new MockAuthBackend()
+export const auth: AuthBackend = new SupabaseAuthBackend(
+  SUPABASE_URL,
+  SUPABASE_ANON_KEY,
+)
 
 export * from './types'

@@ -1,16 +1,23 @@
 /**
  * The single seam between the dashboard and PayHold's backend.
  *
- * Every screen calls this interface and nothing else. Today `MockClient`
- * implements it against an in-browser state machine; when payhold-backend
- * exists we add `HttpClient` with the same methods and change one line in
- * `src/api/index.ts`. No screen changes.
+ * Every screen calls this interface and nothing else. `HttpClient` in
+ * `./http.ts` is its one implementation, against the real Edge Functions; an
+ * in-browser mock used to be the other, and deleting it is what made the
+ * signatures below honest.
  *
  * Method names and arguments deliberately mirror the v1 HTTP contract:
  *   createDeal   → POST /v1/deals
  *   getDeal      → GET  /v1/deals/:id
  *   confirmDeal  → POST /v1/deals/:id/confirm
  *   ...and so on.
+ *
+ * **No method takes the name of the person doing it.** Verifying a seller,
+ * clearing a payout hold, deciding a dispute, signing off a launch item and
+ * approving a draft are all recorded against somebody, and that somebody is
+ * read from the session on the server. These parameters existed because the
+ * mock had no session to read; a caller that can name its own approver can
+ * forge one, so the argument is gone rather than ignored.
  */
 
 import type {
@@ -192,16 +199,12 @@ export interface PayHoldClient {
    * Record that the identity check, the sanctions screen and the ownership
    * check came back.
    *
-   * **A person's decision, and the real endpoint refuses an API key** — a
-   * client that could verify its own sellers from its own server has turned KYC
-   * into a field it sets. `verified: false` is the other direction: it moves
-   * the seller to `review_required`, which holds their payouts again.
+   * **A person's decision, and the endpoint refuses an API key** — a client
+   * that could verify its own sellers from its own server has turned KYC into a
+   * field it sets. `verified: false` is the other direction: it moves the
+   * seller to `review_required`, which holds their payouts again.
    */
-  verifySeller(
-    sellerId: string,
-    verifiedBy: string,
-    verified: boolean,
-  ): Promise<Seller>
+  verifySeller(sellerId: string, verified: boolean): Promise<Seller>
 
   // -- Money ---------------------------------------------------------------
   getBalance(): Promise<Balance[]>
@@ -224,16 +227,16 @@ export interface PayHoldClient {
    * Stop one payout, because a person saw something the rules do not model.
    *
    * The narrow alternative to freezing a whole account, which stops every
-   * honest seller to stop one. It takes a reason and a name: the person who has
-   * to clear it has nothing else to go on, and a stop nobody signed is a stop
-   * nobody can be asked about.
+   * honest seller to stop one. It takes a reason — the person who has to clear
+   * it has nothing else to go on — and the name comes from the session, so a
+   * stop nobody signed is not expressible.
    */
-  holdPayout(id: string, heldBy: string, reason: string): Promise<Payout>
+  holdPayout(id: string, reason: string): Promise<Payout>
   /**
    * Let a held payout go out — whether a rule or a person stopped it. Only
    * people release, and the approval is recorded against the one who gave it.
    */
-  approvePayoutReview(id: string, approvedBy: string): Promise<Payout>
+  approvePayoutReview(id: string): Promise<Payout>
   /**
    * §5.1's routing table — which rails exist, where they reach, and whether
    * they are on. Read-only here: enablement is data an operator changes, and a
@@ -265,8 +268,6 @@ export interface PayHoldClient {
     reason: string,
     opts?: {
       reasonCode?: DisputeReasonCode
-      /** Who filed it. Half of the conflict-of-interest control. */
-      actor?: string
       /**
        * Presentment minor units. Omitted disputes the whole payment — a dispute
        * that named no amount must not be read as one that disputed nothing.
@@ -275,7 +276,7 @@ export interface PayHoldClient {
     },
   ): Promise<Dispute>
   /**
-   * §8's final decision record. `decidedBy` is taken from the session, never
+   * §8's final decision record. The decider is taken from the session, never
    * from a form: whoever spoke for a side in this dispute cannot decide it, and
    * a caller who can name their own decider walks straight past that.
    */
@@ -283,7 +284,6 @@ export interface PayHoldClient {
     id: string,
     resolution: 'release' | 'refund' | 'partial_refund',
     note: string,
-    decidedBy: string,
     refundAmount?: Money,
   ): Promise<Dispute>
 
@@ -297,23 +297,28 @@ export interface PayHoldClient {
   makeDisputeOffer(
     disputeId: string,
     offeredBy: ConfirmSide,
-    actor: string,
     kind: DisputeOfferKind,
     opts?: { amount?: Money; extendTo?: Timestamp; note?: string },
   ): Promise<DisputeOffer>
-  /** The **other** party answers. Accepting a refund kind settles the deal. */
+  /**
+   * The **other** party answers. Accepting a refund kind settles the deal.
+   *
+   * The dispute travels with the offer because the request is a sub-resource of
+   * it — `/disputes/:id/offers/:offerId/respond` — and it is the dispute that
+   * scopes the tenant check. An offer id alone would have to be looked up
+   * first, which is a round trip to learn something the caller already knows.
+   */
   respondDisputeOffer(
+    disputeId: string,
     offerId: string,
     side: ConfirmSide,
-    actor: string,
     accept: boolean,
   ): Promise<DisputeOffer>
-  withdrawDisputeOffer(offerId: string, actor: string): Promise<DisputeOffer>
+  withdrawDisputeOffer(disputeId: string, offerId: string): Promise<DisputeOffer>
 
   addDisputeEvidence(
     disputeId: string,
     side: ConfirmSide,
-    actor: string,
     input: {
       kind: DisputeEvidence['kind']
       description: string
@@ -362,13 +367,11 @@ export interface PayHoldClient {
    * refused whatever the caller's authority: no attestation makes unbuilt work
    * exist.
    *
-   * `signedBy` is an argument here and comes from the **session** in the real
-   * endpoint, the same split `verifySeller` has: a caller who can name their
-   * own approver can forge one.
+   * The signatory comes from the session, the same as every other attestation
+   * in this interface.
    */
   signOffLaunchItem(
     code: string,
-    signedBy: string,
     evidence: string,
     signed?: boolean,
   ): Promise<LaunchChecklist>
@@ -405,11 +408,7 @@ export interface PayHoldClient {
   draftDisputeSuggestion(disputeId: string): Promise<AiSuggestion>
   /** Summarise what is known about a deal's counterparties before a payout. */
   draftRiskSummary(dealId: string): Promise<AiSuggestion>
-  decideAiSuggestion(
-    id: string,
-    decision: AiDecision,
-    decidedBy: string,
-  ): Promise<AiSuggestion>
+  decideAiSuggestion(id: string, decision: AiDecision): Promise<AiSuggestion>
   /** The dashboard support assistant. Answers from documents; has no tools. */
   askAssistant(question: string): Promise<AiChatMessage>
   listAiChat(): Promise<AiChatMessage[]>
@@ -451,7 +450,6 @@ export interface AdminApi {
    */
   resolveReconciliationRun(
     runId: string,
-    resolvedBy: string,
     note: string,
     unfreeze?: boolean,
   ): Promise<ReconciliationRun>
@@ -459,39 +457,13 @@ export interface AdminApi {
   unfreezePayouts(tenantId: string): Promise<Tenant>
 }
 
-/**
- * Simulation hooks. These exist ONLY on the mock — they are the levers the dev
- * panel pulls to drive deals through states that would normally need a real
- * provider or a cron job. `HttpClient` will not implement this.
+/*
+ * There is no simulation surface here any more.
+ *
+ * `SimulationApi` used to sit at the bottom of this file: fund a deal, advance
+ * the clock, run cron, force a payout failure, inject drift. Those were the
+ * levers the dev panel pulled against the in-browser mock, and every one of
+ * them is now something only a provider webhook or a scheduled job can cause.
+ * A dashboard that could fund a deal would be a dashboard that could move money
+ * without a rail agreeing, which is the thing invariant 2 exists to prevent.
  */
-export interface SimulationApi {
-  /**
-   * Simulate a verified provider webhook landing: created → funded_held.
-   * The method fixes which rail the deal ends up on.
-   */
-  simulateFunding(
-    dealId: string,
-    method?: PaymentMethod,
-    network?: string,
-  ): Promise<Deal>
-  /** Move the world's clock forward, firing any timers that come due. */
-  advanceTime(hours: number): Promise<void>
-  /** Run the cron pass now: auto-release, clearance, payout dispatch. */
-  runCron(): Promise<void>
-  /** Make the next payout attempt fail, to exercise the triage path. */
-  failNextPayout(): void
-  /** Make the next webhook attempt fail, to exercise backoff and retry. */
-  failNextWebhook(): void
-  /** Introduce a ledger-vs-provider drift so reconciliation alerts. */
-  injectDrift(tenantId: string, amount: number): Promise<void>
-  /** Wipe localStorage and re-seed from fixtures. */
-  reset(): Promise<void>
-  /** Current simulated time, which may be ahead of the real clock. */
-  now(): Date
-}
-
-export function isSimulated(
-  client: PayHoldClient,
-): client is PayHoldClient & { sim: SimulationApi } {
-  return 'sim' in client
-}

@@ -25,7 +25,6 @@ import {
 } from '@/lib/format'
 import {
   keys,
-  simNow,
   useMoneyAction,
   useMoneyMutation,
   useWebhookDeliveries,
@@ -262,7 +261,7 @@ export function ApiKeysPage() {
 function DeliveriesCard() {
   const deliveries = useWebhookDeliveries({ limit: 25 })
   const retry = useMoneyMutation((id: string) => api.retryWebhookDelivery(id))
-  const now = simNow()
+  const now = new Date()
 
   return (
     <Card className="mt-5">

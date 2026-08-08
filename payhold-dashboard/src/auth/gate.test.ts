@@ -1,32 +1,81 @@
 /**
  * Does the gate actually gate?
  *
- * `mock.test.ts` covers what a session *is*; this covers what the app does
- * about one. It mounts the real route table rather than a stand-in, because
- * the claim is about `routes.tsx`: everything with dashboard chrome sits behind
- * `RequireAuth`, and the two hosted pages a buyer sees deliberately do not.
+ * The claim is about `routes.tsx`: everything with dashboard chrome sits behind
+ * `RequireAuth`, and the two hosted pages a buyer sees deliberately do not. So
+ * it mounts the real route table rather than a stand-in.
+ *
+ * **Both seams are stubbed, and neither stub is a mock backend.** `@/auth` is
+ * replaced by a session that is present or absent — which is the only input the
+ * gate reads — and `@/api` by a client that answers every call with nothing, so
+ * the screens behind the gate render without a network. The in-browser mock
+ * that used to stand in for the API is deleted; a test that reintroduced one
+ * would be maintaining the thing this repository just stopped shipping.
  *
  * Written with `createElement` rather than JSX because Vitest is scoped to
  * `*.test.ts` here, and one file's syntax is not worth widening that for.
  */
 
-import { beforeEach, expect, it } from 'vitest'
+import { beforeEach, expect, it, vi } from 'vitest'
 import { StrictMode, act, createElement as h } from 'react'
 import { createRoot } from 'react-dom/client'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { RouterProvider, createMemoryRouter } from 'react-router-dom'
-import { AuthProvider } from './AuthProvider'
-import { MockAuthBackend } from './mock'
-import { routes } from '@/app/routes'
-import { DEMO_LOGINS, seedDb } from '@/api/mock/seed'
-import { resetDb } from '@/api/mock/store'
+import type { AuthAccount } from './types'
 
-const DEMO = DEMO_LOGINS[0]!
+const SIGNED_IN: AuthAccount = {
+  id: 'usr_test',
+  email: 'grace@autohire.rw',
+  full_name: 'Grace Uwase',
+  tenant_id: 'ten_test',
+  tenant_name: 'AutoHire',
+  role: 'owner',
+}
+
+/** Flipped per test, before the mount. */
+let session: AuthAccount | null = null
+
+vi.mock('@/auth', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./index')>()
+  return {
+    ...actual,
+    auth: {
+      restore: async () => session,
+      signIn: async () => SIGNED_IN,
+      signUp: async () => SIGNED_IN,
+      signOut: async () => {
+        session = null
+      },
+      accessToken: async () => (session ? 'test-token' : null),
+    },
+  }
+})
 
 /**
- * A memory router per mount. The exported `router` is a browser one built once
- * at import, so its history would carry from one test into the next.
+ * Every read answers empty.
+ *
+ * The screens behind the gate are not what is being asserted — that they
+ * *rendered at all* is — so a client that returns nothing for everything is
+ * exactly enough. It is also the honest shape of a brand new account.
  */
+vi.mock('@/api', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/api')>()
+
+  const empty = new Proxy(
+    {},
+    {
+      get: (_target, prop: string) => {
+        if (prop === 'admin') return {}
+        return async () => (prop.startsWith('list') ? [] : null)
+      },
+    },
+  )
+
+  return { ...actual, api: empty }
+})
+
+const { routes } = await import('@/app/routes')
+
 async function mount(path: string) {
   const router = createMemoryRouter(routes, { initialEntries: [path] })
   const el = document.createElement('div')
@@ -54,9 +103,11 @@ async function mount(path: string) {
   return { el, router }
 }
 
+const { AuthProvider } = await import('./AuthProvider')
+
 beforeEach(() => {
   localStorage.clear()
-  resetDb(seedDb)
+  session = null
 })
 
 it('sends someone with no session to the sign-in screen', async () => {
@@ -75,7 +126,7 @@ it('remembers where they were going', async () => {
 })
 
 it('lets a signed-in person through', async () => {
-  await new MockAuthBackend().signIn(DEMO.email, DEMO.password)
+  session = SIGNED_IN
 
   const { el, router } = await mount('/deals')
 
@@ -87,7 +138,7 @@ it('lets a signed-in person through', async () => {
 it('does not ask a buyer to sign in', async () => {
   // Someone opening a payment link from an email has no PayHold account. A
   // gate in front of this page is a gate in front of getting paid.
-  const { router } = await mount('/pay/deal_0001')
+  const { router } = await mount('/pay/chk_live_token')
 
-  expect(router.state.location.pathname).toBe('/pay/deal_0001')
+  expect(router.state.location.pathname).toBe('/pay/chk_live_token')
 })

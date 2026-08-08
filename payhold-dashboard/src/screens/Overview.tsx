@@ -18,7 +18,7 @@ import {
   formatMoneyShort,
   formatRelative,
 } from '@/lib/format'
-import { simNow, useBalance, useDeals, useDisputes, usePayouts } from '@/lib/queries'
+import { useBalance, useDeals, useDisputes, usePayouts } from '@/lib/queries'
 
 export function OverviewPage() {
   const balance = useBalance()
@@ -26,7 +26,7 @@ export function OverviewPage() {
   const payouts = usePayouts()
   const disputes = useDisputes()
 
-  const now = simNow()
+  const now = new Date()
   const openDisputes = disputes.data?.filter((d) => d.status === 'open') ?? []
   const failedPayouts = payouts.data?.filter((p) => p.status === 'failed') ?? []
 

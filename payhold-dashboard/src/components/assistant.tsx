@@ -36,9 +36,6 @@ import {
   useMoneyMutation,
 } from '@/lib/queries'
 
-/** Who an approval is recorded as. Real auth will supply this. */
-const ME = 'grace@autohire.rw'
-
 // ---------------------------------------------------------------------------
 
 const AssistantContext = createContext<{ open: () => void } | null>(null)
@@ -115,7 +112,7 @@ function AssistantModal({ onClose }: { onClose: () => void }) {
   // same audit row as the button on the Disputes screen.
   const decide = useMoneyMutation(
     ({ id, decision }: { id: string; decision: 'approved' | 'rejected' }) =>
-      api.decideAiSuggestion(id, decision, ME),
+      api.decideAiSuggestion(id, decision),
   )
 
   const [draft, setDraft] = useState('')
