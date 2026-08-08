@@ -260,7 +260,7 @@ worst it reads as something that happened while you were away.
 Answers can carry records. Attachments hold an **id, not a snapshot**, so a
 draft shown an hour ago renders today's truth — which is also why the Approve
 button inside a transcript is the same button, the same call and the same audit
-row as the one on the Disputes screen.
+row as the one on the Resolution Center.
 
 Commands (`/help` lists them) read the whole account: `/queue`, `/deal`,
 `/evidence`, `/draft`, `/risk`, `/disputes`, `/deals`, `/payouts`, `/balance`,
@@ -411,6 +411,68 @@ code back into the same sentence. A screen importing it from `api/mock/` would
 have worked right up until the mock went away. The rail is still interpolated
 raw rather than through `PAYOUT_PROVIDER_LABEL`, because the string has to match
 what Postgres produces character for character.
+
+## The Resolution Center screen
+
+`src/screens/Resolution.tsx` replaced `Disputes`, which showed a statement and
+two buttons. The buttons were never the problem — what was missing is everything
+you need before pressing one, which is §16's `operator_screens` in a sentence.
+One card per dispute, three tabs (the case, the requests, the timeline), and the
+route is still `/disputes`: the object is a dispute in our own code and only the
+screen moved, the same split §29.2 drew for the event names.
+
+**The open request sits above the tabs rather than inside one.** It is the only
+thing on the card with a clock running on it, and at 48 hours it lapses with
+nothing moved and the dispute still open.
+
+Four things are load-bearing:
+
+- **A lapsed request never reads as a declined one.** `DISPUTE_OFFER_STATUS_META`
+  gives `expired` "nobody answered inside 48 hours" and `declined` somebody
+  having said no. Declining is an act; §24.3's labels cannot be backfilled, so
+  collapsing the two would lose the difference permanently.
+- **`disputed_amount` is enforced in the form.** A partial dispute disables the
+  full-refund option and carries the reason in its tooltip and under the row,
+  rather than offering it for `resolveDispute` to refuse. A disabled control
+  that says why is a smaller surprise than a failed call.
+- **Recording a request costs you the decision, and the screen says so before
+  you act.** §8's conflict-of-interest control is on who *acted* — there is no
+  identity to join a deciding administrator to, since we store no buyer PII and
+  a seller has no login. So an operator writing down a request a party made over
+  the phone disqualifies themselves from ruling on it, and the decide panel
+  replaces itself with that explanation once it applies.
+- **The side and the actor are separate fields.** The side is whose request it
+  is; the actor is who wrote it down, and only the second has a login.
+  Conflating them would put an operator's name on a buyer's request as though
+  the operator were the buyer.
+
+**No dispute request is seeded**, deliberately. `dispute-assistant@2` reads the
+offers, so a fixture request would change what the assistant is given, and
+`ai.test.ts` pins the seeded drafts precisely so they cannot drift from the code
+that produces them. The request form on the screen is how you get one.
+
+## Reconciliation passes on Admin
+
+The alerts table says what is wrong *now* and structurally cannot say that we
+looked. `RunsCard` is §13's other half: one row per account per rail, the window
+it covered, and four counters — of which `skipped` (a rail with no external
+figure) and `missing` (events the provider told us about that the ledger never
+posted) are different questions and are shown apart.
+
+`resolveReconciliationRun` is the sign-off, and it is the **recorded** way to
+lift a freeze: a name, a note, and the unfreeze behind its own checkbox, because
+writing down what happened and declaring the money accounted for are two claims.
+
+**The blunt per-tenant unfreeze is still on the accounts table**, and the copy
+under it now says what it is: it closes an account's open cases with no name and
+no note. It predates §13 and is what the run sign-off was built to replace.
+Removing it is an engine change rather than a screen one, so this phase
+described it rather than deleting it — worth settling before anybody signs
+`operator_screens`.
+
+**No pass is seeded either.** `runReconciliation` writes a real row, so "Run
+now" fills the table honestly; a seeded run would be a fixture asserting that a
+nightly control ran.
 
 ## The seller page
 
@@ -601,10 +663,13 @@ is teaching the wrong thing.
 
 The list ships with nothing signed, and the seed does not sign anything — a
 fixture signature would make a demo teach that live keys are one click away.
-Two items ship **blocked** and cannot be signed at all: `operator_screens`
-(this phase's Resolution Center and reconciliation screens) and
-`email_confirmation`. Clearing one is a change to the item, made by whoever does
-the work.
+One item ships **blocked** and cannot be signed at all: `email_confirmation`,
+which is waiting on an SMTP sender. `operator_screens` was the other and is not
+any more — Phase 10 built the four screens it names and cleared the blocker, in
+`20260808000001_operator_screens.sql` and in this file's mirror. Clearing one is
+a change to the item, made by whoever does the work, and it is not the same act
+as signing it: the screens existing is a fact, and whether a case can be read
+from them is the judgement the checklist is for.
 
 `signOffLaunchItem(code, signedBy, evidence, signed?)` takes the name as an
 argument here and reads it from the session in the real endpoint — the same

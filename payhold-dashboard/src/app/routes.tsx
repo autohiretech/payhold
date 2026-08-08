@@ -7,7 +7,7 @@ import { OverviewPage } from '@/screens/Overview'
 import { DealsPage } from '@/screens/Deals'
 import { DealDetailPage } from '@/screens/DealDetail'
 import { PayoutsPage } from '@/screens/Payouts'
-import { DisputesPage } from '@/screens/Disputes'
+import { ResolutionPage } from '@/screens/Resolution'
 import { FraudPage } from '@/screens/Fraud'
 import { IntelligencePage } from '@/screens/Intelligence'
 import { SellersPage } from '@/screens/Sellers'
@@ -45,7 +45,7 @@ export const routes: RouteObject[] = [
       { path: 'deals/:id', element: <DealDetailPage /> },
       { path: 'payouts', element: <PayoutsPage /> },
       { path: 'routing', element: <RoutingPage /> },
-      { path: 'disputes', element: <DisputesPage /> },
+      { path: 'disputes', element: <ResolutionPage /> },
       { path: 'intelligence', element: <IntelligencePage /> },
       { path: 'fraud', element: <FraudPage /> },
       { path: 'sellers', element: <SellersPage /> },

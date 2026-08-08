@@ -169,13 +169,16 @@ export function platformLaunchChecklist(): LaunchChecklistItem[] {
       '§13: capped exponential backoff, then blocked for an operator. A retry that is only ever a person pressing a button is safe, and is not what §13 describes.',
       'engineering'),
 
-    // --- Engineering, blocked by work that is not done ---------------------
+    // Unblocked by phase 10, which built the last two of the four screens it
+    // names — the Resolution Center and the reconciliation Passes card.
+    // Mirrors `20260808000001_operator_screens.sql`. Still unsigned: that the
+    // screens exist is a fact, and whether a case can be read from them is the
+    // judgement the checklist is for.
     item('operator_screens', 'An operator can read what they are being asked to decide',
       'A held payout shows its routing decision and reason codes, the seller’s KYC state, the dispute behind it and the reconciliation run that froze the tenant. Invariant 11 puts a person on the button; they need the case in front of them.',
-      'engineering', {
-        blocked_by:
-          'phase-10 (Dashboard): the Routing Center, Resolution Center and reconciliation screens are not built',
-      }),
+      'engineering'),
+
+    // --- Engineering, blocked by work that is not done ---------------------
     item('email_confirmation', 'A signed-up address is proven',
       'Email confirmation is on with a real sender. Today addresses are confirmed on creation because there is no way to send anything, so a dashboard login’s address is unproven — and that session reads every deal a company has.',
       'engineering', { blocked_by: 'no SMTP sender configured' }),

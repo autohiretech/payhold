@@ -3,13 +3,16 @@
 Bringing the built system up to the Manus AI handoff specification
 ("PayHold Marketplace Payments Platform", 17 sections).
 
-**Status:** phases 0–9 and 11 done; 10 partly done (2026-08-08). Phases execute one at a time, on request.
+**Status:** phases 0–9 and 11 done; 10 all but its `Admin`/`Audit` checkout-session
+list (2026-08-08). Phases execute one at a time, on request.
 
 Phase 11 landing before 8, 9 and 10 finished is not an ordering mistake: the
 gate it builds ships **shut**, and the work those phases still owed is on it as
 blockers nobody can sign off. Clearing one is a row, changed by the phase that
-does the work — Phase 8 cleared `dispute_window` that way, in its own migration.
-Only `operator_screens` (Phase 10) and `email_confirmation` remain.
+does the work — Phase 8 cleared `dispute_window` that way, in its own migration,
+and Phase 10 cleared `operator_screens` the same way in `20260808000001`. Only
+`email_confirmation` remains, and it is waiting on an SMTP sender rather than on
+anything in this plan.
 
 ## Decisions taken before planning
 
@@ -550,17 +553,73 @@ catching up here. This phase is the screens themselves:
 - ✅ New **Routing Center** screen — destinations, eligibility, routing decisions
   with their reason codes.
 - ✅ Seller KYC state on `SellerDetail` and `Sellers`.
-- ⬜ **Resolution Center** replacing the current `Disputes` screen.
-- ◐ Checkout sessions and reconciliation runs on `Admin` / `Audit`.
+- ✅ **Resolution Center** replacing the `Disputes` screen.
+- ✅ Reconciliation runs on `Admin`, with §13's sign-off.
+- ◐ Checkout sessions on `Admin` / `Audit`.
 
-**The two that did not land are blocked on the same thing, and it is worth
-recording rather than retrying.** This phase assumes mock parity — its own first
-sentence says so — and Phases 8 and 9 landed **backend-only**. There is no
-`dispute_offers`, no structured `reason_code` and no `reconciliation_runs` in
-`src/api/mock/`, so a Resolution Center or a runs table here would either render
-nothing or invent semantics the migrations already fixed. Mirroring
-`20260807000013/14` into the mock is Phase 8's and Phase 9's dashboard half, not
-this one's, and it has to happen before these two screens can be honest.
+**The two screens were blocked on mock parity, and the block cleared itself.**
+This phase assumes parity — its own first sentence says so — and Phases 8 and 9
+landed backend-only, so at the time there was no `dispute_offers`, no structured
+`reason_code` and no `reconciliation_runs` in `src/api/mock/`: a Resolution
+Center built then would have rendered nothing or invented semantics the
+migrations had already fixed. Mirroring those migrations was Phase 8's and Phase
+9's dashboard half rather than this one's, and once it landed
+(`mock/resolution.ts`, the runs on the admin seam) both screens became
+buildable and were built.
+
+### What landed second
+
+- **The Resolution Center is one card per dispute with three tabs** — the case,
+  the requests, the timeline — and the open request sits above all three,
+  because it is the only thing on the card with a clock running on it. §16's
+  `operator_screens` is the requirement in a sentence, so the evidence and the
+  ordered history are on the page with the decision rather than a query away.
+- **A lapsed request never reads as a declined one.** `expired` is "nobody
+  answered inside 48 hours", `declined` is somebody having said no, and
+  `DISPUTE_OFFER_STATUS_META` keeps them apart wherever an offer is rendered.
+  §24.3's labels cannot be backfilled, so a screen collapsing the two would lose
+  the distinction for good.
+- **`disputed_amount` is enforced in the form.** A partial dispute disables the
+  full-refund option and says why, rather than offering it and letting
+  `resolve_dispute` refuse. A disabled control carrying its reason is a smaller
+  surprise than a failed call.
+- **Recording a request costs you the decision, and the screen says so first.**
+  §8's conflict-of-interest control is on who *acted*, so an operator writing
+  down a request a party made over the phone disqualifies themselves from ruling
+  on that dispute. That is a consequence people should meet before they act, so
+  it is stated on both the request form and the answer buttons — and the decide
+  panel replaces itself with the explanation once it applies.
+- **Reconciliation `Passes` is the recorded way to lift a freeze.** The alerts
+  table says what is wrong now and structurally cannot say that we looked. The
+  runs table says we looked, over what window, and separates `skipped` (a rail
+  we could not reach) from `missing` (events the provider told us about that the
+  ledger never posted). Sign-off takes a name and a note, with the unfreeze
+  behind its own checkbox, because writing down what happened and declaring the
+  money accounted for are two claims.
+- **The blunt per-tenant unfreeze survived, relabelled.** `unfreezePayouts`
+  closes an account's open cases with no name and no note — it predates §13 and
+  is exactly what `resolve_reconciliation_run` was built to replace. Deleting it
+  is an engine change rather than a screen change, so this phase describes it as
+  the lesser path and leaves the call to whoever signs `operator_screens`.
+- **`operator_screens` is unblocked, in `20260808000001` and its mock mirror.**
+  The launch gate's contract is that clearing a blocker is a row changed by the
+  phase that does the work, and all four screens the item names now exist. It
+  clears the blocker and signs nothing: that the screens exist is a fact a
+  migration can assert, and whether a case can be read from them is the
+  judgement the checklist is for. `email_confirmation` is now the only required
+  item still blocked, and it is waiting on an SMTP sender rather than on code.
+
+**No fixture was added for either screen, and both refusals are deliberate.** A
+seeded reconciliation run would be a fixture asserting that a nightly control
+ran; `runReconciliation` writes a real row, so "Run now" fills the table
+honestly. A seeded dispute request would change what the dispute assistant is
+given — `dispute-assistant@2` reads the offers — and the seeded drafts are
+pinned by `ai.test.ts` precisely so they cannot drift from the code that
+produces them. The request form on the screen is how you get one.
+
+Tests: 395 dashboard, all passing, with `launch.test.ts` updated — its "a
+blocked item cannot be signed" case now uses `email_confirmation`, the last item
+that is genuinely unsignable.
 
 ### What landed
 

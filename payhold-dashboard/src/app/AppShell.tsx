@@ -11,7 +11,7 @@ const NAV = [
   { to: '/deals', label: 'Deals', icon: IconDeals },
   { to: '/payouts', label: 'Payouts', icon: IconPayouts },
   { to: '/routing', label: 'Routing', icon: IconRouting },
-  { to: '/disputes', label: 'Disputes', icon: IconDisputes },
+  { to: '/disputes', label: 'Resolution', icon: IconDisputes },
   { to: '/intelligence', label: 'Intelligence', icon: IconIntelligence },
   { to: '/fraud', label: 'Fraud', icon: IconFraud },
   { to: '/sellers', label: 'Sellers', icon: IconSellers },

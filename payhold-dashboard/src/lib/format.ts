@@ -1,6 +1,10 @@
 import type {
   Currency,
   DealStatus,
+  DisputeOfferKind,
+  DisputeOfferStatus,
+  DisputeReasonCode,
+  DisputeStatus,
   KycStatus,
   Money,
   PayoutStatus,
@@ -284,6 +288,122 @@ export const DELIVERY_STATUS_META: Record<WebhookDeliveryStatus, StatusMeta> = {
     label: 'Failed',
     tone: 'danger',
     hint: 'Five attempts, no success. Send it again once the endpoint is back.',
+  },
+}
+
+// ---------------------------------------------------------------------------
+// The Resolution Center's vocabulary (§8)
+// ---------------------------------------------------------------------------
+
+export const DISPUTE_STATUS_META: Record<DisputeStatus, StatusMeta> = {
+  open: {
+    label: 'Open',
+    tone: 'held',
+    hint: 'The money stays put — it can neither release nor refund while this is open.',
+  },
+  resolved_released: {
+    label: 'Released to seller',
+    tone: 'released',
+    hint: 'Decided in the seller’s favour. The payout can go.',
+  },
+  resolved_refunded: {
+    label: 'Refunded to buyer',
+    tone: 'neutral',
+    hint: 'Decided in the buyer’s favour. The money went back.',
+  },
+  resolved_split: {
+    label: 'Split',
+    tone: 'confirmed',
+    hint: 'Part refunded, the rest released. Both sides got some of what they asked for.',
+  },
+}
+
+/**
+ * §8's structured reasons. The free-text statement stays alongside — a code is
+ * what you group by, a sentence is what a person actually reads.
+ */
+export const DISPUTE_REASON_LABEL: Record<DisputeReasonCode, string> = {
+  not_delivered: 'Not delivered',
+  not_as_described: 'Not as described',
+  damaged: 'Damaged',
+  late_delivery: 'Late',
+  quality: 'Quality',
+  incomplete: 'Incomplete',
+  unauthorized_charge: 'Unauthorised charge',
+  duplicate_charge: 'Duplicate charge',
+  cancellation_requested: 'Cancellation requested',
+  other: 'Other',
+}
+
+/**
+ * §8's five requests. `moves_money` is the distinction that matters on screen:
+ * accepting an update or an extension settles nothing and leaves the dispute
+ * open, while accepting either refund kind resolves it and moves funds.
+ */
+export interface OfferKindMeta {
+  label: string
+  hint: string
+  moves_money: boolean
+}
+
+export const DISPUTE_OFFER_KIND_META: Record<DisputeOfferKind, OfferKindMeta> = {
+  update: {
+    label: 'Ask for an update',
+    hint: 'A photo, a status, an explanation. Agreeing to send one settles nothing.',
+    moves_money: false,
+  },
+  extension: {
+    label: 'Ask for more time',
+    hint: 'A new date. Agreeing to it leaves the dispute open and the money held.',
+    moves_money: false,
+  },
+  cancellation: {
+    label: 'Ask to cancel',
+    hint: 'Call the order off. Accepting returns the whole payment to the buyer.',
+    moves_money: true,
+  },
+  partial_refund: {
+    label: 'Offer a partial refund',
+    hint: 'Give back part and release the rest. Accepting executes both.',
+    moves_money: true,
+  },
+  full_refund: {
+    label: 'Ask for a full refund',
+    hint: 'The whole payment back. Accepting executes it.',
+    moves_money: true,
+  },
+}
+
+/**
+ * `expired` is deliberately not `declined`. Declining is an act — somebody read
+ * it and said no; expiring is silence. §24.3's labels cannot be backfilled, so
+ * a screen that showed them as one thing would lose the difference for good.
+ */
+export const DISPUTE_OFFER_STATUS_META: Record<DisputeOfferStatus, StatusMeta> = {
+  open: {
+    label: 'Awaiting an answer',
+    tone: 'pending',
+    hint: 'The other party has 48 hours. Silence lapses it; it is never accepted by default.',
+  },
+  accepted: {
+    label: 'Accepted',
+    tone: 'released',
+    hint: 'The other party agreed.',
+  },
+  declined: {
+    label: 'Declined',
+    tone: 'danger',
+    hint: 'Somebody read it and said no.',
+  },
+  withdrawn: {
+    label: 'Withdrawn',
+    tone: 'neutral',
+    hint: 'Taken back by whoever made it, before it was answered.',
+  },
+  expired: {
+    label: 'Lapsed',
+    tone: 'neutral',
+    hint: 'Nobody answered inside 48 hours. Nothing moved, and the dispute stayed open.',
   },
 }
 

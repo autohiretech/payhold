@@ -25,6 +25,8 @@ export const keys = {
   payoutRoutes: ['payout-routes'] as const,
   payoutRouting: (id: string) => ['payout-routing', id] as const,
   disputes: ['disputes'] as const,
+  disputeOffers: (disputeId: string) => ['dispute-offers', disputeId] as const,
+  disputeTimeline: (disputeId: string) => ['dispute-timeline', disputeId] as const,
   sellers: ['sellers'] as const,
   sellerDestinations: (sellerId?: string) =>
     ['seller-destinations', sellerId ?? 'all'] as const,
@@ -46,6 +48,7 @@ export const keys = {
   dealOutcomes: ['deal-outcomes'] as const,
   tenants: ['admin', 'tenants'] as const,
   alerts: ['admin', 'alerts'] as const,
+  reconciliationRuns: ['admin', 'reconciliation-runs'] as const,
 }
 
 export const useTenant = () =>
@@ -99,6 +102,23 @@ export const usePayoutRoutes = () =>
 
 export const useDisputes = () =>
   useQuery({ queryKey: keys.disputes, queryFn: () => api.listDisputes() })
+
+/** §8's requests, oldest first. One may be open per order at a time. */
+export const useDisputeOffers = (disputeId: string) =>
+  useQuery({
+    queryKey: keys.disputeOffers(disputeId),
+    queryFn: () => api.listDisputeOffers(disputeId),
+  })
+
+/**
+ * §8's timeline. Derived on every read rather than stored, so it is refetched
+ * along with everything else a resolution touches rather than cached apart.
+ */
+export const useDisputeTimeline = (disputeId: string) =>
+  useQuery({
+    queryKey: keys.disputeTimeline(disputeId),
+    queryFn: () => api.disputeTimeline(disputeId),
+  })
 
 export const useSettings = () =>
   useQuery({ queryKey: keys.settings, queryFn: () => api.getSettings() })

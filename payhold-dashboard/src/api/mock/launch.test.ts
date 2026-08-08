@@ -81,27 +81,32 @@ describe('§16 — the gate', () => {
   test('signing everything signable still leaves it shut', async () => {
     // The reason Phase 11 is safe to run out of order: nothing an attestation
     // says makes unbuilt work exist.
+    //
+    // `operator_screens` used to be the second name here and is not any more —
+    // phase 10 built the screens and cleared its blocker, so it is now merely
+    // unsigned rather than unsignable. `email_confirmation` is the last one
+    // genuinely waiting on code, and it is waiting on an SMTP sender.
     signEverythingSignable()
 
     const list = await api.getLaunchChecklist()
     expect(list.live_mode_allowed).toBe(false)
     expect(list.blocked).toBe(list.outstanding)
     expect(list.items.filter((i) => i.required && !i.signed).map((i) => i.code).sort())
-      .toEqual(['email_confirmation', 'operator_screens'])
+      .toEqual(['email_confirmation'])
   })
 
   test('a blocked item cannot be signed, by anybody', async () => {
     await expect(
-      api.signOffLaunchItem('operator_screens', 'The CTO', 'I say so'),
-    ).rejects.toThrow(/blocked by phase-10/)
+      api.signOffLaunchItem('email_confirmation', 'The CTO', 'I say so'),
+    ).rejects.toThrow(/blocked by no SMTP sender/)
   })
 
   test('but can always be un-signed', async () => {
     // "I no longer stand behind this" is never the harder direction.
-    await api.signOffLaunchItem('operator_screens', 'The CTO', 'withdrawing', false)
+    await api.signOffLaunchItem('email_confirmation', 'The CTO', 'withdrawing', false)
 
     const { items } = await api.getLaunchChecklist()
-    expect(items.find((i) => i.code === 'operator_screens')!.signed).toBe(false)
+    expect(items.find((i) => i.code === 'email_confirmation')!.signed).toBe(false)
   })
 
   test('clearing the last blocker opens it', async () => {

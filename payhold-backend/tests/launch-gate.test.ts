@@ -165,21 +165,26 @@ describe('§16 — the gate is closed until somebody closes it', () => {
   })
 
   test('signing everything signable still leaves the gate shut', async () => {
-    // The reason this phase is safe to run before phase 10 finishes. Nothing an
-    // attestation can say makes an unbuilt operator screen exist.
+    // The reason this phase was safe to run before phase 10 finished. Nothing
+    // an attestation can say makes unbuilt work exist.
+    //
+    // `operator_screens` used to be the second name here. Phase 10 built the
+    // four screens it asks for and cleared its blocker in `20260808000001`, so
+    // it is now merely unsigned rather than unsignable — which is the contract
+    // `20260807000015` states and `20260807000017` already followed once.
     await signEverythingSignable()
 
     expect(await gateOpen()).toBe(false)
-    expect(await blockerCodes()).toEqual(['email_confirmation', 'operator_screens'])
+    expect(await blockerCodes()).toEqual(['email_confirmation'])
   })
 
   test('a blocked item cannot be signed off, by anybody', async () => {
     await rejects(
       () =>
         h.db.query(
-          `select sign_off_launch_item('operator_screens', 'The CTO', 'I say so')`,
+          `select sign_off_launch_item('email_confirmation', 'The CTO', 'I say so')`,
         ),
-      /cannot be signed off while it is blocked by phase-10/,
+      /cannot be signed off while it is blocked by no SMTP sender/,
     )
   })
 
@@ -187,11 +192,11 @@ describe('§16 — the gate is closed until somebody closes it', () => {
     // "I no longer stand behind this" must never be the harder direction. There
     // is nothing to withdraw here, and the call is still accepted.
     await h.db.query(
-      `select sign_off_launch_item('operator_screens', 'The CTO', 'withdrawing', false)`,
+      `select sign_off_launch_item('email_confirmation', 'The CTO', 'withdrawing', false)`,
     )
 
     const { rows: [s] } = await h.db.query<{ signed: boolean }>(
-      `select signed from launch_status() where code = 'operator_screens'`,
+      `select signed from launch_status() where code = 'email_confirmation'`,
     )
     expect(s.signed).toBe(false)
   })
