@@ -47,6 +47,7 @@ export const keys = {
   aiUsage: ['ai-usage'] as const,
   dealOutcomes: ['deal-outcomes'] as const,
   tenants: ['admin', 'tenants'] as const,
+  sellerWallets: (sellerId?: string) => ['seller-wallets', sellerId ?? 'all'] as const,
   alerts: ['admin', 'alerts'] as const,
   reconciliationRuns: ['admin', 'reconciliation-runs'] as const,
 }
@@ -56,6 +57,18 @@ export const useTenant = () =>
 
 export const useBalance = () =>
   useQuery({ queryKey: keys.balance, queryFn: () => api.getBalance() })
+
+/**
+ * The same money split by who it is being held *for*.
+ *
+ * Summed, these are `useBalance()` less `fees_retained` — ours, and absent from
+ * a seller's wallet by design.
+ */
+export const useSellerWallets = (sellerId?: string) =>
+  useQuery({
+    queryKey: keys.sellerWallets(sellerId),
+    queryFn: () => api.listSellerWallets(sellerId),
+  })
 
 export const useDeals = (filter?: DealListFilter) =>
   useQuery({ queryKey: keys.deals(filter), queryFn: () => api.listDeals(filter) })

@@ -14,6 +14,7 @@ import {
   computeBalances,
   computeDealAmounts,
   computeRailBalances,
+  computeSellerWallets,
   confirmDeal,
   fundDeal,
   openDispute,
@@ -682,6 +683,48 @@ describe('rails', () => {
         .reduce((acc, r) => acc + r.held, 0)
       expect(sum).toBe(total.held)
     }
+  })
+
+  /**
+   * The property the seller wallet rests on. A wallet computed a second way is
+   * free to disagree with the balance the reconciliation pass checks against a
+   * provider, and the number a seller reads would be the one nobody checks.
+   *
+   * `fees_retained` is excluded on purpose and is asserted non-zero, so this
+   * cannot pass by every bucket happening to be equal.
+   */
+  it('has seller wallets that sum to the tenant balance, less what is ours', () => {
+    const totals = computeBalances(db, AUTOHIRE)
+    const wallets = computeSellerWallets(db, AUTOHIRE)
+
+    for (const total of totals) {
+      const mine = wallets.filter((w) => w.currency === total.currency)
+      const sum = (pick: (w: (typeof mine)[number]) => number) =>
+        mine.reduce((acc, w) => acc + pick(w), 0)
+
+      expect(sum((w) => w.held)).toBe(total.held)
+      expect(sum((w) => w.pending_clearance)).toBe(total.pending_clearance)
+      expect(sum((w) => w.available)).toBe(total.available)
+      expect(sum((w) => w.reserved)).toBe(total.reserved)
+      expect(sum((w) => w.paid_out)).toBe(total.paid_out)
+    }
+
+    expect(totals.some((t) => t.fees_retained > 0)).toBe(true)
+  })
+
+  it('keeps one seller wallet to that seller, and to their tenant', () => {
+    const all = computeSellerWallets(db, AUTOHIRE)
+    const first = all[0]
+    expect(first).toBeDefined()
+    if (!first) return
+
+    const one = computeSellerWallets(db, AUTOHIRE, first.seller_id)
+    expect(one.every((w) => w.seller_id === first.seller_id)).toBe(true)
+
+    // A seller of another account is unreachable, not merely filtered out of
+    // the list — the same thing tenant scoping means everywhere else.
+    const foreign = computeSellerWallets(db, 'ten_0002', first.seller_id)
+    expect(foreign).toEqual([])
   })
 
   it('holds Kenyan M-Pesa money on Flutterwave, not Stripe', () => {

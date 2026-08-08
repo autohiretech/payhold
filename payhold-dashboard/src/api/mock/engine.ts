@@ -31,6 +31,7 @@ import {
   type PayoutStatus,
   type Provider,
   type RailBalance,
+  type SellerWallet,
   type ReconciliationAlert,
   type ReconciliationRun,
   type Seller,
@@ -1749,6 +1750,95 @@ export function computeRailBalances(db: MockDb, tenantId: string): RailBalance[]
   return [...byRail.values()].sort(
     (a, b) =>
       a.provider.localeCompare(b.provider) || a.currency.localeCompare(b.currency),
+  )
+}
+
+/**
+ * One seller's money, and everybody's — the mirror of `seller_wallet_rows`.
+ *
+ * Deliberately the same arithmetic as `computeRailBalances`, entry type for
+ * entry type, grouped by seller rather than by rail. The property that has to
+ * hold is that every seller's wallet summed *is* the tenant's balance, bucket
+ * for bucket, less `fees_retained` — so a second way of reading the same ledger
+ * cannot disagree with the first. `engine.test.ts` asserts it, the same way
+ * `tests/seller-wallet.test.ts` does on the SQL side.
+ *
+ * **`fees_retained` is absent and that is the point.** It is our commission and
+ * collected tax: it stopped being the seller's and has no business on a screen
+ * they are shown.
+ *
+ * `held` is gross and everything past it is net. Nothing is struck inside the
+ * hold — the fee is booked at release — so a client rendering this must label
+ * it "in progress" rather than "yours".
+ */
+export function computeSellerWallets(
+  db: MockDb,
+  tenantId: string,
+  sellerId?: string,
+): SellerWallet[] {
+  const byKey = new Map<string, SellerWallet>()
+
+  const entriesByDeal = new Map<string, LedgerEntry[]>()
+  for (const e of db.ledger) {
+    if (e.tenant_id !== tenantId || e.deal_id === null) continue
+    const list = entriesByDeal.get(e.deal_id)
+    if (list) list.push(e)
+    else entriesByDeal.set(e.deal_id, [e])
+  }
+
+  for (const [dealId, entries] of entriesByDeal) {
+    const deal = db.deals.find((d) => d.id === dealId)
+    if (!deal) continue
+    if (sellerId && deal.seller_id !== sellerId) continue
+
+    const seller = db.sellers.find((s) => s.id === deal.seller_id)
+    if (!seller) continue
+
+    let held = 0
+    let clearing = 0
+    let reserved = 0
+    let paid = 0
+
+    for (const e of entries) {
+      if (HELD_TYPES.includes(e.entry_type)) held += e.amount
+      if (e.entry_type === 'release') clearing -= e.amount
+      if (POOL_DEDUCTIONS.includes(e.entry_type)) clearing += e.amount
+      if (e.entry_type === 'reserve' || e.entry_type === 'reserve_release') {
+        reserved -= e.amount
+      }
+      if (e.entry_type === 'payout') paid -= e.amount
+    }
+
+    const currency = entries[0]?.currency ?? deal.presentment_currency
+    const key = `${seller.id}:${currency}`
+
+    let w = byKey.get(key)
+    if (!w) {
+      w = {
+        seller_id: seller.id,
+        seller_name: seller.name,
+        seller_country: seller.country,
+        currency,
+        held: 0,
+        pending_clearance: 0,
+        available: 0,
+        reserved: 0,
+        paid_out: 0,
+      }
+      byKey.set(key, w)
+    }
+
+    w.held += held
+    w.paid_out += paid
+    w.reserved += reserved
+    if (isDue(deal.payout_due_at)) w.available += clearing
+    else w.pending_clearance += clearing
+  }
+
+  return [...byKey.values()].sort(
+    (a, b) =>
+      a.seller_name.localeCompare(b.seller_name) ||
+      a.currency.localeCompare(b.currency),
   )
 }
 

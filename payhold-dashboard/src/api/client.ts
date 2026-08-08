@@ -51,6 +51,7 @@ import type {
   ProviderAccount,
   ProviderRequirement,
   RailBalance,
+  SellerWallet,
   RailStatus,
   ReconciliationAlert,
   ReconciliationRun,
@@ -206,6 +207,16 @@ export interface PayHoldClient {
   getBalance(): Promise<Balance[]>
   /** The same buckets split by the rail holding the money. */
   getRailBalances(): Promise<RailBalance[]>
+  /**
+   * The same buckets split by *seller* — who PayHold is holding money for.
+   *
+   * Summed, these are `getBalance()` less `fees_retained`, which is ours and
+   * absent from a seller's wallet by design. Omit the id for every seller.
+   *
+   * A seller has no PayHold login and never calls this: their platform reads it
+   * with its own credential and renders it in its own app.
+   */
+  listSellerWallets(sellerId?: string): Promise<SellerWallet[]>
   listLedger(dealId?: string): Promise<LedgerEntry[]>
   listPayouts(): Promise<Payout[]>
   retryPayout(id: string): Promise<Payout>

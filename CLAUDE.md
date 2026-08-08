@@ -270,9 +270,10 @@ Flutterwave.** Adding Paystack/DPO later = one new class + one webhook function
 `risk_review_threshold_usd` (default $1,000, converted to the payout currency
 at compare time), `payout_backup_enabled` (default true),
 `payout_primary_attempts` (default 2) — §5.1's explicit routing-policy check
-before a backup destination may be used — and `payout_retry_max_attempts`
+before a backup destination may be used — `payout_retry_max_attempts`
 (default 5, floor 1), §13's budget before a refused payout stops being retried
-by anything automatic.
+by anything automatic, and `payout_mode` (`auto` by default, or `wallet` to
+stop the cron sending cleared money nobody has asked for).
 
 In-flight deals keep the settings they were created with. Settings changes apply
 to new deals only.
@@ -300,6 +301,9 @@ Auth: `X-Api-Key`, hashed at rest, rate-limited per key.
 | `GET /v1/sellers/:id/capabilities` | Can this seller be paid, and if not, every reason. Two lists, kept apart |
 | `POST /v1/sellers/:id/verify` | Record the attestation. **Refuses an API key** — it is a person's decision |
 | `GET /v1/sellers/:id/destinations` | §5.1's preferred destination and verified backup |
+| `GET /v1/sellers/:id/balance` | This seller's wallet — ledger buckets, plus what a withdrawal would move and every reason something is stuck |
+| `GET /v1/sellers/wallets` | Every seller's wallet in one query |
+| `POST /v1/sellers/:id/withdraw` | Ask for the cleared money. Stamps and dispatches; screens, routes and books exactly as the cron does |
 | `GET /v1/balance` | held / pending clearance / available / paid out |
 | `POST /v1/webhooks-endpoints` | Client registers their endpoint for signed notifications |
 | `GET /v1/webhook-deliveries` | Every attempt, with status and signature — the answer to "did you tell us?" |
@@ -436,6 +440,62 @@ the gate holds a payout and can do nothing else.
 It holds for: unverified identity, missing or stale sanctions screening, an
 unverified payout destination, a destination that moved in the last
 `destination_hold_hours` (§5.1's change protection), or an open dispute.
+
+## Seller wallets, and pulling instead of waiting
+
+**A seller's wallet is a read, not a table.** `seller_wallet_rows` sums the same
+ledger entries `rail_balances` does, grouped by seller instead of by rail —
+there is no stored seller balance for the reason there is no stored tenant
+balance. The property that makes it trustworthy is that every seller's wallet
+summed *is* the tenant's balance, bucket for bucket, less `fees_retained`. That
+bucket is our commission and collected tax; it stopped being the seller's and
+has no business on a screen they read.
+
+`held` is gross and everything past it is net. Inside the hold nothing has been
+struck — the fee is booked at release — so what sits there is what the buyer
+paid, not what the seller will get. A client showing a wallet should label it
+"in progress" rather than "yours"; `deal_amounts.seller_net` is the per-deal
+figure that answers what a held deal is actually worth to them.
+
+The wallet is in the currency the buyer was charged. `seller_withdrawable` is
+the other side — the payout rows, in the seller's *own* payout currency, which
+for a cross-border deal is a genuinely different number in a different currency.
+Two questions, not one question answered twice. It counts `held_for_review`,
+`needs_verification` and `blocked` separately for the reason
+`seller_capabilities` returns every reason rather than the first.
+
+**`payout_mode = 'wallet'` changes when, not whether.** Money still clears on
+the same window and still lands in `available`; what stops is the cron sending
+it unasked. `due_payouts` is where that binds, and it is in SQL rather than in
+the cron because of the batch limit — filtering wallet-mode rows out *after*
+`limit 25` would let one tenant's unasked-for backlog starve every other tenant
+in the pass, silently, for as long as the backlog stood. The default is `auto`,
+so a tenant that sets nothing behaves exactly as it did before.
+
+**Asking is not deciding.** `request_withdrawal` stamps the seller's due payouts
+and re-arms `next_attempt_at`; `dispatchPayout` then runs the same frozen-tenant
+check, the same eligibility gate and the same routing decision it runs for the
+cron. A withdrawal path that called a provider itself would be a second way to
+pay a seller nobody verified, which is exactly what §12 forbids. It does not
+reset `attempts` — `route_payout` reads that to decide whether the backup
+destination may be used — and it does not touch `held_for_review`, because a
+payout a rule or a person stopped is waiting on a named person (invariant 11).
+
+**"Any card" means any card they already registered and had verified.** A
+withdrawal may name a `destination_id`, and it must be one of the seller's own
+`seller_destinations` rows, verified and out of its security hold — checked at
+request time and re-checked in `route_payout` under the payout's lock, because
+a verification can be withdrawn in between. A withdrawal that could name a
+*fresh* destination is the shape an account takeover uses, and §5.1's change
+protection exists to catch it.
+
+**None of this gives a seller a login, and it must not.** Every function here is
+called by the tenant's own server on the seller's behalf — the same shape as
+`POST /v1/sellers/:id/verify`. AutoHire renders the wallet in AutoHire's app;
+PayHold supplies the numbers. `withdraw` accepts an API key where `verify` does
+not, and the line is that verifying is an attestation that has to be somebody's,
+while asking for money that has already passed every check is the seller's own
+routine act.
 
 `GET /v1/sellers/:id/capabilities` asks the same questions ahead of time and
 returns **every** reason, so a seller can fix what is missing during onboarding

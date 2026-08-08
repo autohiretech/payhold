@@ -474,6 +474,30 @@ described it rather than deleting it — worth settling before anybody signs
 now" fills the table honestly; a seeded run would be a fixture asserting that a
 nightly control ran.
 
+## Seller wallets
+
+`computeSellerWallets` in `engine.ts` mirrors SQL's `seller_wallet_rows`, entry
+type for entry type — the same arithmetic as `computeRailBalances`, grouped by
+seller rather than by rail. The property `engine.test.ts` pins is that **every
+seller's wallet summed is the tenant's balance**, bucket for bucket, with
+`fees_retained` asserted non-zero so it cannot pass by everything happening to
+be equal. A wallet derived a second way is free to disagree with the figure
+reconciliation checks against a provider, and the number a seller reads would be
+the one nobody checks.
+
+`fees_retained` is **absent from the wallet type**, not zeroed. It is our
+commission and collected tax; a wallet is a screen a seller is shown.
+
+`held` is gross and everything past it is net — nothing is struck inside the
+hold, since the fee is booked at release. The Sellers screen labels that column
+**In progress** rather than anything that reads like a drawable balance, and the
+footnote says why. `DealAmounts.seller_net` is what a held deal is actually
+worth to them.
+
+The card is read-only, like the Routing Center and for the same reason: it says
+where the money is, and every button that moves any of it stays on Payouts where
+the decision is recorded against a person.
+
 ## The seller page
 
 `src/screens/SellerDetail.tsx` is one counterparty and everything this account

@@ -55,6 +55,7 @@ import {
   type ProviderRequirement,
   type RailStatus,
   type RailBalance,
+  type SellerWallet,
   type ReconciliationAlert,
   type ReconciliationRun,
   type Refund,
@@ -108,6 +109,7 @@ import {
   computeBalances,
   computeDealAmounts,
   computeRailBalances,
+  computeSellerWallets,
   confirmDeal,
   fundDeal,
   injectDrift,
@@ -647,6 +649,11 @@ export class MockClient implements PayHoldClient {
   async getRailBalances(): Promise<RailBalance[]> {
     const db = getDb()
     return delay(computeRailBalances(db, db.current_tenant_id))
+  }
+
+  async listSellerWallets(sellerId?: string): Promise<SellerWallet[]> {
+    const db = getDb()
+    return delay(computeSellerWallets(db, db.current_tenant_id, sellerId))
   }
 
   async listLedger(dealId?: string): Promise<LedgerEntry[]> {

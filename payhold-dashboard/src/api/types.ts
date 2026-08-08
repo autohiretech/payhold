@@ -856,6 +856,38 @@ export interface Balance {
 }
 
 /**
+ * One seller's money, in the currency the buyer was charged.
+ *
+ * The same buckets as `Balance` and derived from the same ledger, grouped by
+ * seller instead of by rail — every seller's wallet summed is the tenant's own
+ * balance, bucket for bucket.
+ *
+ * **`fees_retained` is deliberately absent.** Our commission and collected tax
+ * stopped being the seller's, and a wallet is a screen the seller is shown.
+ *
+ * **`held` is gross; everything past it is net.** Nothing is struck inside the
+ * hold — the fee is booked at release — so a client must render `held` as "in
+ * progress" rather than as the seller's money. `DealAmounts.seller_net` is what
+ * a held deal is actually worth to them.
+ */
+export interface SellerWallet {
+  seller_id: string
+  seller_name: string
+  seller_country: Country
+  currency: Currency
+  /** Buyer money still in the hold on this seller's deals. Not yet theirs. */
+  held: Money
+  /** Released and inside the clearance window. Theirs, not yet payable. */
+  pending_clearance: Money
+  /** Past the window. Theirs, and payable now. */
+  available: Money
+  /** §6.1's new-seller carve-out, unpayable until the hold ends. */
+  reserved: Money
+  /** Lifetime total already sent to this seller. */
+  paid_out: Money
+}
+
+/**
  * §7's price breakdown for one deal, derived from the ledger and never stored.
  * All figures are in the **presentment** currency — what the buyer was charged.
  *

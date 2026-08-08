@@ -43,26 +43,21 @@ Deno.serve(handler(async (req) => {
 
   if (matureError) throw new Error(`clearing sweep failed: ${matureError.message}`)
 
-  const now = new Date().toISOString()
-
-  const { data: due, error } = await db
-    .from('payouts')
-    .select('id, tenant_id, deal_id, seller_id, amount, currency, status, ' +
-      'scheduled_for, paid_at, failure_reason, attempts, next_attempt_at')
-    // `held_for_review` is not in this list and must never be. Cron is not
-    // allowed to be the thing that lets a held payout through — invariant 11.
-    // `blocked` and `needs_verification` are in it, on purpose: neither is
-    // waiting on a decision, so re-asking overrules nobody. See `DISPATCHABLE`.
-    .in('status', DISPATCHABLE)
-    .lte('scheduled_for', now)
-    // §13's backoff, and the reason it is a filter here rather than a branch in
-    // `dispatchPayout`: a null `next_attempt_at` means no machine may try this
-    // again, and `lte` excludes nulls by construction. The approve and retry
-    // endpoints share `dispatchPayout` and are unaffected — a person is not a
-    // machine, which is the whole distinction the column encodes.
-    .lte('next_attempt_at', now)
-    .order('scheduled_for', { ascending: true })
-    .limit(BATCH)
+  // The selection moved into SQL when `payout_mode = 'wallet'` arrived, and the
+  // batch limit is why. In wallet mode a cleared payout is not due until
+  // somebody asks for it, and filtering those out *after* `limit 25` would let
+  // one tenant's unasked-for backlog fill the pass and starve every other
+  // tenant — quietly, and for as long as the backlog stood. The predicate has
+  // to be inside the limit.
+  //
+  // `DISPATCHABLE` is still owned here and passed in, rather than restated in
+  // the function: `held_for_review` is absent from it and must stay absent,
+  // because cron may never be the thing that lets a held payout through
+  // (invariant 11), and that reasoning belongs next to the list.
+  const { data: due, error } = await db.rpc('due_payouts', {
+    p_statuses: DISPATCHABLE,
+    p_limit: BATCH,
+  })
 
   if (error) throw new Error(`payout lookup failed: ${error.message}`)
 

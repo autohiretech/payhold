@@ -17,10 +17,16 @@
 
 import type { SupabaseClient } from 'npm:@supabase/supabase-js@2'
 import { resolveCaller, serviceClient, type Caller } from '../_shared/auth.ts'
+import { dispatchPayout } from '../_shared/dispatch.ts'
 import { handler, json, readJson, required } from '../_shared/http.ts'
 import { loadProvider } from '../_shared/load-provider.ts'
 import { countryInfo, payoutRoute } from '../_shared/rails.ts'
-import { PayHoldError, type CreateSellerInput, type Seller } from '../_shared/types.ts'
+import {
+  PayHoldError,
+  type CreateSellerInput,
+  type Payout,
+  type Seller,
+} from '../_shared/types.ts'
 
 const SELLER_COLUMNS =
   'id, tenant_id, name, country, payout_currency, payout_provider, ' +
@@ -195,6 +201,166 @@ async function verify(
   return json(req, data)
 }
 
+/**
+ * Confirm a seller belongs to the calling tenant, or 404.
+ *
+ * A 403 would confirm the row exists, which invariant 8 forbids: a response
+ * must not reveal that other tenants have sellers.
+ */
+async function ownSeller(
+  db: SupabaseClient,
+  caller: Caller,
+  id: string,
+): Promise<void> {
+  const { data } = await db
+    .from('sellers')
+    .select('id')
+    .eq('id', id)
+    .eq('tenant_id', caller.tenant_id)
+    .maybeSingle()
+
+  if (!data) throw new PayHoldError('not_found', `Seller ${id} not found`)
+}
+
+/**
+ * `GET /v1/sellers/:id/balance` — one seller's wallet.
+ *
+ * Two shapes, because they answer two questions and neither answers the other.
+ * `balances` is ledger money in the currency the buyer was charged, derived the
+ * same way `GET /v1/balance` is, so a tenant can add its sellers up and get its
+ * own balance back. `withdrawable` is the payout rows in the seller's *own*
+ * payout currency — what a withdrawal would actually move — with a count
+ * against each reason something is stuck.
+ *
+ * A cross-border deal makes the two genuinely different numbers in genuinely
+ * different currencies, and collapsing them would mean picking one to be wrong.
+ *
+ * This is a tenant read. The seller has no login and is not the caller: their
+ * platform fetches this with its own API key and renders it in its own app,
+ * exactly as it does with `/capabilities`.
+ */
+async function readWallet(
+  req: Request,
+  db: SupabaseClient,
+  caller: Caller,
+  id: string,
+): Promise<Response> {
+  await ownSeller(db, caller, id)
+
+  const [balances, withdrawable] = await Promise.all([
+    db.rpc('seller_balance', { p_seller: id }),
+    db.rpc('seller_withdrawable', { p_seller: id }),
+  ])
+
+  if (balances.error) throw new Error(`seller_balance failed: ${balances.error.message}`)
+  if (withdrawable.error) {
+    throw new Error(`seller_withdrawable failed: ${withdrawable.error.message}`)
+  }
+
+  return json(req, {
+    seller_id: id,
+    balances: balances.data ?? [],
+    withdrawable: withdrawable.data ?? [],
+  })
+}
+
+/**
+ * `POST /v1/sellers/:id/withdraw` — ask for the cleared money.
+ *
+ * The request stamps the seller's due payouts and re-arms their retry clock;
+ * `dispatchPayout` then does everything it does for the cron — the frozen-tenant
+ * check, `screen_payout`'s eligibility gate, `route_payout`'s decision, the
+ * provider call, the booking. Nothing here is a shortcut past any of it, which
+ * is the point: a withdrawal path that skipped the gate would be a second way
+ * to pay a seller nobody had verified, and §12 says there must not be one.
+ *
+ * `destination_id` is optional and must be one of the seller's own verified
+ * destinations. It is a choice among rows they already registered, never a new
+ * address — a withdrawal that could name a fresh destination is the shape an
+ * account takeover uses, which is what §5.1's security hold exists to catch.
+ *
+ * Unlike `/verify` this accepts an API key. Verifying is an attestation and has
+ * to be somebody's; asking for money that has already cleared every check is
+ * the seller's own routine act, and their platform makes it on their behalf.
+ */
+async function withdraw(
+  req: Request,
+  db: SupabaseClient,
+  caller: Caller,
+  id: string,
+): Promise<Response> {
+  await ownSeller(db, caller, id)
+
+  const body = await readJson<{ destination_id?: string }>(req)
+
+  const { data, error } = await db.rpc('request_withdrawal', {
+    p_seller: id,
+    p_actor: caller.actor,
+    p_destination: body.destination_id ?? null,
+  })
+
+  if (error) {
+    // The function's own refusals are the seller's answer — nothing cleared to
+    // withdraw, an unverified destination, one still inside its security hold.
+    // They are policy, not faults, and a 500 would tell a client to retry.
+    throw new PayHoldError('policy_violation', error.message)
+  }
+
+  const requested = (data ?? []) as unknown as { id: string }[]
+
+  // Sent one at a time and the outcome recorded per payout. One seller's rail
+  // refusing must not strand the rest of their own withdrawal, and a single
+  // aggregate status would hide a partial send — which is the thing a person
+  // chasing "where is my money" most needs to see.
+  const results: { payout_id: string; outcome: string }[] = []
+
+  for (const payout of requested) {
+    const { data: row } = await db
+      .from('payouts')
+      .select('id, tenant_id, deal_id, seller_id, amount, currency, status, ' +
+        'scheduled_for, paid_at, failure_reason, attempts, next_attempt_at')
+      .eq('id', payout.id)
+      .single()
+
+    try {
+      results.push({
+        payout_id: payout.id,
+        outcome: await dispatchPayout(db, row as unknown as Payout),
+      })
+    } catch (err) {
+      console.error('withdrawal dispatch failed', {
+        payout_id: payout.id,
+        seller_id: id,
+        message: err instanceof Error ? err.message : String(err),
+      })
+      results.push({ payout_id: payout.id, outcome: 'errored' })
+    }
+  }
+
+  return json(req, { seller_id: id, requested: results.length, payouts: results })
+}
+
+/**
+ * `GET /v1/sellers/wallets` — every seller's wallet, one query.
+ *
+ * The list an operator reads and the list a client app pages through. A
+ * per-seller round trip would be one request per row of a screen whose whole
+ * purpose is showing them together.
+ */
+async function readAllWallets(
+  req: Request,
+  db: SupabaseClient,
+  caller: Caller,
+): Promise<Response> {
+  const { data, error } = await db.rpc('tenant_seller_wallets', {
+    p_tenant: caller.tenant_id,
+  })
+
+  if (error) throw new Error(`tenant_seller_wallets failed: ${error.message}`)
+
+  return json(req, { wallets: data ?? [] })
+}
+
 Deno.serve(handler(async (req) => {
   const db = serviceClient()
   const caller = await resolveCaller(db, req)
@@ -205,8 +371,22 @@ Deno.serve(handler(async (req) => {
   const id = segments[base + 1]
   const action = segments[base + 2]
 
+  // Ahead of the `:id` routes: `wallets` is a collection, not a seller, and a
+  // uuid column would refuse it anyway — with a 500 rather than a 404.
+  if (req.method === 'GET' && id === 'wallets' && !action) {
+    return await readAllWallets(req, db, caller)
+  }
+
   if (req.method === 'GET' && id && action === 'capabilities') {
     return await readCapabilities(req, db, caller, id)
+  }
+
+  if (req.method === 'GET' && id && action === 'balance') {
+    return await readWallet(req, db, caller, id)
+  }
+
+  if (req.method === 'POST' && id && action === 'withdraw') {
+    return await withdraw(req, db, caller, id)
   }
 
   if (req.method === 'POST' && id && action === 'verify') {

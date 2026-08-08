@@ -29,8 +29,107 @@ import {
   Th,
   cx,
 } from '@/components/ui'
-import { formatDate, KYC_STATUS_META } from '@/lib/format'
-import { useMoneyAction, useSellers } from '@/lib/queries'
+import { formatDate, formatMoneyShort, KYC_STATUS_META } from '@/lib/format'
+import { useMoneyAction, useSellerWallets, useSellers } from '@/lib/queries'
+
+/**
+ * Who this account is holding money for, and how much of it is theirs to take.
+ *
+ * The same six buckets as the Overview, split by seller instead of by rail —
+ * and summed, these rows *are* the Overview's figures less `fees_retained`,
+ * which is our commission and never appears on a seller's wallet.
+ *
+ * Two columns carry the distinction that matters and the copy says it out loud:
+ * **In progress** is buyer money in the hold, gross, with nothing struck off it
+ * yet — the fee comes out at release, so it is not the seller's and must not be
+ * labelled as though it were. **Available** is theirs and payable now.
+ *
+ * Read-only, like the Routing Center and for the same reason: this is a
+ * statement of where the money is, and every button that moves any of it lives
+ * on Payouts where the decision is recorded against a person.
+ */
+function WalletsCard() {
+  const wallets = useSellerWallets()
+
+  return (
+    <Card>
+      <CardHeader
+        title="Seller wallets"
+        subtitle="What this account holds for each seller. Sellers have no PayHold login — your own app reads these figures over the API and shows them its own way."
+      />
+      {wallets.isPending ? (
+        <div className="space-y-2 p-6">
+          {[0, 1, 2].map((i) => (
+            <Skeleton key={i} className="h-9" />
+          ))}
+        </div>
+      ) : !wallets.data?.length ? (
+        <EmptyState
+          title="Nothing held yet"
+          body="A seller appears here once a deal of theirs has been funded."
+        />
+      ) : (
+        <Table>
+          <thead>
+            <tr>
+              <Th>Seller</Th>
+              <Th>Currency</Th>
+              <Th align="right">In progress</Th>
+              <Th align="right">Clearing</Th>
+              <Th align="right">Available</Th>
+              <Th align="right">Reserved</Th>
+              <Th align="right">Paid out</Th>
+            </tr>
+          </thead>
+          <tbody>
+            {wallets.data.map((w) => (
+              <tr key={`${w.seller_id}:${w.currency}`}>
+                <Td>
+                  <Link
+                    to={`/sellers/${w.seller_id}`}
+                    className="font-medium text-brand hover:underline"
+                  >
+                    {w.seller_name}
+                  </Link>
+                  <div className="text-xs text-fg-muted">
+                    {countryFlag(w.seller_country)} {countryName(w.seller_country)}
+                  </div>
+                </Td>
+                <Td>
+                  <Mono>{w.currency}</Mono>
+                </Td>
+                {/* Gross, and not theirs yet — hence "in progress" rather than
+                    a figure that reads like a balance they could draw on. */}
+                <Td align="right" className="text-fg-muted">
+                  {formatMoneyShort(w.held, w.currency)}
+                </Td>
+                <Td align="right" className="text-fg-muted">
+                  {formatMoneyShort(w.pending_clearance, w.currency)}
+                </Td>
+                <Td align="right" className="font-medium text-released">
+                  {formatMoneyShort(w.available, w.currency)}
+                </Td>
+                <Td align="right" className="text-fg-muted">
+                  {w.reserved === 0 ? '—' : formatMoneyShort(w.reserved, w.currency)}
+                </Td>
+                <Td align="right" className="text-fg-muted">
+                  {formatMoneyShort(w.paid_out, w.currency)}
+                </Td>
+              </tr>
+            ))}
+          </tbody>
+        </Table>
+      )}
+      <p className="border-t border-line px-6 py-3 text-xs text-fg-muted">
+        <strong className="font-medium text-fg">In progress</strong> is buyer money
+        still in the hold — gross, with our fee not yet struck off, so it is not
+        the seller's to draw on.{' '}
+        <strong className="font-medium text-fg">Available</strong> has cleared its
+        window and is payable now.
+      </p>
+    </Card>
+  )
+}
 
 /**
  * Payout destinations available in a market, derived from the registry rather
@@ -65,6 +164,8 @@ export function SellersPage() {
       />
 
       {adding && <AddSellerForm onClose={() => setAdding(false)} />}
+
+      <WalletsCard />
 
       <Card>
         <CardHeader

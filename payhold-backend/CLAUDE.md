@@ -71,7 +71,7 @@ environment or a build log.
 | `deals` | create (with §14's `completion_policy`), list, get, `/pay`, `/confirm`, `/refund`, `/deposit`, `/capture`, `/release-deposit` |
 | `checkout` | §10.1's sessions. `/sessions` for the client's server; `/public/:token` for the buyer, with no credential |
 | `payment-options` | what a buyer in a market can pay with; the catalogue a client renders its checkout from |
-| `sellers` | register a tokenized payout destination, list, `/:id/capabilities`, `/:id/verify` (person-only) |
+| `sellers` | register a tokenized payout destination, list, `/wallets`, `/:id/capabilities`, `/:id/balance`, `/:id/withdraw`, `/:id/verify` (person-only) |
 | `balance` | four buckets per currency, or `?by=rail` |
 | `webhook-endpoints` | register (secret shown once), list, `?deliveries=1`, disable |
 | `flutterwave-webhook` | inbound, at `/flutterwave-webhook/:tenant` |
@@ -982,6 +982,70 @@ Three consequences worth knowing:
   calling any provider — `settle_payout` would refuse to book it anyway, since a
   refunded deal has no available balance, but that refusal comes after the money
   has gone.
+
+## Seller wallets and pull-based payouts — migration `20260808000002`
+
+One migration, not two: nothing here reads a value from `alter type ... add
+value`, so there is no cross-transaction enum hazard.
+
+**The wallet reconciles, and that is the acceptance test.**
+`seller_wallet_rows` is deliberately parallel to `rail_balances`, entry type for
+entry type and sign for sign, because every seller's wallet summed has to equal
+the tenant's own balance less `fees_retained`. A wallet computed a second way is
+free to disagree with `tenant_balances`, and the number a seller reads would be
+the one nobody reconciles against a provider.
+`tests/seller-wallet.test.ts` asserts the sum with a non-zero `fees_retained`,
+so it cannot pass by everything happening to be equal.
+
+Three things worth knowing before changing any of it.
+
+### `due_payouts` is in SQL because of the limit, not the predicate
+
+The cron used to build its own scan. It cannot any more: in `payout_mode =
+'wallet'` a cleared payout is not due until somebody asks, and filtering those
+rows out *after* `limit 25` would let one tenant sitting on twenty-five
+unasked-for payouts fill the pass and starve every other tenant — silently, and
+for as long as the backlog stood. The filter has to be inside the limit.
+
+**The statuses are a parameter.** `DISPATCHABLE` stays in
+`_shared/dispatch.ts`, where the reasoning about `held_for_review` being absent
+lives, and the cron passes what it already owns. A second copy of that list in
+SQL would be free to drift from the argument for it.
+
+### `request_withdrawal` moves nothing
+
+It stamps `withdrawal_requested_at`, records a chosen destination and re-arms
+`next_attempt_at`. Everything after that is `dispatchPayout` — the same
+frozen-tenant check, the same `screen_payout`, the same `route_payout`. A
+withdrawal endpoint that called a provider itself would be a second money path,
+and §12's whole point is that there must not be a second way to pay a seller
+nobody verified.
+
+`attempts` is untouched, for the reason `reset_payout_retry` leaves it untouched:
+`route_payout` reads it to decide whether the verified backup destination may be
+used, so zeroing it would quietly send the next attempt back to the primary that
+has been failing. `held_for_review` is absent from the statuses it stamps, for
+the reason it is absent from `DISPATCHABLE`.
+
+`withdrawal_requested_at` is **never cleared**, including when the payout is
+sent. "Was this pulled or did it go out on the clock" is exactly what is asked
+when a seller disputes a transfer.
+
+### `route_payout` was recreated, so its revoke had to be reissued
+
+The only change to it is the destination lookup: the seller's requested
+destination, if the payout carries one and it still stands, else their primary
+exactly as before. Every eligibility check, the backup policy, the decision row,
+`route_reason_text` and the `payout.route_changed` webhook are untouched.
+
+The verification and security-hold conditions are **re-checked there** rather
+than trusted from `request_withdrawal`, because a verification can be withdrawn
+between the ask and the pass that sends it, and `route_payout` is the read that
+happens under the payout's own lock.
+
+A recreated function is granted to PUBLIC by default — the same trap `refund_deal`
+and `resolve_dispute` walked into in V2. `tests/seller-wallet.test.ts` asserts
+`payhold_ai` cannot execute it, and pins `count(*) from pg_proc` at 1.
 
 ## The auto-release timer
 
