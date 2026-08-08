@@ -26,7 +26,23 @@ export type Currency = string
 /** ISO-8601 timestamp. */
 export type Timestamp = string
 
-export type Provider = 'flutterwave' | 'stripe' | 'fake'
+/**
+ * §9's adapters. The first three are built; the last three are **declared and
+ * unbuilt** (§29.3), so they can be named, refused with a reason and carry a
+ * capability row — `loadProvider` throws for them rather than falling back to
+ * the fake.
+ *
+ * Distinct from `PayoutProvider`, which names a **rail** — the shape of
+ * destination a token was minted for. One adapter carries several: Venmo
+ * destinations are reached through PayPal's API.
+ */
+export type Provider =
+  | 'flutterwave'
+  | 'stripe'
+  | 'fake'
+  | 'paypal'
+  | 'cash_app_pay'
+  | 'china_wallet_partner'
 
 /**
  * How the buyer pays, at the level the rail cares about. The specific wallet —
@@ -174,10 +190,12 @@ export interface Deal {
  * The rail a destination is tokenized against, which is provider and method
  * together — a MoMo token means nothing to a bank transfer.
  *
- * The last five are **declared and disabled** (spec §29.3): their
- * `payout_routes` rows carry no provider, and the `route_needs_an_adapter`
- * check makes such a row impossible to enable. They exist so a seller who picks
- * one is told why it will not work rather than told nothing.
+ * The last five are **declared and disabled** (spec §29.3). Their routes name
+ * an adapter that is not built — `paypal` carries Venmo too,
+ * `china_wallet_partner` carries both Chinese wallets — and a trigger refuses
+ * to enable a route whose adapter is not live in `provider_capabilities`. They
+ * exist so a seller who picks one is told why it will not work rather than
+ * told nothing.
  */
 export type PayoutProvider =
   | 'flutterwave_momo'
@@ -207,8 +225,12 @@ export interface PayoutRoute {
   id: string
   tenant_id: string | null
   payout_provider: PayoutProvider
-  /** Null means declared and unbuilt, and therefore impossible to enable. */
-  provider: Provider | null
+  /**
+   * The adapter that talks to this rail's API. One adapter carries several
+   * rails. Whether it is *built* is `ProviderCapability.implemented`, not a
+   * null here — and a route cannot be enabled while it is not.
+   */
+  provider: Provider
   method: PayoutMethod
   countries: Country[]
   currencies: Currency[]
@@ -400,6 +422,13 @@ export interface Payout {
    */
   failure_reason: string | null
   attempts: number
+  /**
+   * When a machine may next attempt this payout — §13's capped backoff.
+   * **Null means never**: the retry budget is spent and only a person can send
+   * it again, which is how "then move to blocked for operator action" is said
+   * without a second status meaning "blocked, but really blocked".
+   */
+  next_attempt_at?: Timestamp | null
   /** The provider's transfer reference, set once it has one. */
   provider_ref?: string | null
   /** §5.1: which destination this payout actually went to. */

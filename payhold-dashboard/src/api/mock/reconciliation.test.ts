@@ -18,6 +18,7 @@ import {
   confirmDeal,
   driftKey,
   fundDeal,
+  resolveReconciliationRun,
   runCron,
   runReconciliation,
 } from './engine'
@@ -207,5 +208,144 @@ describe('drift stops money leaving', () => {
       currency: 'RWF',
       drift: 25_000,
     })
+  })
+})
+
+/**
+ * §13's run record. The alerts above answer "is something wrong now"; a run
+ * answers "did the pass run, over what, and has anybody looked" — which an
+ * alert table cannot, and a nightly control nobody can prove ran is not a
+ * control.
+ *
+ * The backend counterpart is
+ * `payhold-backend/tests/reconciliation-runs.test.ts`.
+ */
+describe('the pass leaves a record of itself', () => {
+  function runsFor(tenantId: string) {
+    return db.reconciliation_runs.filter((r) => r.tenant_id === tenantId)
+  }
+
+  it('writes one run per rail, not one per pass', () => {
+    runReconciliation(db, AUTOHIRE)
+
+    const rails = new Set(computeRailBalances(db, AUTOHIRE).map((r) => r.provider))
+    const runs = runsFor(AUTOHIRE)
+
+    expect(runs).toHaveLength(rails.size)
+    expect(new Set(runs.map((r) => r.provider))).toEqual(rails)
+    expect(runs.every((r) => r.status === 'completed')).toBe(true)
+  })
+
+  it('a pass where everything agreed is clean', () => {
+    runReconciliation(db, AUTOHIRE)
+
+    expect(runsFor(AUTOHIRE).every((r) => r.resolution === 'clean')).toBe(true)
+    expect(runsFor(AUTOHIRE).every((r) => r.mismatched === 0)).toBe(true)
+  })
+
+  it('the rail that disagreed says so, and the others do not', () => {
+    runReconciliation(db, EQUIPCO)
+
+    const flutterwave = runsFor(EQUIPCO).find((r) => r.provider === 'flutterwave')!
+    expect(flutterwave.mismatched).toBe(1)
+    expect(flutterwave.resolution).toBe('cases_open')
+
+    for (const run of runsFor(EQUIPCO).filter((r) => r.provider !== 'flutterwave')) {
+      expect(run.resolution).not.toBe('cases_open')
+    }
+  })
+
+  it('the alert records which pass raised it', () => {
+    runReconciliation(db, EQUIPCO)
+
+    const [alert] = openAlerts(EQUIPCO)
+    const run = runsFor(EQUIPCO).find((r) => r.id === alert!.run_id)
+    expect(run).toBeDefined()
+    expect(run!.provider).toBe('flutterwave')
+  })
+
+  it('the next window picks up where the last completed pass stopped', () => {
+    runReconciliation(db, AUTOHIRE)
+    const first = runsFor(AUTOHIRE).find((r) => r.provider === 'flutterwave')!
+
+    advanceClock(24)
+    runReconciliation(db, AUTOHIRE)
+    const second = runsFor(AUTOHIRE)
+      .filter((r) => r.provider === 'flutterwave')
+      .at(-1)!
+
+    expect(second.id).not.toBe(first.id)
+    expect(second.period_start).toBe(first.period_end)
+  })
+})
+
+describe('signing a case off', () => {
+  function equipcoRun() {
+    runReconciliation(db, EQUIPCO)
+    return db.reconciliation_runs.find(
+      (r) => r.tenant_id === EQUIPCO && r.provider === 'flutterwave',
+    )!
+  }
+
+  it('names the person and closes the alerts that run raised', () => {
+    const run = equipcoRun()
+    resolveReconciliationRun(db, run.id, 'grace@payhold.io', 'A duplicate refund, reversed')
+
+    expect(run.resolution).toBe('resolved')
+    expect(run.resolved_by).toBe('grace@payhold.io')
+    expect(openAlerts(EQUIPCO)).toHaveLength(0)
+  })
+
+  it('does not by itself lift the freeze', () => {
+    // Two different claims: "I have written down what happened", and "the money
+    // is accounted for and may move again".
+    const run = equipcoRun()
+    resolveReconciliationRun(db, run.id, 'grace@payhold.io', 'Explained')
+
+    expect(tenant(EQUIPCO).status).toBe('payouts_frozen')
+  })
+
+  it('a person can lift it, and it is audited against them', () => {
+    const run = equipcoRun()
+    resolveReconciliationRun(db, run.id, 'grace@payhold.io', 'Explained', true)
+
+    expect(tenant(EQUIPCO).status).toBe('active')
+    expect(
+      db.audit.some(
+        (a) => a.action === 'tenant.payouts_resumed' && a.actor === 'grace@payhold.io',
+      ),
+    ).toBe(true)
+  })
+
+  it('refuses to lift while another case is still open, and writes nothing', () => {
+    const run = equipcoRun()
+    // A case from an earlier pass that nobody has closed. Lifting the freeze is
+    // a claim about the whole account, so one signed-off rail is not enough.
+    db.alerts.push({
+      id: 'rec_older',
+      tenant_id: EQUIPCO,
+      provider: 'stripe',
+      currency: 'USD',
+      ledger_balance: 5_000,
+      provider_balance: 4_500,
+      drift: -500,
+      detected_at: db.alerts[0]!.detected_at,
+      last_seen_at: db.alerts[0]!.last_seen_at,
+      resolved_at: null,
+      resolution_note: null,
+      run_id: 'rcr_older',
+    })
+
+    expect(() =>
+      resolveReconciliationRun(db, run.id, 'grace@payhold.io', 'Explained', true)
+    ).toThrow(/still open/)
+
+    expect(tenant(EQUIPCO).status).toBe('payouts_frozen')
+    expect(run.resolution).not.toBe('resolved')
+  })
+
+  it('an anonymous sign-off is refused', () => {
+    const run = equipcoRun()
+    expect(() => resolveReconciliationRun(db, run.id, '  ', 'no idea')).toThrow(/name/)
   })
 })

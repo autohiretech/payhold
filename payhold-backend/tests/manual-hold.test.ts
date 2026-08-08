@@ -119,8 +119,15 @@ describe('holding one payout', () => {
 
   test('cannot stop money that has already gone', async () => {
     const s = await seed()
-    await h.db.query(`update payouts set status = 'paid', paid_at = now() where id = $1`,
-                     [s.payout])
+    // With the rail's reference, because §17's
+    // `paid_needs_a_provider_reference` refuses a payout marked paid without
+    // one — a paid payout with no transfer behind it is not a state this test
+    // could be describing.
+    await h.db.query(
+      `update payouts set status = 'paid', paid_at = now(), provider_ref = 'FLW-SENT'
+        where id = $1`,
+      [s.payout],
+    )
 
     await rejects(() => hold(s.payout), /invalid_state.*already been sent/)
   })

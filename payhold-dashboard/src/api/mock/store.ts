@@ -16,13 +16,20 @@ import type {
   Deal,
   DealOutcome,
   Dispute,
+  DisputeOffer,
   Refund,
   LedgerEntry,
+  CheckoutSession,
+  LaunchChecklistItem,
+  LaunchSignOff,
+  MarketClosure,
   Payout,
   PayoutDecision,
   PayoutRoute,
+  ProviderCapability,
   ProviderAccount,
   ReconciliationAlert,
+  ReconciliationRun,
   RequestContext,
   RiskSignal,
   Seller,
@@ -63,7 +70,25 @@ import type {
 //     could not express), the rails became `payout_routes` rows so a corridor
 //     can be switched off without a deploy, and every choice now writes a
 //     `payout_decisions` row. Payouts gained `blocked` and `needs_verification`.
-export const SCHEMA_VERSION = 13
+// 14: §9's capability matrix. What each adapter can do — and whether it is
+//     built and switched on — became rows, and so did which markets are open.
+//     Payout routes name their adapter rather than carrying a null to mean
+//     "unbuilt", so a provider going down takes exactly its own routes.
+// 15: §10.1's hosted checkout sessions. A scoped, expiring credential so a
+//     buyer can choose a payment method without holding an API key — and the
+//     first writer `checkout_started` has ever had.
+// 16: §16's launch checklist. What must be true before PayHold takes live
+//     money, as rows, plus the append-only sign-offs that answer them — and
+//     the gate on `connectProvider` that refuses live credentials until every
+//     required item is signed.
+// 17: §8's Resolution Center. Requests between the parties (`dispute_offers`)
+//     with a 48-hour window that lapses rather than accepts, structured reason
+//     codes, evidence gained a capture time, and a dispute records who decided
+//     it — which is what the conflict-of-interest control reads.
+// 18: §13's reconciliation runs — one per tenant per rail, so "did last night's
+//     pass check Stripe" has an answer — and the payout retry clock, where a
+//     null `next_attempt_at` means no machine may try this payout again.
+export const SCHEMA_VERSION = 18
 const STORAGE_KEY = 'payhold.mock.v1'
 
 /**
@@ -121,7 +146,34 @@ export interface MockDb {
   payout_routes: PayoutRoute[]
   /** Every routing choice and the checks behind it. §5.1 wants it auditable. */
   payout_decisions: PayoutDecision[]
+  /** §9: what each adapter can do, and whether it is built and switched on. */
+  provider_capabilities: ProviderCapability[]
+  /**
+   * §10.1. One live session per deal — two would be two payment links against
+   * one hold. Nothing here can fund a deal; that is the provider webhook's.
+   */
+  checkout_sessions: CheckoutSession[]
+  /**
+   * §12's country switch — an **overlay**, not a copy of the registry. A country
+   * with no row here behaves as `lib/countries.ts` says.
+   */
+  payment_markets: MarketClosure[]
+  /**
+   * §16's checklist. Platform-wide rather than per tenant: the items are about
+   * PayHold's own legal entity, contracts and processes, and a tenant
+   * connecting live keys is gated on our readiness because it is our system
+   * their buyers' money would move through.
+   */
+  launch_checklist: LaunchChecklistItem[]
+  /** Append-only. Withdrawing a sign-off is a new row, never an edit. */
+  launch_sign_offs: LaunchSignOff[]
   disputes: Dispute[]
+  /**
+   * §8's requests between the parties. Their own table rather than an array on
+   * the dispute, because the "one open request per order" rule is about the
+   * *order* and has to be asked across disputes.
+   */
+  dispute_offers: DisputeOffer[]
   refunds: Refund[]
   api_keys: ApiKey[]
   /**
@@ -140,6 +192,11 @@ export interface MockDb {
   webhook_deliveries: WebhookDelivery[]
   audit: AuditLogEntry[]
   alerts: ReconciliationAlert[]
+  /**
+   * §13's record of the passes themselves, one per tenant per rail. The alerts
+   * above say what is wrong now; these say we looked, and what we covered.
+   */
+  reconciliation_runs: ReconciliationRun[]
   /** Deterministic rule output — spec §12.3's `risk_signals`. */
   risk_signals: RiskSignal[]
   /**
@@ -202,7 +259,13 @@ const REQUIRED_KEYS: Record<keyof MockDb, true> = {
   payouts: true,
   payout_routes: true,
   payout_decisions: true,
+  provider_capabilities: true,
+  payment_markets: true,
+  launch_checklist: true,
+  launch_sign_offs: true,
+  checkout_sessions: true,
   disputes: true,
+  dispute_offers: true,
   refunds: true,
   api_keys: true,
   provider_accounts: true,
@@ -210,6 +273,7 @@ const REQUIRED_KEYS: Record<keyof MockDb, true> = {
   webhook_deliveries: true,
   audit: true,
   alerts: true,
+  reconciliation_runs: true,
   risk_signals: true,
   request_context: true,
   ai_suggestions: true,

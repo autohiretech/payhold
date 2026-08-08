@@ -100,6 +100,24 @@ Deno.serve(handler(async (req) => {
 
   const db = serviceClient()
 
+  // §8's 48 hours, run here rather than from a cron job of its own. Both passes
+  // are the same shape — a clock ran out — and this one moves no money, touches
+  // no deal and can only lapse a request nobody answered, so it is safe beside
+  // the release timer.
+  //
+  // It runs **first**, and the ordering is worth keeping: an expired request is
+  // a fact about a deal this pass may be about to release, and a dashboard that
+  // showed a released deal still carrying a live 48-hour window would be showing
+  // a window nobody could act on any more.
+  const { data: expired, error: expiryError } = await db.rpc('expire_dispute_offers')
+
+  if (expiryError) {
+    // A failure here must not stop the release timer. The requests stay open and
+    // the next pass expires them; a deal whose window came due does not have to
+    // wait for that.
+    console.error('expire_dispute_offers failed', { message: expiryError.message })
+  }
+
   // A suspended account is one we have stopped serving. Its timers stop too,
   // rather than quietly settling deals while the tenant is locked out and
   // cannot see it happening.
@@ -120,7 +138,13 @@ Deno.serve(handler(async (req) => {
   if (error) throw new Error(`deal lookup failed: ${error.message}`)
 
   const blocked = new Set((suspended ?? []).map((t) => t.id as string))
-  const result = { considered: 0, auto_released: 0, skipped: 0, errored: 0 }
+  const result = {
+    considered: 0,
+    auto_released: 0,
+    skipped: 0,
+    errored: 0,
+    offers_expired: (expired as number | null) ?? 0,
+  }
 
   for (const row of (due ?? []) as unknown as Deal[]) {
     result.considered += 1

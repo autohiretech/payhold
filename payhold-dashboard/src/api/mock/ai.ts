@@ -595,6 +595,12 @@ export function decideSuggestion(
       dispute.id,
       suggestion.output.recommendation,
       `${suggestion.output.headline} Drafted by ${MODEL} (${suggestion.id}), approved by ${decidedBy}.`,
+      {
+        // The approver is the decider, which means §8's conflict-of-interest
+        // control applies here too: an administrator who argued one side of
+        // this dispute cannot launder the decision through an AI draft.
+        decidedBy,
+      },
     )
   }
 

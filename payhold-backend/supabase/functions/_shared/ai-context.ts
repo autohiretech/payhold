@@ -91,7 +91,43 @@ export interface DisputeCaseFile {
     opened_at: Timestamp
     /** Free text from a party to the deal. Wrapped as untrusted in the prompt. */
     reason: string
+    /** §8's structured code, which is ours rather than a party's. */
+    reason_code: string
+    /**
+     * Presentment minor units, or null for the whole payment. It is a ceiling on
+     * what any recommendation may take from the seller — `resolve_dispute`
+     * refuses more, so a draft proposing more is a draft nobody can approve.
+     */
+    disputed_amount: Money | null
   }
+  /**
+   * §8's evidence. Descriptions only — PayHold stores no bytes, and a model that
+   * cannot see the photo can still weigh "inspection photo taken at handover,
+   * showing no damage" against a complaint that the item arrived damaged.
+   *
+   * Every one of these is written by a party to the deal, so it is wrapped as
+   * untrusted in the prompt for the same reason the opening statement is: it is
+   * *about* the question being asked, which makes it the injection surface.
+   */
+  evidence: {
+    uploaded_by: 'buyer' | 'seller'
+    kind: string
+    description: string
+    captured_at: Timestamp | null
+    created_at: Timestamp
+  }[]
+  /**
+   * What the parties have already offered each other. A draft that recommends
+   * exactly the split one side declined yesterday is a draft that wastes an
+   * administrator's afternoon.
+   */
+  offers: {
+    offered_by: 'buyer' | 'seller'
+    kind: string
+    amount: Money | null
+    status: string
+    created_at: Timestamp
+  }[]
   confirmations: { side: string; actor: string; confirmed_at: Timestamp }[]
   timeline: TimelineEvent[]
   seller_history: {
@@ -236,11 +272,14 @@ async function sellerHistory(
 /**
  * Everything the dispute assistant reads.
  *
- * Note what is absent, because the honest gap matters more than the list: the
- * schema has no evidence table and no counter-statement column yet, so the
- * model weighs the opening reason, the timeline and the seller's record. The
- * dashboard mock models richer disputes; when those columns land here, this is
- * the function that grows and the prompt version that bumps.
+ * Phase 8 closed the gap this comment used to record: §8's `dispute_evidence`
+ * and `dispute_offers` exist now, so the assistant weighs what both sides filed
+ * and what they have already offered each other, not just the opening sentence.
+ * That is the whole of `dispute-assistant@2`.
+ *
+ * What is still absent is a counter-statement column — the respondent's case
+ * arrives as evidence of kind `message` rather than as a field of its own. Worth
+ * knowing when reading a draft that says the seller never replied.
  */
 export async function disputeCaseFile(
   db: SupabaseClient,
@@ -249,7 +288,7 @@ export async function disputeCaseFile(
 ): Promise<{ file: DisputeCaseFile; deal_id: string }> {
   const { data: dispute } = await db
     .from('disputes')
-    .select('id, deal_id, raised_by, reason, status, opened_at')
+    .select('id, deal_id, raised_by, reason, reason_code, disputed_amount, status, opened_at')
     .eq('id', disputeId)
     .eq('tenant_id', tenantId)
     .maybeSingle()
@@ -269,6 +308,22 @@ export async function disputeCaseFile(
     .select('side, actor, confirmed_at')
     .eq('deal_id', deal.id)
     .order('confirmed_at', { ascending: true })
+
+  // §8's case file, and the reason this is `dispute-assistant@2`. Both queries
+  // run under the `payhold_ai` role's own policies, so they are scoped to this
+  // tenant whether or not the filter above is right.
+  const [{ data: evidence }, { data: offers }] = await Promise.all([
+    db
+      .from('dispute_evidence')
+      .select('uploaded_by, kind, description, captured_at, created_at')
+      .eq('dispute_id', dispute.id)
+      .order('created_at', { ascending: true }),
+    db
+      .from('dispute_offers')
+      .select('offered_by, kind, amount, status, created_at')
+      .eq('dispute_id', dispute.id)
+      .order('created_at', { ascending: true }),
+  ])
 
   return {
     deal_id: deal.id,
@@ -291,7 +346,23 @@ export async function disputeCaseFile(
         raised_by: dispute.raised_by as 'buyer' | 'seller',
         opened_at: dispute.opened_at as string,
         reason: dispute.reason as string,
+        reason_code: dispute.reason_code as string,
+        disputed_amount: (dispute.disputed_amount as number | null) ?? null,
       },
+      evidence: (evidence ?? []).map((e) => ({
+        uploaded_by: e.uploaded_by as 'buyer' | 'seller',
+        kind: e.kind as string,
+        description: e.description as string,
+        captured_at: (e.captured_at as string | null) ?? null,
+        created_at: e.created_at as string,
+      })),
+      offers: (offers ?? []).map((o) => ({
+        offered_by: o.offered_by as 'buyer' | 'seller',
+        kind: o.kind as string,
+        amount: (o.amount as number | null) ?? null,
+        status: o.status as string,
+        created_at: o.created_at as string,
+      })),
       confirmations: (confirmations ?? []).map((c) => ({
         side: c.side as string,
         actor: c.actor as string,

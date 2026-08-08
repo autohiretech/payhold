@@ -110,7 +110,9 @@ function DisputeCard({ dispute, amount }: { dispute: Dispute; amount: string | n
   const [choice, setChoice] = useState<'release' | 'refund' | null>(null)
 
   const resolve = useMoneyMutation((resolution: 'release' | 'refund') =>
-    api.resolveDispute(dispute.id, resolution, note),
+    // §8's decision record. The name is what the conflict-of-interest control
+    // reads: whoever spoke for a side in this dispute cannot rule on it.
+    api.resolveDispute(dispute.id, resolution, note, ME),
   )
 
   const usage = useAiUsage()

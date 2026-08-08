@@ -43,16 +43,24 @@ Deno.serve(handler(async (req) => {
 
   if (matureError) throw new Error(`clearing sweep failed: ${matureError.message}`)
 
+  const now = new Date().toISOString()
+
   const { data: due, error } = await db
     .from('payouts')
     .select('id, tenant_id, deal_id, seller_id, amount, currency, status, ' +
-      'scheduled_for, paid_at, failure_reason, attempts')
+      'scheduled_for, paid_at, failure_reason, attempts, next_attempt_at')
     // `held_for_review` is not in this list and must never be. Cron is not
     // allowed to be the thing that lets a held payout through — invariant 11.
     // `blocked` and `needs_verification` are in it, on purpose: neither is
     // waiting on a decision, so re-asking overrules nobody. See `DISPATCHABLE`.
     .in('status', DISPATCHABLE)
-    .lte('scheduled_for', new Date().toISOString())
+    .lte('scheduled_for', now)
+    // §13's backoff, and the reason it is a filter here rather than a branch in
+    // `dispatchPayout`: a null `next_attempt_at` means no machine may try this
+    // again, and `lte` excludes nulls by construction. The approve and retry
+    // endpoints share `dispatchPayout` and are unaffected — a person is not a
+    // machine, which is the whole distinction the column encodes.
+    .lte('next_attempt_at', now)
     .order('scheduled_for', { ascending: true })
     .limit(BATCH)
 

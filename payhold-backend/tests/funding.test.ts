@@ -314,6 +314,99 @@ describe('idempotency — invariant 4', () => {
   })
 })
 
+/**
+ * §13 and §15 phase 6: "duplicate, out-of-order and missing webhooks do not
+ * double-post money."
+ *
+ * Duplicates are the describe above — a redelivery is the case providers retry
+ * by design. These are the other two, and they are different failures:
+ * out-of-order means the events arrived, in the wrong sequence, and the ledger
+ * must land in the same place; missing means one never arrived at all, and the
+ * requirement is that nothing is invented in its absence.
+ */
+describe('out-of-order and missing provider events — §13', () => {
+  test('a success arriving after a failure books one hold', async () => {
+    // An async rail can report a decline and then settle. §6 gives the attempt
+    // its own state precisely so the later truth has somewhere to land.
+    const s = await seedDeal()
+    // The route a real decline takes: `/pay` records the attempt, the rail says
+    // no, and then says yes.
+    await h.db.query(`update deals set status = 'payment_pending' where id = $1`, [s.deal])
+    await h.db.query(`update deals set status = 'payment_failed' where id = $1`, [s.deal])
+
+    await fund(s.deal, { ref: 'FLW-LATE-SUCCESS' })
+
+    expect(await ledgerFor(s.deal)).toEqual([{ entry_type: 'hold', amount: 100_000 }])
+    expect((await dealRow(s.deal)).status).toBe('funded_held')
+  })
+
+  test('a stale failure arriving after funding does not unwind the hold', async () => {
+    // The reverse ordering of the same pair. `payment_failed` is not reachable
+    // from `funded_held` — the transition guard refuses the edge outright —
+    // which is what stops a late decline notice from contradicting money we are
+    // holding and can see.
+    const s = await seedDeal()
+    await fund(s.deal, { ref: 'FLW-ORDER-1' })
+
+    await rejects(
+      () => h.db.query(`update deals set status = 'payment_failed' where id = $1`, [s.deal]),
+      /funded_held.*payment_failed|cannot|not allowed/i,
+    )
+
+    expect(await ledgerFor(s.deal)).toEqual([{ entry_type: 'hold', amount: 100_000 }])
+  })
+
+  test('a redelivery arriving after release does not re-hold the money', async () => {
+    // The dangerous ordering: the deal has moved on, the provider retries the
+    // original charge event, and a second `hold` would put money in the ledger
+    // that arrived once.
+    const s = await seedDeal()
+    await fund(s.deal, { ref: 'FLW-ORDER-2' })
+    for (const side of ['buyer', 'seller']) {
+      await h.db.query(
+        `select * from confirm_deal($1, $2::confirm_side, 'user', 90000, 'RWF', 10000)`,
+        [s.deal, side],
+      )
+    }
+    expect((await dealRow(s.deal)).status).toBe('clearing')
+
+    await fund(s.deal, { ref: 'FLW-ORDER-2' })
+
+    const holds = (await ledgerFor(s.deal)).filter((e) => e.entry_type === 'hold')
+    expect(holds).toEqual([{ entry_type: 'hold', amount: 100_000 }])
+    expect((await dealRow(s.deal)).status).toBe('clearing')
+  })
+
+  test('a second, different payment for a released deal is refused', async () => {
+    // Not a redelivery — a different reference. Accepting it would book a
+    // second hold against a deal whose money has already gone to clearing.
+    const s = await seedDeal()
+    await fund(s.deal, { ref: 'FLW-ORDER-3' })
+    for (const side of ['buyer', 'seller']) {
+      await h.db.query(
+        `select * from confirm_deal($1, $2::confirm_side, 'user', 90000, 'RWF', 10000)`,
+        [s.deal, side],
+      )
+    }
+
+    await rejects(() => fund(s.deal, { ref: 'FLW-ORDER-4' }), /cannot be funded/)
+    expect((await ledgerFor(s.deal)).filter((e) => e.entry_type === 'hold')).toHaveLength(1)
+  })
+
+  test('a webhook that never arrives leaves nothing behind', async () => {
+    // The missing case. A deal handed to the provider sits in `payment_pending`
+    // with an empty ledger until an event we verified says otherwise — and the
+    // reconciliation run counts what we were told and never posted, which is a
+    // different thing from what we were never told at all.
+    const s = await seedDeal()
+    await h.db.query(`update deals set status = 'payment_pending' where id = $1`, [s.deal])
+
+    expect(await ledgerFor(s.deal)).toEqual([])
+    expect((await dealRow(s.deal)).status).toBe('payment_pending')
+    expect((await dealRow(s.deal)).provider_ref).toBeNull()
+  })
+})
+
 describe('cross-border funding', () => {
   test('locks the rate on a converted deal', async () => {
     // A Rwandan host's RWF price, charged to a foreign card in USD.

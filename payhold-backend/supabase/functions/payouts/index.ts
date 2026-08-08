@@ -28,7 +28,7 @@ import { PayHoldError, type Payout } from '../_shared/types.ts'
 
 const PAYOUT_COLUMNS =
   'id, tenant_id, deal_id, seller_id, amount, currency, status, scheduled_for, ' +
-  'paid_at, failure_reason, attempts, provider_ref, destination_id, review_held_at, ' +
+  'paid_at, failure_reason, attempts, next_attempt_at, provider_ref, destination_id, review_held_at, ' +
   'review_held_by, review_hold_reason, review_approved_by, review_approved_at, created_at'
 
 async function getPayout(
@@ -208,7 +208,23 @@ async function retry(
     )
   }
 
-  const outcome = await dispatchPayout(db, payout)
+  // Put the automatic clock back before sending. §13's backoff stops after
+  // `payout_retry_max_attempts` by clearing `next_attempt_at`, and a payout a
+  // person re-attempted must be visible to the cron again — otherwise one
+  // manual attempt is all it ever gets, and if that attempt is the one that
+  // times out, the payout leaves the queue silently.
+  //
+  // The attempt *counter* is deliberately untouched: `route_payout` reads it to
+  // decide whether the seller's verified backup destination may be used, and
+  // zeroing it would quietly send this attempt back to the primary that has
+  // been failing.
+  const { error: resetError } = await db.rpc('reset_payout_retry', {
+    p_payout_id: payout.id,
+    p_actor: caller.actor,
+  })
+  if (resetError) throw rpcError(resetError, 're-attempt this payout')
+
+  const outcome = await dispatchPayout(db, await getPayout(db, caller, id))
 
   return json(req, {
     payout: await withSignals(db, await getPayout(db, caller, id)),

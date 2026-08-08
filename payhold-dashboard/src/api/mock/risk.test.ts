@@ -126,13 +126,17 @@ describe('a rule can hold a payout', () => {
       tenant_id: AUTOHIRE,
       deal_id: otherDeal.id,
       raised_by: 'buyer',
+      raised_by_actor: 'user:buyer',
       reason: 'Vehicle never arrived',
+      reason_code: 'not_delivered',
+      disputed_amount: null,
       counter_statement: null,
       evidence: [],
       status: 'resolved_refunded',
       opened_at: nowIso(),
       resolved_at: nowIso(),
       resolution_note: 'Refunded',
+      decided_by: 'payhold-staff',
     })
 
     expect(releaseToPayout(id).status).toBe('held_for_review')

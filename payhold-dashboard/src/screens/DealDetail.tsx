@@ -1,6 +1,17 @@
 import { useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
-import { api, HOLDING_STATUSES, type ConfirmSide, type Deal } from '@/api'
+import {
+  api,
+  HOLDING_STATUSES,
+  PAST_HOLD_STATUSES,
+  type CheckoutSession,
+  type ConfirmSide,
+  type Deal,
+  type DealAmounts,
+  type DealStatus,
+  type Money,
+  type RefundStatus,
+} from '@/api'
 import {
   Badge,
   Button,
@@ -25,16 +36,21 @@ import {
   formatDateTime,
   formatMoney,
   formatRelative,
+  type StatusMeta,
+  type Tone,
 } from '@/lib/format'
 import { COUNTRY_LABEL, METHOD_LABEL, PROVIDER_LABEL } from '@/lib/rails'
 import { formatRate } from '@/lib/fx'
 import {
   simNow,
   useAudit,
+  useCheckoutSessions,
   useDeal,
+  useDealAmounts,
   useLedger,
   useMoneyAction,
   useMoneyMutation,
+  useRefunds,
   useSellers,
 } from '@/lib/queries'
 
@@ -44,6 +60,8 @@ export function DealDetailPage() {
   const sellers = useSellers()
   const ledger = useLedger(id)
   const audit = useAudit(id)
+  const amounts = useDealAmounts(id)
+  const refunds = useRefunds(id)
   const now = simNow()
 
   if (deal.isPending) {
@@ -74,7 +92,6 @@ export function DealDetailPage() {
 
   const d = deal.data
   const seller = sellers.data?.find((s) => s.id === d.seller_id)
-  const net = d.amount - d.fee_amount
 
   return (
     <>
@@ -95,6 +112,43 @@ export function DealDetailPage() {
       <div className="grid gap-5 lg:grid-cols-[1fr_20rem]">
         <div className="min-w-0 space-y-5">
           <Timeline deal={d} now={now} />
+
+          {refunds.data && refunds.data.length > 0 && (
+            <Card>
+              <CardHeader
+                title="Refunds"
+                subtitle="A refund is a record with a lifetime, not a single entry — some rails settle one weeks after it is issued."
+              />
+              <Table>
+                <thead>
+                  <tr>
+                    <Th>Reason</Th>
+                    <Th>Issued by</Th>
+                    <Th>State</Th>
+                    <Th align="right">Amount</Th>
+                    <Th align="right">When</Th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {refunds.data.map((r) => (
+                    <tr key={r.id}>
+                      <Td className="max-w-64 truncate font-medium">{r.reason}</Td>
+                      <Td className="text-fg-muted">{r.actor}</Td>
+                      <Td>
+                        <Badge meta={REFUND_STATUS_META[r.status]} />
+                      </Td>
+                      <Td align="right" className="tabular font-medium">
+                        {formatMoney(r.amount, r.currency)}
+                      </Td>
+                      <Td align="right" className="text-fg-muted">
+                        {formatDateTime(r.settled_at ?? r.created_at)}
+                      </Td>
+                    </tr>
+                  ))}
+                </tbody>
+              </Table>
+            </Card>
+          )}
 
           <Card>
             <CardHeader
@@ -165,44 +219,10 @@ export function DealDetailPage() {
         </div>
 
         <div className="space-y-5">
+          <PaymentLink deal={d} now={now} />
+
           <Card className="p-6">
-            <h2 className="text-sm font-semibold text-fg">Money</h2>
-            <dl className="mt-3 space-y-2 text-sm">
-              <Row label="Deal amount" value={formatMoney(d.amount, d.currency)} />
-              {d.presentment_currency !== d.currency && (
-                <>
-                  <Row
-                    label="Buyer charged"
-                    value={formatMoney(d.presentment_amount, d.presentment_currency)}
-                    muted
-                  />
-                  <Row
-                    label="Rate"
-                    value={
-                      d.fx_rate
-                        ? formatRate(d.currency, d.presentment_currency, d.fx_rate)
-                        : 'locks when paid'
-                    }
-                    muted
-                  />
-                </>
-              )}
-              <Row
-                label="Your fee"
-                value={`− ${formatMoney(d.fee_amount, d.currency)}`}
-                muted
-              />
-              <div className="border-t border-line pt-2">
-                <Row label="Seller receives" value={formatMoney(net, d.currency)} strong />
-              </div>
-              {d.deposit_amount !== null && (
-                <Row
-                  label="Security deposit"
-                  value={formatMoney(d.deposit_amount, d.currency)}
-                  muted
-                />
-              )}
-            </dl>
+            <Breakdown deal={d} amounts={amounts.data} loading={amounts.isPending} />
 
             <dl className="mt-4 space-y-2 border-t border-line pt-3 text-sm">
               <Row
@@ -266,15 +286,24 @@ function Row({
   value,
   muted,
   strong,
+  hint,
 }: {
   label: string
   value: React.ReactNode
   muted?: boolean
   strong?: boolean
+  hint?: string
 }) {
   return (
     <div className="flex items-baseline justify-between gap-3">
-      <dt className="text-fg-muted">{label}</dt>
+      <dt className="text-fg-muted">
+        {label}
+        {hint && (
+          <span className="mt-0.5 block max-w-44 text-xs leading-relaxed text-fg-subtle">
+            {hint}
+          </span>
+        )}
+      </dt>
       <dd
         className={cx(
           'tabular text-right',
@@ -287,83 +316,479 @@ function Row({
   )
 }
 
+const REFUND_STATUS_META: Record<RefundStatus, StatusMeta> = {
+  pending: {
+    label: 'Pending',
+    tone: 'pending',
+    hint: 'Issued and not yet settled by the rail.',
+  },
+  succeeded: {
+    label: 'Settled',
+    tone: 'released',
+    hint: 'The money is back with the buyer.',
+  },
+  failed: {
+    label: 'Failed',
+    tone: 'danger',
+    hint: 'The rail could not return it. It no longer counts against what is refundable.',
+  },
+}
+
 // ---------------------------------------------------------------------------
+
+/**
+ * §7's breakdown — nine figures, all in the presentment currency, all derived
+ * from the ledger.
+ *
+ * The distinction the card is built around is **agreed against happened**. Until
+ * money arrives every figure here is zero, and showing zeroes would read as a
+ * deal worth nothing; so an unfunded deal shows what was agreed, labelled as
+ * such, and a funded one shows what the ledger says. They are never mixed —
+ * `Deal.fee_amount` is settlement currency and `DealAmounts.platform_fee` is
+ * presentment, and adding the two sets together is the mistake this note exists
+ * to prevent.
+ */
+function Breakdown({
+  deal,
+  amounts,
+  loading,
+}: {
+  deal: Deal
+  amounts: DealAmounts | undefined
+  loading: boolean
+}) {
+  const converted = deal.presentment_currency !== deal.currency
+  const rate = deal.fx_rate
+    ? formatRate(deal.currency, deal.presentment_currency, deal.fx_rate)
+    : 'locks when paid'
+
+  if (loading) {
+    return (
+      <>
+        <h2 className="text-sm font-semibold text-fg">Money</h2>
+        <Skeleton className="mt-3 h-32" />
+      </>
+    )
+  }
+
+  // `buyer_paid` is the one figure that cannot be zero once anything happened,
+  // so it is what tells the two halves apart.
+  const funded = Boolean(amounts && amounts.buyer_paid !== 0)
+
+  if (!funded) {
+    return (
+      <>
+        <h2 className="text-sm font-semibold text-fg">Money</h2>
+        <p className="mt-1 text-xs text-fg-muted">
+          What was agreed. Nothing has moved yet.
+        </p>
+        <dl className="mt-3 space-y-2 text-sm">
+          <Row label="Deal amount" value={formatMoney(deal.amount, deal.currency)} />
+          {converted && (
+            <>
+              <Row
+                label="Buyer charged"
+                value={formatMoney(deal.presentment_amount, deal.presentment_currency)}
+                muted
+              />
+              <Row label="Rate" value={rate} muted />
+            </>
+          )}
+          <Row
+            label="Your fee"
+            value={`− ${formatMoney(deal.fee_amount, deal.currency)}`}
+            muted
+          />
+          <div className="border-t border-line pt-2">
+            <Row
+              label="Seller receives"
+              value={formatMoney(deal.amount - deal.fee_amount, deal.currency)}
+              strong
+            />
+          </div>
+          {deal.deposit_amount !== null && (
+            <Row
+              label="Security deposit"
+              value={formatMoney(deal.deposit_amount, deal.currency)}
+              muted
+            />
+          )}
+        </dl>
+      </>
+    )
+  }
+
+  const a = amounts!
+  const money = (value: Money) => formatMoney(value, a.currency)
+
+  // Zero rows are dropped rather than shown as nothing: tax, reserve and
+  // receivable apply to a minority of deals, and six permanent zeroes would
+  // bury the four figures that are always true.
+  const deductions: [string, Money, string][] = [
+    ['PayHold fee', a.platform_fee, 'Our commission. Reclassified, not sent anywhere.'],
+    ['Rail fee', a.provider_fee, 'What the provider charged. This one really left.'],
+    ['Tax', a.tax, 'Collected and held to pass on.'],
+    ['Refunded', a.refunded, 'Returned to the buyer.'],
+    ['Held back', a.reserve, 'A new seller’s reserve. Unpayable until it is released.'],
+  ]
+
+  return (
+    <>
+      <h2 className="text-sm font-semibold text-fg">Money</h2>
+      <p className="mt-1 text-xs text-fg-muted">
+        Derived from the ledger, never stored.
+      </p>
+      <dl className="mt-3 space-y-2 text-sm">
+        <Row label="Buyer paid" value={money(a.buyer_paid)} />
+        {converted && <Row label="Rate" value={rate} muted />}
+
+        {deductions
+          .filter(([, value]) => value !== 0)
+          .map(([label, value, hint]) => (
+            <Row key={label} label={label} value={`− ${money(value)}`} muted hint={hint} />
+          ))}
+
+        <div className="border-t border-line pt-2">
+          <Row label="Seller receives" value={money(a.seller_net)} strong />
+        </div>
+
+        {a.paid_out !== 0 && <Row label="Already paid out" value={money(a.paid_out)} muted />}
+        {a.receivable !== 0 && (
+          <Row
+            label="Owed back by seller"
+            value={money(a.receivable)}
+            muted
+            hint="A refund landed after they were paid. No provider is holding this — somebody has to collect it."
+          />
+        )}
+        {deal.deposit_amount !== null && (
+          <Row
+            label="Security deposit"
+            value={formatMoney(deal.deposit_amount, deal.currency)}
+            muted
+          />
+        )}
+      </dl>
+    </>
+  )
+}
+
+// ---------------------------------------------------------------------------
+
+/**
+ * §10.1's payment link, where the person who has to re-send it works.
+ *
+ * The card only exists while a link could do something. A session is a scoped,
+ * expiring credential for one payment, so issuing one is idempotent — the button
+ * hands back the live link rather than minting a second, because two live links
+ * against one hold is two charges for one booking.
+ *
+ * The token is shown because the token *is* the link. It is the one credential
+ * in the product that has to stay re-derivable: re-sending a payment link is
+ * ordinary support, and a link nobody can read again is a deal nobody can
+ * rescue.
+ */
+function PaymentLink({ deal, now }: { deal: Deal; now: Date }) {
+  const sessions = useCheckoutSessions(deal.id)
+  const open = useMoneyAction(() => api.openCheckoutSession(deal.id))
+  const [withdrawing, setWithdrawing] = useState<string | null>(null)
+  const cancel = useMoneyAction(() =>
+    api.cancelCheckoutSession(withdrawing ?? ''),
+  )
+
+  const live = sessions.data?.find((s) => sessionState(s, now) === 'open')
+  const past = (sessions.data ?? []).filter((s) => s !== live)
+
+  // Once the buyer has paid there is nothing a link can do, and offering one
+  // would invite a second charge against a hold that is already funded.
+  const issuable = ['created', 'checkout_started', 'payment_failed'].includes(deal.status)
+
+  if (!issuable && past.length === 0) return null
+
+  const error = open.error ?? cancel.error
+
+  return (
+    <Card className="p-6">
+      <h2 className="text-sm font-semibold text-fg">Payment link</h2>
+
+      {live ? (
+        <>
+          <p className="mt-1 text-xs text-fg-muted">
+            Live until {formatDateTime(live.expires_at)} (
+            {formatRelative(live.expires_at, now)}). Send the buyer here.
+          </p>
+          <div className="mt-3 rounded-lg bg-surface-2 px-3 py-2 break-all">
+            <Mono>{`${location.origin}/pay/${live.token}`}</Mono>
+          </div>
+          <div className="mt-3 flex gap-2">
+            <Button
+              size="sm"
+              onClick={() =>
+                void navigator.clipboard?.writeText(
+                  `${location.origin}/pay/${live.token}`,
+                )
+              }
+            >
+              Copy
+            </Button>
+            <Button
+              size="sm"
+              variant="ghost"
+              disabled={cancel.isPending}
+              onClick={() => {
+                setWithdrawing(live.id)
+                cancel.mutate()
+              }}
+            >
+              Withdraw
+            </Button>
+          </div>
+        </>
+      ) : issuable ? (
+        <>
+          <p className="mt-1 text-xs leading-relaxed text-fg-muted">
+            No live link. Issuing one lets the buyer choose how to pay without an
+            account — and cannot fund the deal by itself.
+          </p>
+          <Button
+            className="mt-3"
+            size="sm"
+            variant="primary"
+            disabled={open.isPending}
+            onClick={() => open.mutate()}
+          >
+            {open.isPending ? 'Issuing…' : 'Issue a payment link'}
+          </Button>
+        </>
+      ) : null}
+
+      {past.length > 0 && (
+        <ul className="mt-4 space-y-1.5 border-t border-line pt-3 text-xs text-fg-muted">
+          {past.map((s) => (
+            <li key={s.id} className="flex justify-between gap-3">
+              <span>{SESSION_STATE_LABEL[sessionState(s, now)]}</span>
+              <span>{formatDateTime(s.completed_at ?? s.created_at)}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {error && <div className="mt-3"><ErrorNote message={error.message} /></div>}
+    </Card>
+  )
+}
+
+/**
+ * Expiry is derived here as it is in the engine — a stored value would need a
+ * writer, and the writer would be a sweep that had not run yet.
+ */
+function sessionState(session: CheckoutSession, now: Date) {
+  if (session.status === 'open' && new Date(session.expires_at) <= now) return 'expired'
+  return session.status
+}
+
+const SESSION_STATE_LABEL: Record<string, string> = {
+  open: 'Live',
+  completed: 'Used — buyer went to pay',
+  canceled: 'Withdrawn',
+  expired: 'Expired unused',
+}
+
+// ---------------------------------------------------------------------------
+
+/**
+ * How far through the machine a status is.
+ *
+ * Only the states that are a *sequence* get a rank. `disputed`, `refunded`,
+ * `expired` and `canceled` are branches off it, so they take the rank of the
+ * point they branched from and the branch is rendered separately — a dispute is
+ * not "further along" than a hold, and a stage bar that said so would be
+ * telling an operator the money had progressed.
+ */
+const REACHED: Record<DealStatus, number> = {
+  created: 0,
+  checkout_started: 1,
+  payment_pending: 1,
+  payment_failed: 1,
+  expired: 0,
+  canceled: 0,
+  funded_held: 2,
+  in_progress: 2,
+  revision_requested: 2,
+  confirmed_buyer: 2,
+  confirmed_seller: 2,
+  clearing: 3,
+  released: 4,
+  payout_pending: 5,
+  paid_out: 6,
+  refunded: 2,
+  partially_refunded: 2,
+  disputed: 2,
+}
+
+/** The state a step is in, which is three things and not two. */
+type StepTone = 'done' | 'current' | 'pending' | 'stopped'
+
+interface Step {
+  label: string
+  tone: StepTone
+  detail: string
+}
 
 /**
  * The lifecycle, shown as a fixed set of steps rather than a scroll of events.
  * The whole product rests on people understanding *why* their money has not
  * moved yet, so the two confirmations get their own row.
+ *
+ * §6 has eighteen states and this has eight steps, which is deliberate: most of
+ * the new ones are *positions within* a step rather than steps of their own.
+ * `checkout_started`, `payment_pending` and `payment_failed` are three things
+ * that can be true while the buyer is paying; `in_progress` and
+ * `revision_requested` are two things that can be true while the money is held.
+ * Giving each a row of its own would produce a list where six rows are
+ * permanently grey on every deal that went smoothly.
+ *
+ * The exception is **clearing against released**, which do get separate rows.
+ * They are the same money in the same place and they differ in exactly one way
+ * that matters to whoever is looking: whether the payout may go. A deal sitting
+ * in `released` is one where something is stopping it, and collapsing the two
+ * would hide precisely the state somebody needs to see.
  */
 function Timeline({ deal, now }: { deal: Deal; now: Date }) {
   const buyer = deal.confirmations.find((c) => c.side === 'buyer')
   const seller = deal.confirmations.find((c) => c.side === 'seller')
-  const funded = deal.status !== 'created'
+  const at = REACHED[deal.status]
 
-  const steps = [
+  /** A step in the sequence: done past its rank, current on it, pending after. */
+  const stage = (rank: number): StepTone =>
+    at > rank ? 'done' : at === rank ? 'current' : 'pending'
+
+  const confirmDetail = (side: typeof buyer) =>
+    side
+      ? `${formatDateTime(side.confirmed_at)}${side.actor === 'auto' ? ' (timer)' : ''}`
+      : deal.auto_release_at
+        ? `Auto-confirms ${formatRelative(deal.auto_release_at, now)}`
+        : 'Waiting'
+
+  const steps: Step[] = [
     {
       label: 'Deal created',
-      done: true,
+      tone: 'done',
       detail: formatDateTime(deal.created_at),
     },
     {
-      label: 'Buyer paid — funds held',
-      done: funded,
-      detail: funded ? 'Money is in the vault' : 'Waiting for payment',
+      label:
+        deal.status === 'payment_failed' ? 'Payment failed' : 'Buyer at the checkout',
+      tone: deal.status === 'payment_failed' ? 'stopped' : stage(1),
+      detail:
+        deal.status === 'payment_failed'
+          ? 'The charge did not go through. A new link lets them try again.'
+          : deal.status === 'payment_pending'
+            ? 'They chose a method and were handed to the provider.'
+            : at > 1
+              ? 'Done'
+              : 'No payment started',
+    },
+    {
+      label: 'Funds held',
+      tone: stage(2),
+      detail:
+        at < 2
+          ? 'Nothing has arrived'
+          : deal.status === 'revision_requested'
+            ? 'The buyer asked for something to be put right. Still held.'
+            : deal.status === 'in_progress'
+              ? 'The work is under way. Still held.'
+              : 'Neither side can touch it',
     },
     {
       label: 'Buyer confirmed',
-      done: Boolean(buyer),
-      detail: buyer
-        ? `${formatDateTime(buyer.confirmed_at)}${buyer.actor === 'auto' ? ' (timer)' : ''}`
-        : deal.auto_release_at
-          ? `Auto-confirms ${formatRelative(deal.auto_release_at, now)}`
-          : '—',
+      tone: buyer ? 'done' : at < 2 ? 'pending' : 'current',
+      detail: confirmDetail(buyer),
     },
     {
       label: 'Seller confirmed',
-      done: Boolean(seller),
+      tone: seller ? 'done' : at < 2 ? 'pending' : 'current',
       detail: seller
         ? `${formatDateTime(seller.confirmed_at)}${seller.actor === 'auto' ? ' (timer)' : ''}`
-        : '—',
+        : 'Waiting',
     },
     {
-      label: 'Funds released',
-      done: Boolean(deal.released_at),
-      detail: deal.released_at ? formatDateTime(deal.released_at) : 'Needs both sides',
+      label: 'Clearing',
+      tone: stage(3),
+      detail: deal.released_at
+        ? `Released ${formatDateTime(deal.released_at)}${
+            deal.payout_due_at && at === 3
+              ? ` · clears ${formatRelative(deal.payout_due_at, now)}`
+              : ''
+          }`
+        : 'Needs both sides',
+    },
+    {
+      label: 'Ready to pay out',
+      tone: stage(4),
+      detail:
+        at === 4
+          ? 'The window has passed and the payout has not gone. Check the Payouts screen.'
+          : at > 4
+            ? 'Cleared'
+            : 'Inside the clearance window',
     },
     {
       label: 'Paid out to seller',
-      done: deal.status === 'paid_out',
+      tone: stage(6),
       detail:
         deal.status === 'paid_out'
           ? 'Complete'
-          : deal.payout_due_at
-            ? `Clears ${formatRelative(deal.payout_due_at, now)}`
-            : '—',
+          : deal.status === 'payout_pending'
+            ? 'The transfer is with the provider'
+            : deal.payout_due_at
+              ? `Due ${formatRelative(deal.payout_due_at, now)}`
+              : '—',
     },
   ]
 
+  // The branches. Each one replaces the tail rather than sitting after it: a
+  // refunded deal did not go on to clear, and a row saying it is still waiting
+  // to would be a claim about money that went back.
   if (deal.status === 'refunded') {
-    steps.splice(2, 4, {
+    steps.splice(3, steps.length, {
       label: 'Refunded to buyer',
-      done: true,
-      detail: 'The hold was reversed',
+      tone: 'done',
+      detail: 'The hold was reversed in full',
+    })
+  } else if (deal.status === 'expired' || deal.status === 'canceled') {
+    steps.splice(1, steps.length, {
+      label: deal.status === 'expired' ? 'Expired unpaid' : 'Cancelled',
+      tone: 'stopped',
+      detail: 'Nothing was charged and nothing is owed',
+    })
+  } else if (deal.status === 'disputed') {
+    // A dispute is appended rather than substituted: everything above it really
+    // happened, and it is what stopped the rest.
+    steps.splice(REACHED.clearing, steps.length, {
+      label: 'Disputed',
+      tone: 'stopped',
+      detail: 'Release and payout are both blocked until this resolves',
     })
   }
 
   return (
     <Card>
-      <CardHeader title="Lifecycle" />
+      <CardHeader
+        title="Lifecycle"
+        subtitle="Where this deal is, and what it is waiting on."
+      />
       <ol className="px-6 py-5">
         {steps.map((step, i) => (
           <li key={step.label} className="flex gap-3">
             <div className="flex flex-col items-center">
-              <Dot tone={step.done ? 'released' : 'neutral'} />
+              <Dot tone={STEP_TONE[step.tone]} />
               {i < steps.length - 1 && (
                 <span
                   className={cx(
                     'w-px flex-1',
-                    step.done ? 'bg-released/40' : 'bg-line',
+                    step.tone === 'done' ? 'bg-released/40' : 'bg-line',
                   )}
                 />
               )}
@@ -372,7 +797,7 @@ function Timeline({ deal, now }: { deal: Deal; now: Date }) {
               <p
                 className={cx(
                   'text-sm leading-none font-medium',
-                  step.done ? 'text-fg' : 'text-fg-subtle',
+                  step.tone === 'pending' ? 'text-fg-subtle' : 'text-fg',
                 )}
               >
                 {step.label}
@@ -386,18 +811,44 @@ function Timeline({ deal, now }: { deal: Deal; now: Date }) {
   )
 }
 
+const STEP_TONE: Record<StepTone, Tone> = {
+  done: 'released',
+  current: 'held',
+  pending: 'neutral',
+  stopped: 'danger',
+}
+
 // ---------------------------------------------------------------------------
 
 function Actions({ deal }: { deal: Deal }) {
   const [refundReason, setRefundReason] = useState('')
+  const [refundAmount, setRefundAmount] = useState('')
   const [disputeReason, setDisputeReason] = useState('')
   const [captureAmount, setCaptureAmount] = useState('')
   const [panel, setPanel] = useState<'refund' | 'dispute' | 'deposit' | null>(null)
+  const refunds = useRefunds(deal.id)
+
+  // What is still refundable, derived rather than stored — the same sum the
+  // engine guards with, so the form cannot offer more than the call will take.
+  // A failed refund never left, so it does not count; a pending one is expected
+  // to, so it does.
+  const alreadyRefunded = (refunds.data ?? [])
+    .filter((r) => r.status !== 'failed')
+    .reduce((n, r) => n + r.amount, 0)
+  const refundable = deal.presentment_amount - alreadyRefunded
 
   const confirmMutation = useMoneyMutation((side: ConfirmSide) =>
     api.confirmDeal(deal.id, side),
   )
-  const refund = useMoneyAction(() => api.refundDeal(deal.id, refundReason))
+  // §7.1: an empty amount means everything still refundable, which is what
+  // every caller meant before partials existed.
+  const refund = useMoneyAction(() =>
+    api.refundDeal(
+      deal.id,
+      refundReason,
+      refundAmount ? Math.round(Number(refundAmount) * 100) : undefined,
+    ),
+  )
   const dispute = useMoneyAction(() =>
     api.openDispute(deal.id, 'buyer', disputeReason),
   )
@@ -407,10 +858,14 @@ function Actions({ deal }: { deal: Deal }) {
   const releaseDeposit = useMoneyAction(() => api.releaseDeposit(deal.id))
 
   const canConfirm = HOLDING_STATUSES.includes(deal.status) && deal.status !== 'disputed'
-  const canRefund = canConfirm || deal.status === 'disputed'
+  // §7.1 reaches past the hold: after release the ledger puts the money back
+  // and takes it out again, and after payout it books what the seller owes. So
+  // the four cases differ in what the ledger does, not in whether the button
+  // exists — the engine decides which one applies.
+  const canRefund =
+    HOLDING_STATUSES.includes(deal.status) || PAST_HOLD_STATUSES.includes(deal.status)
   // §6 adds `clearing -> disputed`: a chargeback arrives when it arrives, and
-  // the safety window is most of what it is for. Refund stays closed there
-  // until Phase 3 — `refund_deal` still refuses anything past the hold.
+  // the safety window is most of what it is for.
   const canDispute = canConfirm || deal.status === 'clearing'
   const hasDeposit = deal.deposit_amount !== null && deal.deposit_amount > 0
 
@@ -490,13 +945,43 @@ function Actions({ deal }: { deal: Deal }) {
                 placeholder="Host cancelled"
               />
             </Field>
+            <Field
+              label="Amount"
+              hint={`Leave empty to refund all ${formatMoney(
+                refundable,
+                deal.presentment_currency,
+              )} still refundable.`}
+            >
+              <Input
+                type="number"
+                min="0"
+                step="0.01"
+                max={refundable / 100}
+                value={refundAmount}
+                onChange={(e) => setRefundAmount(e.target.value)}
+                placeholder="everything"
+              />
+            </Field>
+            {alreadyRefunded > 0 && (
+              <p className="text-xs leading-relaxed text-fg-muted">
+                {formatMoney(alreadyRefunded, deal.presentment_currency)} has already
+                gone back. A partial refund does not change the deal's status — the
+                rest still has to be delivered and paid out.
+              </p>
+            )}
             <Button
               size="sm"
               variant="danger"
-              disabled={!refundReason || refund.isPending}
+              disabled={!refundReason || refund.isPending || refundable <= 0}
               onClick={() => refund.mutate()}
             >
-              Refund {formatMoney(deal.amount, deal.currency)}
+              Refund{' '}
+              {refundAmount
+                ? formatMoney(
+                    Math.round(Number(refundAmount) * 100),
+                    deal.presentment_currency,
+                  )
+                : formatMoney(refundable, deal.presentment_currency)}
             </Button>
           </ActionPanel>
         )}

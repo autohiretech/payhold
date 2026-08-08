@@ -21,10 +21,15 @@ import {
   type Caller,
 } from '../_shared/auth.ts'
 import { encryptCredentials } from '../_shared/crypto.ts'
+import { assertLiveAllowed } from '../_shared/launch.ts'
 import {
   validateFlutterwaveCredentials,
   type FlutterwaveCredentials,
 } from '../_shared/flutterwave.ts'
+import {
+  validateStripeCredentials,
+  type StripeCredentials,
+} from '../_shared/stripe.ts'
 import { handler, json, readJson, required } from '../_shared/http.ts'
 import {
   HOLDING_STATUSES,
@@ -54,7 +59,7 @@ const REQUIRED_FIELDS: Record<string, { fields: string[]; where: string }> = {
       'secret hash on Settings → Webhooks)',
   },
   stripe: {
-    fields: ['secret_key', 'webhook_secret'],
+    fields: ['secret_key', 'publishable_key', 'webhook_secret'],
     where: 'Stripe dashboard → Developers → API keys, and Developers → Webhooks ' +
       'for the signing secret',
   },
@@ -109,6 +114,18 @@ async function connect(
     throw new PayHoldError('policy_violation', 'mode must be "test" or "live"')
   }
 
+  // §16: the production release begins in test mode, and §15 phase 8 keeps live
+  // keys disabled until the checklist is signed off. This is the only door live
+  // credentials can come through — a rail with no stored account falls back to
+  // `FakeProvider`, and there is no other writer of
+  // `tenant_provider_accounts` — so one check here is the whole gate.
+  //
+  // Deliberately before the credential validation below: refusing after we have
+  // sent a live secret key to the provider would have already used it.
+  if (body.mode === 'live') {
+    await assertLiveAllowed(db)
+  }
+
   const missing = spec.fields.filter((f) => !body.credentials?.[f]?.trim())
   if (missing.length > 0) {
     throw new PayHoldError(
@@ -127,31 +144,35 @@ async function connect(
   // A live secret key connected as "test" would move real money on the
   // sandbox walkthrough. Flutterwave marks test keys explicitly, so this is
   // checkable rather than a matter of trust.
-  if (body.provider === 'flutterwave') {
-    const isTestKey = credentials.secret_key.includes('_TEST-')
-    if (isTestKey !== (body.mode === 'test')) {
-      throw new PayHoldError(
-        'policy_violation',
-        isTestKey
-          ? 'That is a test secret key, but you selected live mode.'
-          : 'That is a live secret key, but you selected test mode. ' +
-            'Live keys move real money.',
-      )
-    }
+  const isTestKey = body.provider === 'flutterwave'
+    ? credentials.secret_key.includes('_TEST-')
+    // Stripe marks the mode in the key prefix, `sk_test_` against `sk_live_`,
+    // which makes this checkable on both rails rather than a matter of trust.
+    : credentials.secret_key.startsWith('sk_test_')
+
+  if (isTestKey !== (body.mode === 'test')) {
+    throw new PayHoldError(
+      'policy_violation',
+      isTestKey
+        ? 'That is a test secret key, but you selected live mode.'
+        : 'That is a live secret key, but you selected test mode. ' +
+          'Live keys move real money.',
+    )
   }
 
   // Prove the keys work BEFORE storing them. Storing unvalidated credentials
   // moves the failure to the first real charge, in front of a buyer.
-  if (body.provider === 'flutterwave') {
-    const check = await validateFlutterwaveCredentials(
+  const check = body.provider === 'flutterwave'
+    ? await validateFlutterwaveCredentials(
       credentials as unknown as FlutterwaveCredentials,
     )
-    if (!check.ok) {
-      throw new PayHoldError(
-        'policy_violation',
-        `Those credentials were refused by Flutterwave: ${check.reason}`,
-      )
-    }
+    : await validateStripeCredentials(credentials as unknown as StripeCredentials)
+
+  if (!check.ok) {
+    throw new PayHoldError(
+      'policy_violation',
+      `Those credentials were refused by ${body.provider}: ${check.reason}`,
+    )
   }
 
   const { error } = await db

@@ -3,7 +3,13 @@
 Bringing the built system up to the Manus AI handoff specification
 ("PayHold Marketplace Payments Platform", 17 sections).
 
-**Status:** phases 0–5 done (2026-08-07). Phases execute one at a time, on request.
+**Status:** phases 0–9 and 11 done; 10 partly done (2026-08-08). Phases execute one at a time, on request.
+
+Phase 11 landing before 8, 9 and 10 finished is not an ordering mistake: the
+gate it builds ships **shut**, and the work those phases still owed is on it as
+blockers nobody can sign off. Clearing one is a row, changed by the phase that
+does the work — Phase 8 cleared `dispute_window` that way, in its own migration.
+Only `operator_screens` (Phase 10) and `email_confirmation` remain.
 
 ## Decisions taken before planning
 
@@ -372,10 +378,72 @@ not become a way around it.
 
 ---
 
-## Phase 8 — Resolution Center
+## Phase 8 — Resolution Center ✅ done 2026-08-08
 
-Document §8. `disputes` currently carries a reason and nothing else — the
-backend `CLAUDE.md` already flags this as the next thing that improves a draft.
+Delivered: `20260807000016_resolution_types.sql` and `20260807000017`, the
+`disputes` Edge Function, `src/api/mock/resolution.ts`, and
+`dispute-assistant@2`. Four things worth recording, and the third is a
+**deliberate narrowing of a bullet below**.
+
+- **Silence lapses a request; it never accepts one.** §8 allows an unanswered
+  request to be "auto-resolved by platform rule", and the rule here is that at
+  48 hours the offer expires and the dispute stays open. The other reading —
+  silence accepts — would make a clock the thing that refunds a buyer or pays a
+  seller, which is a machine deciding, and invariants 9 and 11 both forbid it.
+  §15 phase 4 is satisfied by the *window* closing without a human, which it
+  does; a test asserts that nothing moved when it did. `expired` is a separate
+  status from `declined` for the §24.3 reason: declining is an act, and the
+  difference cannot be backfilled.
+
+- **Conflict of interest is enforced on who acted, not on who someone is.** The
+  obvious implementation — join the deciding administrator to the buyer or the
+  seller — cannot be written, and that is structural rather than an oversight:
+  PayHold stores no buyer PII (`buyer_ref` is the client's own opaque string)
+  and a seller has no login. There is no identity to join to. What the
+  Resolution Center does record is who did what, so the rule is that whoever
+  raised the dispute, made a request or answered one cannot be named as its
+  decider. `both-parties` is the one reserved name that may have acted — it is
+  what an agreement between the two sides is recorded as, and refusing it would
+  make agreement unexecutable.
+
+- **`disputed_amount` bounds the resolution; it does not split the payout.**
+  The bullet below asks for release and payout to freeze for the disputed amount
+  only. The ledger can separate it — Phase 3 saw to that — but
+  `payouts_deal_key` allows exactly one payout row per deal, so paying the
+  undisputed two thirds now consumes it, and a dispute later resolved in the
+  seller's favour would have nothing left to send the last third with. So the
+  amount is enforced where it can be enforced honestly: `resolve_dispute`
+  refuses to take more from the seller than was ever in dispute, and a complaint
+  about a third cannot quietly become a full refund. The payout freeze stays
+  whole while a dispute is open. **Splitting a payout is a real change** — a
+  second payout row, its own idempotency key, its own line in reconciliation —
+  and it belongs in a phase that can carry it. Anyone signing §16's
+  `dispute_window` should read this paragraph first.
+
+- **The expiry pass runs from `auto-release`, not a cron of its own.** Both are
+  the same shape — a clock ran out — and this one moves no money and touches no
+  deal, so it is safe beside the release timer and wrong to give any more power
+  than that. Its failure is logged and swallowed: a deal whose window came due
+  should not wait on an unanswered offer somewhere else.
+
+Two notes on landing it beside the other phases:
+
+- The migrations were **renumbered from 13/14 to 16/17** after Phase 9's
+  `reconciliation_runs` and `payout_retry` took the same version numbers. Two
+  files sharing a version prefix is not merely untidy — `supabase_migrations`
+  keys on it, so one of the pair would have been recorded and the other silently
+  skipped against the live project.
+- That renumbering put the Resolution Center *after* Phase 11's gate, which
+  computes `blocked_by` from `to_regclass` at migration time and had therefore
+  already recorded `dispute_window` as blocked. `20260807000017` clears it,
+  which is exactly the contract `20260807000015` states: the phase that builds
+  the thing clears its own blocker. It clears the blocker and does **not** sign
+  the item off — whether the behaviour is right is a person's judgement.
+
+Tests: 414 SQL (was 380), 34 new in `resolution-center.test.ts`; 395 dashboard
+(was 363), 32 new in `resolution.test.ts`. 115 Deno, unchanged.
+
+<details><summary>Original plan for this phase</summary>
 
 - `dispute_offers`: kind (`update | extension | cancellation | partial_refund |
   full_refund`), amount, `expires_at` at 48 hours, status. Auto-resolution on
@@ -394,9 +462,67 @@ backend `CLAUDE.md` already flags this as the next thing that improves a draft.
 **Acceptance:** §15 phase 4 — funds cannot be released while a dispute or payout
 block is active; the 48-hour window resolves without a human.
 
+</details>
+
 ---
 
-## Phase 9 — Reconciliation runs and failure handling
+## Phase 9 — Reconciliation runs and failure handling ✅ done 2026-08-08
+
+Delivered, with four things worth recording — two of them decisions about what a
+column is allowed to claim, and one a defect the phase introduced and caught.
+
+- **`missing` counts the inbox, not a transaction-export diff**, spec §29.14.
+  §13 asks for provider *exports* compared against the ledger, and no adapter
+  has a transaction-listing call — `PaymentProvider` exposes `balances()` and
+  nothing that enumerates. Building one would mean `FakeProvider` answering from
+  fixtures while every real rail reported zero discrepancies, which is a control
+  that looks authoritative and checks nothing. So `missing` is verified inbound
+  events with no `processed_at`: the arrears half of §13's own inbox design, and
+  a smaller claim that is true. `skipped` exists for the same reason — a rail we
+  could not reach is not a clean rail, so a run with any of them reports
+  `incomplete` rather than `clean`.
+- **A spent retry budget is `blocked` with no clock**, spec §29.15. There is no
+  `payout_blocked` status and adding one would have been a second spelling of
+  `blocked`; the problem is that `blocked` is *dispatchable*, because §5.1's
+  no-route case must be re-asked every pass. `payouts.next_attempt_at` carries
+  the backoff and **null means no machine may attempt this again** — the cron
+  filters `<= now()`, the approve and retry endpoints go through the same shared
+  `dispatchPayout`, and a person is not a machine.
+- **Automatic retry made two dormant bugs reachable**, and both are fixed here.
+  `mark_payout_processing` refused `failed`, so a second attempt on an async rail
+  would have raised rather than polled — nothing had reached it because the only
+  retry was a person on a synchronous rail. And `refund_deal` cancels a scheduled
+  payout by writing `status = 'failed'` directly, which was inert while `failed`
+  was undispatchable and is a transfer nobody is owed once it is not;
+  `payouts_stop_retrying` clears the clock on any payout written while its deal
+  is refunded, canceled or expired, by trigger, for the reason
+  `deals_assert_transition` is a trigger.
+- **`found` reflects the last statement, not the last `select into`.** The run
+  counter `update` went in between `record_reconciliation`'s alert lookup and its
+  `if found`, which silently turned "no open alert" into "there is one" — so a
+  first mismatch updated a null row and never inserted the case. Every existing
+  reconciliation test still passed, because they all call the function without a
+  run id. It tests `a.id is not null` now.
+
+Two smaller notes. `record_reconciliation` gained a parameter and so was dropped
+and recreated by argument list, with its revokes reissued — the trap `fund_deal`
+and `seller_capabilities` already carry, pinned by a `pg_proc` count. And
+`resolve_reconciliation_run` is now the one place a payout freeze is lifted:
+named, audited, refused while any case on the tenant is still open, and behind a
+separate argument, because writing down what happened and declaring the money
+accounted for are two different claims. Nothing about it runs on a timer, so
+"nothing unfreezes automatically" is intact.
+
+§15 phase 6's acceptance is covered in `tests/funding.test.ts`: a success after a
+failure books one hold, a stale failure cannot unwind one (the transition guard
+refuses the edge), a redelivery after release re-holds nothing, a second
+*different* payment for a released deal is refused, and a webhook that never
+arrives leaves an empty ledger and a deal still at `payment_pending`.
+
+Tests: +43 SQL (22 reconciliation runs, 16 payout retry, 5 inbox ordering),
+115 Deno unchanged, +23 dashboard (11 reconciliation runs, 12 payout retry).
+
+<details><summary>Original plan for this phase</summary>
 
 Document §13. We have the daily job and the freeze; we do not have the run
 record the document's data model asks for.
@@ -411,23 +537,127 @@ record the document's data model asks for.
 **Acceptance:** §15 phase 6 — duplicate, out-of-order and missing webhooks do
 not double-post money. Existing inbox tests extend to cover ordering.
 
+</details>
+
 ---
 
-## Phase 10 — Dashboard
+## Phase 10 — Dashboard ◐ partly done 2026-08-08
 
 The mock is the acceptance spec, so it keeps parity phase by phase rather than
 catching up here. This phase is the screens themselves:
 
-- `DealDetail` — the full lifecycle and the §7 price breakdown.
-- New **Routing Center** screen — destinations, eligibility, routing decisions
+- ✅ `DealDetail` — the full lifecycle and the §7 price breakdown.
+- ✅ New **Routing Center** screen — destinations, eligibility, routing decisions
   with their reason codes.
-- Seller KYC state on `SellerDetail` and `Sellers`.
-- **Resolution Center** replacing the current `Disputes` screen.
-- Checkout sessions and reconciliation runs on `Admin` / `Audit`.
+- ✅ Seller KYC state on `SellerDetail` and `Sellers`.
+- ⬜ **Resolution Center** replacing the current `Disputes` screen.
+- ◐ Checkout sessions and reconciliation runs on `Admin` / `Audit`.
+
+**The two that did not land are blocked on the same thing, and it is worth
+recording rather than retrying.** This phase assumes mock parity — its own first
+sentence says so — and Phases 8 and 9 landed **backend-only**. There is no
+`dispute_offers`, no structured `reason_code` and no `reconciliation_runs` in
+`src/api/mock/`, so a Resolution Center or a runs table here would either render
+nothing or invent semantics the migrations already fixed. Mirroring
+`20260807000013/14` into the mock is Phase 8's and Phase 9's dashboard half, not
+this one's, and it has to happen before these two screens can be honest.
+
+### What landed
+
+The seam grew five reads and one write, because screens can only render what the
+contract exposes and §7's breakdown, the refund records, the destinations and
+the session list were all engine-internal: `getDealAmounts`, `listRefunds`,
+`listCheckoutSessions`, `listSellerDestinations`, `getSellerCapabilities` and
+`verifySeller`. Four of them are reads `payhold-backend` does not serve yet —
+listed in its *Not built yet*, each a select over a table that already exists.
+
+Four departures worth recording:
+
+- **The hosted checkout moved to `/pay/:token`.** This was a correctness fix
+  wearing a refactor's clothes: the old page called `getDeal`, which is
+  tenant-scoped and needs an API key, and it only ever worked because the mock
+  runs in the same browser as the dashboard. Two capabilities went with it — the
+  method list now comes from the server's capability matrix rather than from
+  `collectionRails`, and the buyer can no longer switch market, because a session
+  is one payment at one amount and re-pricing in the browser would quote a figure
+  nothing agreed to.
+- **`SellerDetail` carries an action now**, against its own header comment, and
+  the comment was corrected rather than the code. Clearing a payout hold stays on
+  Payouts because a hold is a question about one payment; attesting to a seller's
+  identity is a fact about the seller, §12 requires a person to record it, and
+  there is nowhere else it could live.
+- **`routeReasonText` moved from `api/mock/routing.ts` to `lib/rails.ts`.** Both
+  sides of the seam need it — the engine writes it onto `failure_reason`, the
+  Routing Center turns a *stored* code back into the same sentence — and a screen
+  importing it from the mock would have worked until the mock went away.
+- **Payouts stopped hardcoding its approver.** `const ME = 'grace@autohire.rw'`
+  predated real auth; the approval and the new attestation both take the name
+  from the session, since a caller that can name its own approver can name
+  somebody who was not there.
+
+Tests: 317 dashboard (was 307), the ten new ones in `onboarding.test.ts`.
 
 ---
 
-## Phase 11 — Launch gate
+## Phase 11 — Launch gate ✅ done 2026-08-08
+
+Delivered, and it ships with the gate **shut** — which is the point rather than
+an incomplete state. Four things worth recording.
+
+- **The checklist is rows, and the gate is the only thing that reads them.**
+  §16 is fourteen named items plus one written payout confirmation per launch
+  market, and a checklist nobody is forced to consult is a document. This one is
+  wired to the thing it is about: `POST /provider-accounts` refuses
+  `mode: "live"` while any required item is outstanding, which is §16's "the
+  production release begins in test mode" and §15 phase 8's "live keys remain
+  disabled until approval", enforced rather than remembered. One check, because
+  there is exactly one writer of `tenant_provider_accounts` — and a test asserts
+  that stays true.
+- **Running this phase out of order is safe because unbuilt work is
+  unsignable.** Engineering items carry `blocked_by`, and a check constraint
+  refuses to sign a blocked one whatever the caller's authority. Signing off
+  every attestation today still leaves the gate shut on `operator_screens` and
+  `email_confirmation`, which is the honest answer.
+
+  **The three blockers that could be checked are checked, at seed time.** Phases
+  8 and 9 landed *while this migration was being written*, and a hand-written
+  "phase 8 is missing" would have shipped a lie the same afternoon; `to_regclass`
+  and `to_regprocedure` make the seed correct whether it runs before or after
+  the phase that clears it. Existence is a proxy for the work being done, which
+  is why a person still signs it with evidence — what existence rules out is
+  signing something that cannot possibly work.
+- **§17's audit found one real hole, and it was the one held up by habit
+  alone.** `settle_payout` takes a provider reference and every caller passed
+  one, but the parameter was nullable — so `update payouts set status = 'paid'`
+  run by hand was a mark-as-paid control with no provider on the other end of
+  it: the seller recorded as paid, `payouts_deal_key` refusing a second payout,
+  and reconciliation reporting drift for money that never left.
+  `paid_needs_a_provider_reference` is a constraint rather than a guard inside
+  the function, because §17 says *anywhere* and a guard binds only the callers
+  we know about. Two existing fixtures had to gain a reference; both were
+  describing payouts that could not have existed.
+
+  The other six non-goals were already refused by something structural — an
+  unbuilt adapter that cannot be enabled, the eligibility gate, `implemented`
+  on the capability row, a not-null `tenant_id` on every credential and every
+  ledger entry. `tests/launch-gate.test.ts` pins each one where it actually
+  binds, rather than restating the prohibition.
+- **`rails_verified` stopped being a constant.** It was `false` in TypeScript
+  with a comment promising somebody would change it one day; it is now derived
+  from the per-market confirmation items, asked per country on the payout
+  branch and across all four elsewhere. A market with no confirmation item is
+  unverified, which is the right answer for every country outside §16's four.
+
+`scripts/sandbox-walkthrough.md` is §28's gate written out in order — the money
+path, a forged webhook, the way in, the V2 paths, the scheduled jobs — with each
+part naming the checklist item it signs off. It is deliberately not automated:
+half of it is watching what happens on a provider's dashboard, and a script that
+could green-light itself is the thing §16 exists to prevent.
+
+Tests: 35 new SQL (`launch-gate.test.ts`), 24 new dashboard
+(`api/mock/launch.test.ts`).
+
+<details><summary>Original plan for this phase</summary>
 
 - The document's §16 checklist and §17 non-goals, audited: no cryptocurrency,
   no anonymous payouts, no personal-account Venmo or Cash App, **no manual
@@ -436,6 +666,8 @@ catching up here. This phase is the screens themselves:
   webhook returns 401, cross-tenant session returns nothing — plus the new
   paths: partial refund, routing failure, backup destination, dispute window.
 - Test mode first. Live keys stay disabled until §16 is signed off.
+
+</details>
 
 ---
 

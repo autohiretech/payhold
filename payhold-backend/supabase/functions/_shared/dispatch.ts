@@ -66,6 +66,12 @@ export type DispatchOutcome =
  * for a route to exist, the other for somebody to attest to a fact — so a pass
  * that re-asks and finds the reason gone is not overruling anyone. It is the
  * same shape as `frozen` clearing once reconciliation is resolved.
+ *
+ * `failed` joined the list in phase 9, and it is the one entry with a second
+ * gate: §13's capped backoff lives in `payouts.next_attempt_at`, which the cron
+ * filters on, so a refused transfer is re-sent on a ladder rather than on every
+ * pass. When that budget is spent `fail_payout` writes `blocked` and clears the
+ * clock, and only a person moves it after that.
  */
 export const DISPATCHABLE = [
   'scheduled',
@@ -73,7 +79,23 @@ export const DISPATCHABLE = [
   'processing',
   'blocked',
   'needs_verification',
+  'failed',
 ] as const
+
+/**
+ * Deal states a payout may still be sent against.
+ *
+ * `disputed` is absent and so is every terminal one: a refunded, canceled or
+ * expired deal owes nobody anything, and a payout row left `failed` on one —
+ * which is exactly how `refund_deal` cancels a scheduled payout — became
+ * reachable again the moment `failed` joined `DISPATCHABLE`.
+ *
+ * `settle_payout` would refuse to book it anyway, because a refunded deal has
+ * no available balance left to draw on. That is the guarantee; this is the
+ * check made early, so we never ask a provider to send money we are about to
+ * refuse to book.
+ */
+const PAYABLE_DEAL_STATUSES = ['clearing', 'released', 'payout_pending'] as const
 
 /** One row of `payout_decisions` — §5.1's auditable choice. */
 interface RouteDecision {
@@ -176,8 +198,12 @@ export async function dispatchPayout(
   // §8: a dispute freezes payout. `settle_payout` refuses a disputed deal under
   // the row lock, which is the guarantee; this is the same check made early so
   // the cron reports it as skipped rather than as an error, and so we do not
-  // ask a provider to send money we are about to refuse to book.
-  if (deal.status === 'disputed') return 'skipped'
+  // ask a provider to send money we are about to refuse to book. A deal that is
+  // over — refunded, canceled, expired — is the same argument; see
+  // `PAYABLE_DEAL_STATUSES`.
+  if (!(PAYABLE_DEAL_STATUSES as readonly string[]).includes(deal.status)) {
+    return 'skipped'
+  }
 
   // The destination the routing engine chose — §5.1's record of where this
   // money went, read from `seller_destinations` rather than from the seller's

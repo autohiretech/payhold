@@ -16,10 +16,20 @@ export const keys = {
   balance: ['balance'] as const,
   deals: (filter?: DealListFilter) => ['deals', filter ?? {}] as const,
   deal: (id: string) => ['deal', id] as const,
+  dealAmounts: (id: string) => ['deal-amounts', id] as const,
+  refunds: (dealId?: string) => ['refunds', dealId ?? 'all'] as const,
+  checkoutSessions: (dealId?: string) =>
+    ['checkout-sessions', dealId ?? 'all'] as const,
   ledger: (dealId?: string) => ['ledger', dealId ?? 'all'] as const,
   payouts: ['payouts'] as const,
+  payoutRoutes: ['payout-routes'] as const,
+  payoutRouting: (id: string) => ['payout-routing', id] as const,
   disputes: ['disputes'] as const,
   sellers: ['sellers'] as const,
+  sellerDestinations: (sellerId?: string) =>
+    ['seller-destinations', sellerId ?? 'all'] as const,
+  sellerCapabilities: (sellerId: string) =>
+    ['seller-capabilities', sellerId] as const,
   settings: ['settings'] as const,
   apiKeys: ['api-keys'] as const,
   railStatus: ['rail-status'] as const,
@@ -50,11 +60,42 @@ export const useDeals = (filter?: DealListFilter) =>
 export const useDeal = (id: string) =>
   useQuery({ queryKey: keys.deal(id), queryFn: () => api.getDeal(id) })
 
+/** §7's breakdown — what happened, as against what the deal's columns agreed. */
+export const useDealAmounts = (id: string) =>
+  useQuery({ queryKey: keys.dealAmounts(id), queryFn: () => api.getDealAmounts(id) })
+
+export const useRefunds = (dealId?: string) =>
+  useQuery({ queryKey: keys.refunds(dealId), queryFn: () => api.listRefunds(dealId) })
+
+export const useCheckoutSessions = (dealId?: string) =>
+  useQuery({
+    queryKey: keys.checkoutSessions(dealId),
+    queryFn: () => api.listCheckoutSessions(dealId),
+  })
+
 export const useSellers = () =>
   useQuery({ queryKey: keys.sellers, queryFn: () => api.listSellers() })
 
+export const useSellerDestinations = (sellerId?: string) =>
+  useQuery({
+    queryKey: keys.sellerDestinations(sellerId),
+    queryFn: () => api.listSellerDestinations(sellerId),
+  })
+
+/** §12's onboarding read: every reason at once, so nothing is fixed serially. */
+export const useSellerCapabilities = (sellerId: string) =>
+  useQuery({
+    queryKey: keys.sellerCapabilities(sellerId),
+    queryFn: () => api.getSellerCapabilities(sellerId),
+    enabled: Boolean(sellerId),
+  })
+
 export const usePayouts = () =>
   useQuery({ queryKey: keys.payouts, queryFn: () => api.listPayouts() })
+
+/** §5.1's routing table. Read-only: enablement is data an operator changes. */
+export const usePayoutRoutes = () =>
+  useQuery({ queryKey: keys.payoutRoutes, queryFn: () => api.listPayoutRoutes() })
 
 export const useDisputes = () =>
   useQuery({ queryKey: keys.disputes, queryFn: () => api.listDisputes() })

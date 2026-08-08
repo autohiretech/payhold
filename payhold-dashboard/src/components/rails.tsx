@@ -14,6 +14,11 @@ const PROVIDER_CLASS: Record<Provider, string> = {
   flutterwave: 'bg-pending-soft text-pending ring-pending/25',
   stripe: 'bg-held-soft text-held ring-held/20',
   fake: 'bg-surface-2 text-fg-muted ring-line-strong/60',
+  // The declared-and-unbuilt adapters share the muted treatment: nothing rides
+  // them, so nothing about them should read as a live rail.
+  paypal: 'bg-surface-2 text-fg-muted ring-line-strong/60',
+  cash_app_pay: 'bg-surface-2 text-fg-muted ring-line-strong/60',
+  china_wallet_partner: 'bg-surface-2 text-fg-muted ring-line-strong/60',
 }
 
 export function ProviderChip({

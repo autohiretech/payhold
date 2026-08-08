@@ -14,9 +14,10 @@ npm run test:sql             # schema invariants against PGlite — no Docker ne
 npm run test:functions       # Deno tests for crypto and the providers
 npm run typecheck            # deno check across the functions
 npx supabase db push         # apply migrations to the linked project
-npx supabase functions deploy account deals payment-options sellers balance \
-                              payouts risk-signals webhook-endpoints \
-                              flutterwave-webhook provider-accounts \
+npx supabase functions deploy account deals checkout payment-options sellers \
+                              balance \
+                              payouts risk-signals disputes launch webhook-endpoints \
+                              flutterwave-webhook stripe-webhook provider-accounts \
                               webhook-dispatch reconcile auto-release \
                               payout-dispatch ai-dispute ai-risk-narrator \
                               ai-support ai-decisions
@@ -68,14 +69,18 @@ environment or a build log.
 |---|---|
 | `account` | `/signup` creates a company and its first owner; `/me` turns a session into a tenant and a role |
 | `deals` | create (with §14's `completion_policy`), list, get, `/pay`, `/confirm`, `/refund`, `/deposit`, `/capture`, `/release-deposit` |
+| `checkout` | §10.1's sessions. `/sessions` for the client's server; `/public/:token` for the buyer, with no credential |
 | `payment-options` | what a buyer in a market can pay with; the catalogue a client renders its checkout from |
 | `sellers` | register a tokenized payout destination, list, `/:id/capabilities`, `/:id/verify` (person-only) |
 | `balance` | four buckets per currency, or `?by=rail` |
 | `webhook-endpoints` | register (secret shown once), list, `?deliveries=1`, disable |
 | `flutterwave-webhook` | inbound, at `/flutterwave-webhook/:tenant` |
-| `provider-accounts` | bring-your-own-keys |
+| `stripe-webhook` | inbound, at `/stripe-webhook/:tenant`. The same five steps, with a real HMAC instead of a shared secret |
+| `provider-accounts` | bring-your-own-keys. **The one door live credentials come through**, and where §16's gate is asked |
+| `launch` | §16's checklist and its sign-offs. PayHold staff only, and it refuses an API key |
 | `payouts` | list, get with signals **and the routing decision and display status**, `/hold`, `/approve-review`, `/retry` |
 | `risk-signals` | what the deterministic rules noticed, filterable; `?context=1` for where payments came from |
+| `disputes` | §8's Resolution Center. Open, list, get with offers/evidence/timeline, `/offers`, `/offers/:id/respond`, `/offers/:id/withdraw`, `/evidence`, `/export`, and `/resolve` (person-only) |
 | `webhook-dispatch`, `reconcile`, `auto-release`, `payout-dispatch` | cron only, `CRON_SECRET` |
 | `ai-dispute`, `ai-risk-narrator`, `ai-support` | draft a resolution, brief a payout, answer a question. These run as `payhold_ai` and never hold the service role |
 | `ai-decisions` | approve or reject a draft; `?usage=1`, `?outcomes=1`. The one AI-adjacent function that *does* hold the service role, because approving is what moves money |
@@ -83,6 +88,13 @@ environment or a build log.
 `resolveCaller` takes either an `X-Api-Key` or a dashboard JWT, key first. Every
 handler filters on the tenant it resolves, and a row belonging to someone else
 is a 404 — a 403 would confirm it exists.
+
+`launch` is the exception and uses `platformAdminFromJwt` instead. A third
+caller kind rather than a variation on the other two: a tenant `owner` is the
+most senior person *inside one company*, and whether PayHold may take live money
+is not their statement to make. `platform_admins` is the separate axis the RLS
+layer already draws for exactly this, and a caller who is not on it gets the same
+404 as a caller who is nobody.
 
 ## Getting in
 
@@ -142,6 +154,68 @@ comparison and the state write share a transaction. A mismatch still books the
 hold for what actually arrived: the money genuinely reached the provider, and
 omitting the entry would hand the reconciliation pass a drift nobody could
 explain.
+
+## Hosted checkout sessions — §10.1, migration `20260807000012`
+
+One migration, not two: nothing here uses a value from `alter type ... add
+value`, and a type created inside a transaction is usable inside it.
+
+**A session is a scoped, expiring credential for one payment on one deal.** It
+exists so a buyer can choose a payment method without holding an API key and
+without the client's server proxying the choice — and without anyone inventing a
+general end-user auth scheme to get there. It is also the first writer
+`checkout_started` has ever had.
+
+**Nothing here can fund a deal**, which is §15 phase 2's acceptance criterion and
+the whole risk of the phase. Completing a session moves the deal to
+`payment_pending` and stops; `funded_held` still comes only from a provider
+webhook that checked a signature *and* re-fetched the transaction.
+`tests/checkout-sessions.test.ts` asserts that against the function *bodies* —
+comments stripped, since the migration explains at length why it does not fund a
+deal and matching that prose would pass for the wrong reason.
+
+Four decisions worth knowing:
+
+- **`checkout.completed` is not the funding event.** It says the buyer is done
+  with our page; `order.funded_held` says money arrived. One event with a flag
+  would let a client ship goods against a card that has not settled.
+- **The token is plaintext**, unlike an API key, and the column comment carries
+  the argument: a key is only ever *compared* so we never need it back, while a
+  payment link must stay re-derivable because re-sending one is ordinary
+  support. 256 bits from `gen_random_bytes`, an expiry, and authority over
+  exactly one payment — no broader than the deal id that already opens the
+  hosted page.
+- **Expiry is derived, never stored.** Same reasoning as §5.1's `clearing` and
+  `available`: a stored value needs a writer, and the writer would be a sweep
+  that had not run yet. `checkout_session_state()` is what every reader goes
+  through, so a link is refused from the instant it expires.
+- **One live session per deal**, by partial unique index. Two open sessions
+  would be two live links against one hold. `open_checkout_session` returns the
+  existing one rather than minting a second, which also makes a client retrying
+  the call idempotent.
+
+`checkout_started -> created` joined the transition guard — the only backwards
+edge in the machine. It means a link was withdrawn, and it is legal precisely
+because nothing happened: no provider call, no money, nothing observed outside
+this system.
+
+`_shared/checkout.ts` holds `startCharge`, shared by `/deals/:id/pay` and the
+hosted route for the reason `_shared/dispatch.ts` is shared by the cron and the
+approve endpoint. It re-checks the method against the live capability matrix,
+because the hosted call arrives from a browser and a buyer who edited the form
+must not reach a rail we switched off.
+
+### `select (fn(...)).*` calls the function once per output column
+
+Found by these tests, and it invalidates more than it breaks. A
+composite-returning function expanded that way is evaluated once for *each*
+column in the result — so a fifteen-column function is fifteen calls wearing the
+shape of one. The checkout tests failed on it immediately (a "cannot be used
+twice" case failing on the first call); `tests/payout-routing.test.ts` had the
+same shape and passed only because `route_payout` de-duplicates its decision
+rows, which means it was never testing what it appeared to.
+
+Use `select * from fn(...)`. Both suites do now.
 
 ## One registry, two repos
 
@@ -306,8 +380,13 @@ expectations; assume it will cause more.
 
 `functions/_shared/provider.ts` is the one interface all rails sit behind.
 **No caller may branch on `provider.name`** — route by capability, not
-identity. `FlutterwaveProvider` is not "the African one", it is what
-`payoutRail()` returns for that corridor.
+identity. `FlutterwaveProvider` is not "the African one", it is what the routing
+table returns for that corridor.
+
+`verifySignature` returns `boolean | Promise<boolean>`, and callers await it.
+Flutterwave's is a shared secret compared verbatim and answers synchronously;
+Stripe's is an HMAC, and Web Crypto has no synchronous digest. That shape costs
+a synchronous rail nothing and is the only one a real signature scheme fits.
 
 `FakeProvider` is not a test double bolted on for convenience: §12 requires a
 full lifecycle with zero keys, so it is the rail a fresh tenant runs on until
@@ -315,6 +394,79 @@ they bring their own. It fakes the counterparty and **nothing else** — a fake
 charge is still webhooked in, still matched on amount and currency, still
 confirmed twice before it releases. Its `verifySignature` still rejects an
 unsigned webhook, because the forged-webhook test must 401 on every rail.
+
+## StripeProvider, and the two things it does differently
+
+`_shared/stripe.ts`. The complement to Flutterwave rather than a replacement:
+Stripe charges a card issued almost anywhere and **cannot pay a Rwandan
+seller**, which is why a deal is routinely collected here and paid out there,
+and why `rail_balances` has never been one pot.
+
+Three shape facts the code depends on, all documented in the file header:
+
+- **Amounts pass through untouched.** Stripe takes the smallest currency unit,
+  which is exactly what `Money` is — so there is no `toMajor` here, and its
+  absence is deliberate rather than an omission somebody should fix.
+  `flutterwave.ts`'s `ZERO_DECIMAL` is where that fact is written down, because
+  Flutterwave quotes major units and needs the conversion.
+- **Requests are form-encoded**, with bracket notation for nested objects.
+  `form()` is the whole of that, and `stripe.test.ts` caught it stringifying an
+  object inside an array — which would have sent Stripe
+  `line_items[0]=[object Object]`, a line item with no price, collecting nothing.
+- **Idempotency is a header**, replayed for 24 hours. That is what makes
+  `dispatchPayout`'s provider-before-booking order safe on this rail too.
+
+`request_three_d_secure: 'any'`, never `automatic`. Stripe's default lets Radar
+decide, and a downgrade nobody asked for is precisely what §6's "never silently
+downgraded" forbids.
+
+`tokenize` looks like a lookup because it is one: Stripe's payout destination is
+the seller's connected account id, and the bank details behind it are given to
+Stripe during Connect onboarding and never to us. A raw account number arriving
+there is a client misunderstanding worth naming rather than storing.
+
+`verify` takes a Checkout Session id **or** a PaymentIntent id, because both are
+references this adapter hands out — `charge` returns the session and their
+webhook talks about the intent. A caller that had to know which is which would
+be branching on Stripe's internals. It reads `amount_received` rather than
+`amount`: on a manual-capture intent they differ until capture, and booking the
+second would credit a §22 deposit as though it were a payment.
+
+## The capability matrix
+
+Migrations `20260807000010` (the adapter enum values) and `20260807000011`.
+Same two-file split as the lifecycle and the six buckets, same reason.
+
+Two tables, two different questions:
+
+- **`provider_capabilities`** — §9's eight flags, plus `implemented` and
+  `enabled`. Those two are separate because they fail differently: an unbuilt
+  adapter is a roadmap item, a disabled one is an outage or a commercial
+  decision, and an operator has to tell them apart at 3am. A check constraint
+  makes it impossible to enable something unbuilt. `route_evaluation` reads the
+  row, so switching an adapter off disables exactly its own routes — §15
+  phase 3's second sentence, made structural.
+- **`payment_markets`** — §12's country switch, an **overlay** and not a mirror.
+  A country with no row behaves as the registry says; a row is a deliberate
+  departure carrying a required `reason`, because "why can nobody in Kenya pay
+  us" gets asked three months after whoever switched it off has forgotten.
+  `market_open()` answers one country, `closed_markets()` answers all of them —
+  the catalogue endpoint needs the second, and 55 round trips would be a query
+  per row of a page nobody paginates.
+
+**The registry did not move, and §29.11 is why.** `countries.ts` is ~200 rows of
+transcribed provider documentation emitted into both repos by one generator.
+Copying it into SQL would give it a second home that drifts the first time
+somebody edits one and not the other — the exact failure the generator prevents.
+The registry says what is *possible*; the matrix says what is *on*.
+
+**`payout_routes.provider` is `not null` as of Phase 6.** Phase 5 used a null to
+mean "unbuilt" because §9's adapters had no enum values yet, and a check
+constraint cannot look at another table. Now each rail names its adapter —
+`paypal` carries Venmo, `china_wallet_partner` carries both Chinese wallets —
+and `payout_routes_require_live_provider` refuses to enable a route whose
+adapter is not live. `payout_provider` names a **rail**, `provider` names an
+**adapter**, and keeping two enums is what stops those being conflated.
 
 ## Bring-your-own-keys
 
@@ -508,6 +660,103 @@ proportion to the pool (scaled, not converted — the payout is in the seller's
 currency and the refund in the buyer's), and a full refund fails any payout
 still scheduled.
 
+## The Resolution Center — §8, migrations `20260807000016` and `20260807000017`
+
+Same two-file split as everything else in V2, same reason: Postgres refuses to
+use an enum value added in the same transaction.
+
+`disputes` used to carry a reason and nothing else. It now carries a structured
+`reason_code`, a `disputed_amount`, who filed it and who decided it, with
+`dispute_offers` and `dispute_evidence` beside it.
+
+**Three decisions are load-bearing. Read them before changing anything here.**
+
+### Silence lapses a request. It never accepts one.
+
+§8 lets an unanswered request be "auto-resolved by platform rule", and the rule
+is that at 48 hours `expire_dispute_offers()` marks the offer `expired` and the
+dispute **stays open**. Nothing moves.
+
+The other reading — silence accepts — would make a clock the thing that refunds
+a buyer or pays a seller. That is a machine deciding, and invariant 9 and
+invariant 11 both say it may not. §15 phase 4 asks that the window resolve
+without a human, and it does: the window closes. `resolution-center.test.ts`
+asserts the deal, the dispute and `deal_amounts` are all untouched afterwards.
+
+`expired` is a distinct status from `declined` on purpose. Declining is an act —
+somebody read it and said no — and §24.3's labels cannot be backfilled, so
+collapsing the two would lose the difference permanently. An expired offer also
+has a null `responded_by_actor`, because nobody answered it.
+
+The pass runs from the **`auto-release` cron**, first, rather than from a job of
+its own: both are "a clock ran out", and this one moves no money and touches no
+deal. Its failure is logged and swallowed — a deal whose release window came due
+must not wait on an unanswered offer somewhere else.
+
+### `disputed_amount` bounds the resolution. It does not split the payout.
+
+§8 says a partial dispute freezes only the disputed amount "when the ledger can
+safely separate it". The ledger can, since Phase 3. **The payout cannot**, and
+that is the binding constraint: `payouts_deal_key` allows exactly one payout row
+per deal, so paying the undisputed two thirds now consumes it and a dispute later
+resolved in the seller's favour would have nothing left to send the rest with.
+
+So the amount is enforced where it can be enforced honestly. `resolve_dispute`
+refuses a `refund` when only part was disputed, and refuses a `partial_refund`
+larger than that part. The payout freeze stays whole while a dispute is open.
+Splitting a payout is a second payout row, its own idempotency key and its own
+line in reconciliation — a change that deserves its own phase rather than a
+clause here.
+
+### Conflict of interest is enforced on who *acted*.
+
+§8 wants an administrator who is a party unable to decide. The obvious
+implementation cannot be written, and structurally so: PayHold stores no buyer
+PII — `buyer_ref` is the client's own opaque identifier — and a seller has no
+login. There is no identity to join to.
+
+What is recorded is who did what. So `resolve_dispute` refuses a `p_decided_by`
+that appears as `disputes.raised_by_actor`, or as any `offered_by_actor` or
+`responded_by_actor` on the dispute. `both-parties` is the one reserved name
+allowed to have acted: it is what `respond_dispute_offer` writes when the two
+sides agreed with each other, and refusing it would make agreement unexecutable.
+
+`p_decided_by` is **required**. A decision without a decider is not a record —
+the same reason `approve_payout_review` and `verify_seller` take a name. That is
+a signature change, so `resolve_dispute` was dropped and recreated, and **the
+`revoke ... from payhold_ai` had to be reissued**: a recreated function is
+granted to PUBLIC. `tests/intelligence.test.ts` matches on the name and is what
+catches it being forgotten.
+
+`decide_ai_suggestion` now passes the approver through as the decider, which
+means an administrator who argued one side cannot launder the decision through
+an AI draft either.
+
+### Smaller things
+
+- **One open request per order**, enforced by `dispute_offers_one_open_per_deal`
+  and re-stated as a sentence in both `open_dispute` and `make_dispute_offer` so
+  a caller gets prose rather than a constraint name. `resolve_dispute` withdraws
+  any request still outstanding — otherwise the next dispute on that order is
+  blocked forever by an offer about a dispute that is over.
+- **The other party answers.** `respond_dispute_offer` refuses the offering
+  side: accepting your own request is not agreement, it is a way around the 48
+  hours.
+- **Accepting an `update` or an `extension` leaves the dispute open.** Agreeing
+  to send a photo or to finish on Friday is not agreeing about the money, and
+  closing the dispute would unfreeze the payout on a side conversation.
+- **`dispute_timeline` and the export are derived**, never stored. Every row
+  already exists somewhere else and a second copy would be free to disagree.
+- **No bytes in Postgres.** `dispute_evidence` holds a description, a kind, a
+  `captured_at` and a storage reference — the same refusal that keeps card and
+  account numbers out. `captured_at` is separate from `created_at` because an
+  inspection photo taken at handover is worth more than one taken after the
+  complaint, and only that column can tell them apart.
+- **§16's `dispute_window` blocker is cleared by `20260807000017` itself**,
+  which is the contract `20260807000015` states. It clears the blocker and does
+  not sign the item off: the table existing is a fact, and whether the behaviour
+  is right is a person's judgement.
+
 ## Risk rules live in SQL
 
 `screen_payout` implements them, for the same reason the release guard does: it
@@ -688,6 +937,52 @@ anything not terminal, which becomes `processing` via `mark_payout_processing`
 — a poll, not a second transfer — and books when the provider reports it
 settled.
 
+### Retry and the clock — §13, migration `20260807000014`
+
+`failed` joined `DISPATCHABLE`, so a refused transfer is now re-sent by the
+cron. Until this landed nothing automatic retried a payout at all: Phase 5 built
+the backup-destination *selection* for a retry and left the retry itself to a
+person pressing a button.
+
+**`payouts.next_attempt_at` is the whole mechanism, and null is the interesting
+value.** It means no machine may try this payout again. The cron filters
+`next_attempt_at <= now()`, which excludes nulls by construction; the approve
+and retry endpoints go through the same `dispatchPayout` and are unaffected,
+because a person is not a machine and that is exactly the distinction the column
+encodes.
+
+The ladder is 1m / 5m / 30m / 2h capped, the same one `record_webhook_attempt`
+uses. When `payout_retry_max_attempts` (default 5, floor 1) is spent,
+`fail_payout` writes `blocked` **and clears the clock**, which is how §13's
+"then move to `payout_blocked` for operator action" is said without a second
+status meaning "blocked, but really blocked". §5.1's no-route `blocked` keeps
+its clock and is re-asked every pass, because that answer changes without anyone
+doing anything; a rail that refused us five times does not.
+
+Three consequences worth knowing:
+
+- **The attempt counter is never reset**, including by `reset_payout_retry`,
+  which is what `/payouts/:id/retry` calls before it dispatches. `route_payout`
+  reads `attempts >= payout_primary_attempts` to decide whether the seller's
+  verified backup destination may be used, so zeroing it would quietly send the
+  next attempt back to the primary that has been failing. A person's retry is
+  one more attempt, not a fresh series.
+- **`mark_payout_processing` had to accept `failed`.** The second attempt on an
+  async rail arrives from that status, since `route_payout` only rewrites
+  `blocked`. The bug predates phase 9 and nothing reached it, because the only
+  retry was a person on a synchronous rail.
+- **A finished deal stops the clock, by trigger.** `refund_deal` cancels a
+  scheduled payout by writing `status = 'failed'` directly — inert while
+  `failed` was undispatchable, and a transfer nobody is owed once it is not.
+  `payouts_stop_retrying` clears `next_attempt_at` on any payout written while
+  its deal is `refunded`, `canceled` or `expired`, for the reason
+  `deals_assert_transition` is a trigger. `disputed` is deliberately absent: a
+  dispute ends, and the payout it froze has to be sendable when it does.
+  `dispatchPayout` also skips a deal outside `PAYABLE_DEAL_STATUSES` before
+  calling any provider — `settle_payout` would refuse to book it anyway, since a
+  refunded deal has no available balance, but that refusal comes after the money
+  has gone.
+
 ## The auto-release timer
 
 `auto-release` has no release path of its own. It writes the missing
@@ -705,6 +1000,74 @@ refused again by `confirm_deal` under the lock.
 Two overlapping passes are safe: the second gets `can no longer be confirmed`
 from the lock, which the function reads as "already released" rather than an
 error.
+
+## Reconciliation runs — §13, migration `20260807000013`
+
+The nightly comparison and the automatic freeze already existed. What did not
+was a record of the *pass*: `reconciliation_alerts` answers "is something wrong
+now" and cannot answer "did last night's pass check Stripe", and a nightly
+control nobody can prove ran is not a control.
+
+`reconciliation_runs` is one row **per tenant per rail**, opened by
+`start_reconciliation_run` before the provider is asked anything and closed by
+`finish_reconciliation_run`. Per rail rather than per pass for the reason
+balances reconcile per rail: you cannot ask two providers about one number, and
+a run summing Flutterwave and Stripe would be that mistake a level up.
+
+**A pass that dies leaves its run open, and the next one records it as
+`failed`.** That cleanup lives in `start_reconciliation_run` rather than in the
+Edge Function, because the function that crashed is precisely the one that
+cannot tidy up after itself. The partial unique index allows one `running` row
+per rail, so an abandoned run also cannot be silently accompanied by a second.
+
+The four counters, and what each is actually claiming:
+
+| | Means |
+|---|---|
+| `matched` / `mismatched` | currency comparisons on this rail that agreed or did not. Every mismatch opens or refreshes an alert, and `reconciliation_alerts.run_id` is the pass that first raised it |
+| `skipped` | no external figure — an unreachable API, or a demo tenant on `FakeProvider`. A skipped rail is not a clean rail, which is why `incomplete` exists as a resolution |
+| `missing` | verified inbound events in the window with no `processed_at`: what the provider told us and the ledger never posted |
+
+**`missing` is deliberately not a transaction-export diff**, which is what §13's
+sentence literally describes. No adapter has a transaction-listing call —
+`PaymentProvider` exposes `balances()` and nothing else that enumerates — so an
+export comparison today would return zero for every real rail while looking
+authoritative. Counting the inbox is a smaller claim that is true, and widening
+it later is an adapter method plus a column. `signature_ok` bounds it: a
+forgery we correctly refused is not money we owe ourselves.
+
+The window runs from the last **completed** run's `period_end`, so an event
+cannot fall between two passes and be counted by neither.
+
+### `resolve_reconciliation_run` is the one place a freeze is lifted
+
+Freezing is arithmetic and automatic; unfreezing is a judgement about whether
+the difference has been *explained*. So it takes a name, closes the alerts that
+run raised, refuses while any case on the tenant is still open, and puts the
+unfreeze behind a separate argument — writing down what happened and declaring
+the money accounted for are two different claims, and an operator must be able
+to make the first without making the second. Nothing here runs on a timer, so
+"nothing unfreezes automatically" is intact.
+
+### Two traps this migration walked into
+
+- **`record_reconciliation` gained a parameter, so it was dropped and
+  recreated.** `create or replace` would have added a sibling and made every
+  existing five-argument call ambiguous. `tests/reconciliation-runs.test.ts`
+  pins `count(*) from pg_proc` at 1, the same guard `fund_deal` carries.
+- **`found` reflects the last statement, not the last `select into`.** The
+  counter `update` was written between the alert lookup and its `if found`, and
+  silently turned "no open alert" into "there is one" — so a first mismatch
+  updated a null row and never inserted the case at all. Every open-alert test
+  in the existing suite still passed, because they all ran without a run id.
+  The function tests `a.id is not null` from that point down.
+
+§13's "any mismatch produces a case rather than silently altering balances" was
+already true and is now structural: `tests/reconciliation-runs.test.ts` asserts
+that none of the five functions names `write_ledger`, `insert into ledger` or
+`settle_payout`, matched against their bodies with comments stripped — the same
+technique the checkout tests use, and for the same reason, since these headers
+explain the property at length.
 
 ## Scheduling the cron jobs
 
@@ -734,11 +1097,79 @@ immediately, so a `cron.job_run_details` row saying "succeeded" means the
 request was *queued*, not that the function returned 200. The status codes are
 in `net._http_response`.
 
+## The launch gate — §16 and §17, migration `20260807000015`
+
+One migration, not two: nothing here uses a value from `alter type ... add
+value`, and a type created inside a transaction is usable inside it.
+
+**Live credentials are refused while a required item is outstanding.**
+`assertLiveAllowed` is called from `functions/provider-accounts/` and nowhere
+else, and that is defensible for one reason: there is exactly one writer of
+`tenant_provider_accounts`, and a rail with no stored account falls back to
+`FakeProvider`. `tests/launch-gate.test.ts` asserts the writer stays singular —
+if a second one appears, that test is what says the gate has a hole. The check
+runs **before** the credentials are validated, because refusing after we have
+sent a live secret key to the provider would have already used it.
+
+Three decisions worth knowing:
+
+- **The sign-off is an event and the state is derived.** `launch_sign_offs` is
+  append-only with the same trigger shape as `ledger` and `audit_log`, and
+  `launch_status()` reads the latest row per item. Withdrawing is a new row
+  saying so, for the reason a ledger correction is an opposite entry — "who said
+  this was fine, and when did they stop saying it" is the question asked after
+  something goes wrong, and an update erases half the answer.
+- **A blocked item cannot be signed, by anybody.** `blocked_by` names unbuilt
+  work and the function refuses whatever the caller's authority, because no
+  amount of seniority makes an unwritten dispute window resolve a dispute.
+  Withdrawing is always allowed: "I no longer stand behind this" must never be
+  the harder direction.
+
+  **The blockers that could be checked are checked, at seed time.**
+  `to_regclass('public.dispute_offers')` and friends, rather than a hand-written
+  claim about which phases have landed — phases 8 and 9 landed *while this
+  migration was being written*. Existence is a proxy for the work being done,
+  which is why a person still signs the item with evidence; what existence rules
+  out is signing one that cannot possibly work.
+- **No `tenant_id`.** §16's items are about the platform — our legal entity, our
+  contracts, our incident-response plan — so a tenant connecting live keys is
+  gated on *our* readiness, because it is our system their buyers' money would
+  move through. Their own onboarding is `sellers`/§12; their own market switches
+  are `payment_markets`.
+
+`market_launch_verified(country)` is what `rails_verified` now means on
+`/payment-options`, asked per country on the payout branch and across all four
+markets elsewhere. It used to be a constant `false` in `_shared/rails.ts` with a
+comment promising somebody would change it one day. That constant is still there
+and still tested, because `payoutRoute()` is pure and stamps it on the route
+object it returns; the endpoint overwrites it from the checklist, which is the
+one place the two meet.
+
+### §17 found one hole, and it was a nullable parameter
+
+`settle_payout(p_payout_id, p_leaving, p_provider_ref)` accepted a null
+reference. Every caller passed one, and `update payouts set status = 'paid'` run
+by hand was a mark-as-paid control with no provider on the other end of it: the
+seller recorded as paid, `payouts_deal_key` refusing a second payout for that
+deal, and `reconcile` reporting drift for money that never left.
+
+`paid_needs_a_provider_reference` is a **constraint**, not a guard inside the
+function, because §17's word is *anywhere* — a guard binds the callers we know
+about, and this binds the correction somebody runs at 2am. It does not claim the
+reference is real; only the rail can say that, and re-fetching is what
+`reconcile` is for. It claims that whoever marked this paid had to quote one.
+
+Two fixtures had to gain a reference, and both were describing payouts that
+could not have existed. One of them (`migrations.test.ts`, the `paid_at`
+constraint) would otherwise have passed for the wrong reason — two constraints
+violated by one row, and Postgres does not promise which it reports.
+
 ## Not built yet
 
-- **Six lifecycle states with no writer.** `checkout_started` waits on Phase 7's
-  checkout sessions; `partially_refunded` on Phase 3; `in_progress`,
-  `revision_requested`, `expired` and `canceled` each want an endpoint
+- **Four lifecycle states with no writer.** `checkout_started` got one in
+  Phase 7 and `partially_refunded` is deliberately permanent (§29.8);
+  `in_progress`, `revision_requested`, `expired` and `canceled` each want an
+  endpoint
   (§10.1 lists `POST /v1/orders/{id}/cancel` among them). The enum values and
   the transition guard already know all six, so those are endpoints rather than
   migrations. **`auto-release` and `deals_auto_release_idx` filter on
@@ -749,15 +1180,22 @@ in `net._http_response`.
   channel to remind people *on* — there is no email path here, and a tenant
   webhook is a notification to the client's server rather than to a buyer who
   has gone quiet — so it is a decision before it is a function.
-- **End-user tokens.** Spec §4 has `confirm` taking one, so a buyer can confirm
-  without the client's API key. Today `/pay` and `/confirm` are called by the
-  client's server on the buyer's behalf.
-- **`StripeProvider`** — `loadProvider` throws for it rather than falling back
-  to the fake, because a deal routed to Stripe that silently collected nothing
-  would be worse than a loud failure.
-- **Stripe's inbound webhook.** `flutterwave-webhook` is the pattern to follow.
-- `FlutterwaveProvider`'s live calls are unexercised until real keys are
-  connected — every test to date runs against `FakeProvider` or PGlite.
+- **End-user tokens for `confirm`.** Spec §4 has it taking one so a buyer can
+  confirm without the client's API key. Phase 7 solved the same problem for
+  *paying* — a checkout session is exactly that credential, scoped to one
+  payment — and confirming wants the same shape rather than a general auth
+  scheme. `/confirm` is still called by the client's server on the buyer's
+  behalf.
+- `FlutterwaveProvider`'s and `StripeProvider`'s live calls are unexercised
+  until real keys are connected — every test to date runs against
+  `FakeProvider`, an intercepted `fetch`, or PGlite. `stripe.test.ts` pins the
+  request shapes and the signature check without touching the network, which is
+  as far as CI should go.
+- **§9's other three adapters.** `paypal`, `cash_app_pay` and
+  `china_wallet_partner` have enum values, capability rows and payout routes,
+  and no classes. `loadProvider` throws for them by name rather than falling
+  back to the fake, because a deal routed to an adapter that silently collected
+  nothing would be worse than a loud failure.
 - Seed: AutoHire as tenant #1.
 - **Invitations.** `POST /account/signup` creates a company and its owner;
   there is no path for a second person to join one that exists. `tenant_users`
@@ -770,11 +1208,27 @@ in `net._http_response`.
   AI methods behind `VITE_PAYHOLD_AI_LIVE`. The rest is still one file plus one
   line in `src/api/index.ts`. Its sign-in is already real code against
   `functions/account/` — `src/auth/supabase.ts` — behind the same env switch.
-- **Dispute evidence.** `disputes` carries a reason and nothing else: no
-  evidence table, no counter-statement column. The dashboard mock models both,
-  and §12.2 says the assistant reads them, so `disputeCaseFile` is thinner than
-  it should be. Adding those columns is the next thing that improves a draft,
-  and it bumps `dispute-assistant@1`.
+- **Four reads Phase 10's screens now expect, and this side does not serve.**
+  The dashboard's mock implements them and its screens call them, so they are
+  the shape `HttpClient` will need:
+
+  | Client method | Wants | Behind it |
+  |---|---|---|
+  | `getDealAmounts` | `GET /v1/deals/:id/amounts` | `deal_amounts(deal)`, which exists |
+  | `listRefunds` | `GET /v1/deals/:id/refunds` | the `refunds` table, which exists |
+  | `listSellerDestinations` | `GET /v1/sellers/:id/destinations` | `seller_destinations`, which exists |
+  | `listCheckoutSessions` | `GET /v1/checkout/sessions` | `checkout_sessions`, which exists |
+
+  Every one is a select over something already built — routing and shaping, not
+  schema. The session list is the only one with a judgement in it: **strip the
+  token on anything not live.** A withdrawn or expired token opens nothing, so
+  carrying it would be a plaintext credential in a list that outlives the
+  sessions themselves. The mock does that already.
+- **A counter-statement column.** §8's respondent files their case as evidence
+  of kind `message` rather than into a field of its own. Worth knowing when
+  reading a draft that says the seller never replied — it may mean they replied
+  as evidence.
+
 - **Shadow mode.** The working agreement says a new prompt ships with its
   suggestions logged and not shown, compared against the humans' actual
   decisions, then enabled per tenant. `ai_suggestions` records everything

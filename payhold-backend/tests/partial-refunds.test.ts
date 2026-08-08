@@ -368,7 +368,7 @@ describe('§24.2 — a dispute can resolve as a split', () => {
 
     await h.db.query(
       `select resolve_dispute($1, 'partial_refund', 'Two of five days unused',
-                              90000, 'RWF', 10000, 40000)`,
+                              90000, 'RWF', 10000, 40000, 'ops@payhold.test')`,
       [dispute],
     )
 
@@ -387,7 +387,7 @@ describe('§24.2 — a dispute can resolve as a split', () => {
   test('the seller receives less than they would have', async () => {
     const { deal, dispute } = await disputed()
     await h.db.query(
-      `select resolve_dispute($1, 'partial_refund', 'Half', 90000, 'RWF', 10000, 50000)`,
+      `select resolve_dispute($1, 'partial_refund', 'Half', 90000, 'RWF', 10000, 50000, 'ops@payhold.test')`,
       [dispute],
     )
     const { rows: [p] } = await h.db.query<{ amount: string }>(
@@ -399,7 +399,7 @@ describe('§24.2 — a dispute can resolve as a split', () => {
   test('a split is labelled a split, not a refund — §24.4', async () => {
     const { deal, dispute } = await disputed()
     await h.db.query(
-      `select resolve_dispute($1, 'partial_refund', 'Some of it', 90000, 'RWF', 10000, 30000)`,
+      `select resolve_dispute($1, 'partial_refund', 'Some of it', 90000, 'RWF', 10000, 30000, 'ops@payhold.test')`,
       [dispute],
     )
 
@@ -418,7 +418,7 @@ describe('§24.2 — a dispute can resolve as a split', () => {
     const { dispute } = await disputed()
     await rejects(
       () => h.db.query(
-        `select resolve_dispute($1, 'partial_refund', 'All', 90000, 'RWF', 10000, 100000)`,
+        `select resolve_dispute($1, 'partial_refund', 'All', 90000, 'RWF', 10000, 100000, 'ops@payhold.test')`,
         [dispute],
       ),
       /cannot be the whole payment/,
@@ -429,7 +429,7 @@ describe('§24.2 — a dispute can resolve as a split', () => {
     const { dispute } = await disputed()
     await rejects(
       () => h.db.query(
-        `select resolve_dispute($1, 'partial_refund', 'Unclear', 90000, 'RWF', 10000, null)`,
+        `select resolve_dispute($1, 'partial_refund', 'Unclear', 90000, 'RWF', 10000, null, 'ops@payhold.test')`,
         [dispute],
       ),
       /must name an amount/,

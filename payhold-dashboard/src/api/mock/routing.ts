@@ -30,6 +30,7 @@ import type {
   PayoutDisplayStatus,
   PayoutProvider,
   PayoutRoute,
+  ProviderCapability,
   RouteCheck,
   RouteReasonCode,
   Seller,
@@ -37,6 +38,18 @@ import type {
 } from '../types'
 import { audit, mintId, now, nowIso, type MockDb } from './store'
 import { emitWebhook } from './webhooks'
+import { routeReasonText } from '@/lib/rails'
+
+/**
+ * `route_reason_text` lives in `lib/rails.ts` and is re-exported here.
+ *
+ * It is the SQL function's mirror like everything else in this file, but it is
+ * also **rail vocabulary a screen has to render** — the Routing Center turns a
+ * stored `reason_code` back into a sentence — and screens do not import from
+ * the mock. The convention already says where a provider-facing phrase lives,
+ * so it lives there and this file borrows it.
+ */
+export { routeReasonText } from '@/lib/rails'
 
 // ---------------------------------------------------------------------------
 // The launch matrix — §5, as rows
@@ -105,13 +118,15 @@ export function platformPayoutRoutes(createdAt: string): PayoutRoute[] {
       rank: 30,
       note: 'Stripe Connect payouts. Cannot reach African destinations — see the Flutterwave rails.',
     },
-    // Declared and disabled, spec §29.3. `provider` is null, and the backend's
-    // `route_needs_an_adapter` check makes such a row impossible to enable.
+    // Declared and disabled, spec §29.3. Each names the adapter that *would*
+    // carry it — one adapter carries several rails — and none of those adapters
+    // is built, which is what `providerCapabilities` says and what stops these
+    // being enabled.
     {
       ...base,
       id: 'route_paypal',
       payout_provider: 'paypal',
-      provider: null,
+      provider: 'paypal',
       method: 'wallet',
       countries: ['US', 'AE', 'GB', 'DE', 'FR', 'NL', 'IE', 'ES', 'IT', 'CA', 'AU'],
       currencies: ['USD', 'AED', 'EUR', 'GBP', 'CAD', 'AUD'],
@@ -123,7 +138,8 @@ export function platformPayoutRoutes(createdAt: string): PayoutRoute[] {
       ...base,
       id: 'route_venmo',
       payout_provider: 'venmo',
-      provider: null,
+      // Venmo destinations are reached through PayPal's API.
+      provider: 'paypal',
       method: 'wallet',
       countries: ['US'],
       currencies: ['USD'],
@@ -135,7 +151,7 @@ export function platformPayoutRoutes(createdAt: string): PayoutRoute[] {
       ...base,
       id: 'route_cash_app',
       payout_provider: 'cash_app_pay',
-      provider: null,
+      provider: 'cash_app_pay',
       method: 'wallet',
       countries: ['US'],
       currencies: ['USD'],
@@ -150,7 +166,7 @@ export function platformPayoutRoutes(createdAt: string): PayoutRoute[] {
       ...base,
       id: 'route_alipay',
       payout_provider: 'alipay',
-      provider: null,
+      provider: 'china_wallet_partner',
       method: 'wallet',
       countries: ['CN'],
       currencies: ['CNY'],
@@ -162,7 +178,7 @@ export function platformPayoutRoutes(createdAt: string): PayoutRoute[] {
       ...base,
       id: 'route_wechat',
       payout_provider: 'wechat_pay',
-      provider: null,
+      provider: 'china_wallet_partner',
       method: 'wallet',
       countries: ['CN'],
       currencies: ['CNY'],
@@ -171,6 +187,148 @@ export function platformPayoutRoutes(createdAt: string): PayoutRoute[] {
       note: 'Requires an approved local structure and payout partner. §5 forbids promising this route until it exists.',
     },
   ]
+}
+
+// ---------------------------------------------------------------------------
+// What each adapter can do — §9
+// ---------------------------------------------------------------------------
+
+/**
+ * The mirror of the seed in `20260807000011_capability_matrix.sql`.
+ *
+ * §9: "each adapter declares its capabilities rather than letting the UI
+ * guess." `implemented` and `enabled` are separate because they fail
+ * differently — an unbuilt adapter is a roadmap item, a disabled one is an
+ * outage — and an operator has to tell those apart at 3am.
+ */
+export function platformProviderCapabilities(): ProviderCapability[] {
+  return [
+    {
+      provider: 'flutterwave',
+      implemented: true,
+      enabled: true,
+      supports_capture: true,
+      supports_partial_refund: true,
+      supports_marketplace_payout: true,
+      supports_seller_onboarding: false,
+      supports_dispute: false,
+      supports_local_currency: true,
+      supports_mobile_money: true,
+      supports_async_refund: true,
+      note:
+        'Cards, mobile money and bank transfer across the African markets. The only rail that can pay a Rwandan seller.',
+    },
+    {
+      provider: 'stripe',
+      implemented: true,
+      enabled: true,
+      supports_capture: true,
+      supports_partial_refund: true,
+      supports_marketplace_payout: true,
+      supports_seller_onboarding: true,
+      supports_dispute: true,
+      supports_local_currency: true,
+      // African mobile money is Flutterwave's, which is the structural reason
+      // both adapters exist.
+      supports_mobile_money: false,
+      supports_async_refund: true,
+      note:
+        'PaymentIntents with manual capture for deposits, Radar on every card charge, Connect for marketplace payouts.',
+    },
+    {
+      // §12: a full lifecycle with zero keys. It claims everything, because a
+      // capability it refused would make a demo path unreachable for a reason
+      // that is not true of any real rail.
+      provider: 'fake',
+      implemented: true,
+      enabled: true,
+      supports_capture: true,
+      supports_partial_refund: true,
+      supports_marketplace_payout: true,
+      supports_seller_onboarding: true,
+      supports_dispute: true,
+      supports_local_currency: true,
+      supports_mobile_money: true,
+      supports_async_refund: false,
+      note: 'Demo mode. Fakes the counterparty and nothing else — every guard still applies.',
+    },
+    // Declared and unbuilt — §29.3. The flags describe what the documentation
+    // says these APIs can do, so the day an adapter lands the row is already
+    // right; `implemented` is what says it has not.
+    {
+      provider: 'paypal',
+      implemented: false,
+      enabled: false,
+      supports_capture: true,
+      supports_partial_refund: true,
+      supports_marketplace_payout: true,
+      supports_seller_onboarding: true,
+      supports_dispute: true,
+      supports_local_currency: true,
+      supports_mobile_money: false,
+      supports_async_refund: false,
+      note:
+        'Declared so a seller who picks PayPal or Venmo gets a specific answer. No adapter and no signed agreement.',
+    },
+    {
+      provider: 'cash_app_pay',
+      implemented: false,
+      enabled: false,
+      supports_capture: false,
+      supports_partial_refund: true,
+      supports_marketplace_payout: true,
+      supports_seller_onboarding: false,
+      supports_dispute: true,
+      supports_local_currency: false,
+      supports_mobile_money: false,
+      supports_async_refund: false,
+      note: 'United States only. Declared, not built.',
+    },
+    {
+      provider: 'china_wallet_partner',
+      implemented: false,
+      enabled: false,
+      supports_capture: false,
+      supports_partial_refund: true,
+      supports_marketplace_payout: true,
+      supports_seller_onboarding: false,
+      supports_dispute: false,
+      supports_local_currency: true,
+      supports_mobile_money: false,
+      // §7.1.6: Alipay and WeChat refunds settle up to 90 days out.
+      supports_async_refund: true,
+      note:
+        'Alipay and WeChat Pay routes the selected Stripe account does not cover. §5: do not promise cross-border payout until an approved local structure exists.',
+    },
+  ]
+}
+
+/**
+ * Is this market open, in this direction, for this tenant?
+ *
+ * Absent rows mean open, which is what makes `payment_markets` an overlay: the
+ * registry decides what is possible and this decides what is switched on, and a
+ * market nobody has ruled on is not closed. A tenant row replaces the
+ * platform's, the same rule `resolvedRoutes` applies to rails.
+ */
+export function marketOpen(
+  db: MockDb,
+  tenantId: string,
+  country: Country,
+  direction: 'collect' | 'payout',
+): boolean {
+  const rows = db.payment_markets.filter(
+    (m) => m.country === country && (m.tenant_id === null || m.tenant_id === tenantId),
+  )
+  const row = rows.find((m) => m.tenant_id === tenantId) ?? rows[0]
+  return row ? row[direction] : true
+}
+
+/** The adapters that are built and switched on right now. */
+function adapterLive(db: MockDb, provider: PayoutRoute['provider']): boolean {
+  const row = db.provider_capabilities.find((c) => c.provider === provider)
+  // A missing row means live, for the same overlay reason as `marketOpen`.
+  return row ? row.implemented && row.enabled : true
 }
 
 // ---------------------------------------------------------------------------
@@ -198,14 +356,22 @@ function resolvedRoutes(db: MockDb, tenantId: string): PayoutRoute[] {
 }
 
 function verdict(
+  db: MockDb,
+  tenantId: string,
   route: PayoutRoute,
   country: Country,
   currency: Currency,
   amount: Money,
 ): RouteReasonCode {
-  // A rail with no adapter reports as disabled rather than as a separate kind
-  // of missing: to the seller they are the same fact.
-  if (route.provider === null || !route.enabled) return 'provider_disabled'
+  // §12's country switch comes first: a closed market is closed whatever the
+  // rails say, and it is the only one of these an operator can reverse in a
+  // minute.
+  if (!marketOpen(db, tenantId, country, 'payout')) return 'market_closed'
+  // Then the adapter, then the route. "The rail is unbuilt or out of service"
+  // and "we switched this corridor off" are different sentences that need
+  // different next actions.
+  if (!adapterLive(db, route.provider)) return 'provider_unavailable'
+  if (!route.enabled) return 'provider_disabled'
   if (route.risk_status === 'suspended') return 'route_suspended'
   if (route.risk_status !== 'approved') return 'route_under_review'
   if (!route.supports_payouts) return 'payouts_not_supported'
@@ -239,7 +405,7 @@ export function routeEvaluation(
 ): RouteCheck[] {
   return resolvedRoutes(db, tenantId)
     .map((route): RouteCheck => {
-      const reason = verdict(route, country, currency, amount)
+      const reason = verdict(db, tenantId, route, country, currency, amount)
       return {
         route_id: route.id,
         provider: route.provider,
@@ -263,50 +429,6 @@ export function routeEvaluation(
       a.fee_estimate - b.fee_estimate ||
       a.payout_provider.localeCompare(b.payout_provider)
     )
-}
-
-// ---------------------------------------------------------------------------
-// Reason codes in words
-// ---------------------------------------------------------------------------
-
-/**
- * §5.1: "the highest-ranked eligible fallback, **with the reason shown**", and
- * "with the reason and the next action". A code is for the audit row; a person
- * reading a stopped payout needs a sentence, and one sentence written here beats
- * the same sentence written three slightly different ways on three screens.
- */
-export function routeReasonText(
-  code: RouteReasonCode,
-  rail: PayoutProvider,
-  country: string,
-  currency: string,
-): string {
-  switch (code) {
-    case 'routed':
-      return `Paid by ${rail}.`
-    case 'provider_disabled':
-      return `${rail} is not available for payouts yet.`
-    case 'route_suspended':
-      return `${rail} payouts are suspended.`
-    case 'route_under_review':
-      return `${rail} payouts are under review and cannot be used right now.`
-    case 'payouts_not_supported':
-      return `${rail} can collect payments but cannot send them.`
-    case 'country_not_supported':
-      return `${rail} cannot pay a destination in ${country}.`
-    case 'currency_not_supported':
-      return `${rail} cannot pay out in ${currency}.`
-    case 'below_route_minimum':
-      return `This amount is below the minimum ${rail} will send.`
-    case 'above_route_maximum':
-      return `This amount is above the maximum ${rail} will send.`
-    case 'destination_not_verified':
-      return 'The payout destination has not been verified.'
-    case 'no_eligible_verified_destination':
-      return 'No verified payout destination has been registered.'
-    default:
-      return `PayHold has no payout route for ${rail} in ${country}.`
-  }
 }
 
 // ---------------------------------------------------------------------------

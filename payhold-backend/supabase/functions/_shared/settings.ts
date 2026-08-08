@@ -30,6 +30,12 @@ export interface Settings {
   currencies: Currency[]
   risk_rules_enabled: boolean
   risk_review_threshold_usd: Money
+  /**
+   * How long a hosted checkout link lives (§10.1). Short enough that a stale
+   * link in an inbox is not a live payment page; long enough that a buyer who
+   * opens it the next morning is not sent back to the client.
+   */
+  checkout_session_hours: number
 }
 
 const DEFAULT_RISK_THRESHOLD_USD = 100_000
@@ -63,6 +69,7 @@ export async function loadSettings(
     risk_review_threshold_usd: Math.round(
       num('risk_review_threshold_usd', DEFAULT_RISK_THRESHOLD_USD),
     ),
+    checkout_session_hours: Math.round(num('checkout_session_hours', 24)),
   }
 }
 

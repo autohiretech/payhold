@@ -35,7 +35,11 @@ import { validateDisputeDraft } from '../_shared/ai-validate.ts'
 import { handler, json, readJson, required } from '../_shared/http.ts'
 import { PayHoldError } from '../_shared/types.ts'
 
-const PROMPT_VERSION = 'dispute-assistant@1'
+// Bumped by Phase 8. The case file grew §8's evidence and the offers the parties
+// have already exchanged, which changes what a draft is reasoning over — and a
+// version that stayed at @1 would put drafts made from two different files in
+// one bucket, which is exactly the comparison shadow mode exists to make.
+const PROMPT_VERSION = 'dispute-assistant@2'
 
 const SYSTEM = `
 You are drafting a suggested resolution for one disputed deal, for an
@@ -63,6 +67,21 @@ confirmations and the expected completion date; what the deal was for; and the
 seller's record on this account. A buyer who confirmed the deal was complete
 before opening a dispute has said something significant. So has a seller with
 prior disputes resolved against them.
+
+Weigh the evidence each side filed, and say which piece decided it. An
+inspection photo taken at handover is worth more than one taken a week later,
+so use "captured_at" rather than when it was uploaded. A side that filed
+nothing has still told you something, but it is weaker than what the other side
+did file — absence is not proof.
+
+Read "offers" before recommending a figure. These are what the parties have
+already put to each other. Recommending a split one side has already declined
+is a draft that goes nowhere; if you recommend it anyway, say in the rationale
+why it should land differently this time.
+
+"disputed_amount" is a ceiling when it is set: only that much of the payment is
+in dispute, and a recommendation that takes more from the seller than that
+cannot be carried out. Stay at or under it.
 
 Write "rationale" as one factor per line, each a complete sentence a person
 could check against the file. Put the strongest factor first.
@@ -166,15 +185,35 @@ Deno.serve(handler(async (req) => {
       system: SYSTEM,
       schema: SCHEMA,
       user: [
+        // Our own records. Every field a party wrote is stripped here and handed
+        // over below instead — the descriptions with the evidence, the opening
+        // statement on its own. What stays is the shape of the case: who filed
+        // what, when, and what has already been offered.
         trusted(
           'Case file for this dispute, from PayHold\'s own records:\n\n' +
-            JSON.stringify({ ...file, dispute: { ...file.dispute, reason: undefined } }, null, 2),
+            JSON.stringify({
+              ...file,
+              dispute: { ...file.dispute, reason: undefined },
+              evidence: file.evidence.map((e) => ({ ...e, description: undefined })),
+            }, null, 2),
         ),
-        // The one field written by a member of the public, handed over framed
-        // as evidence rather than as instructions. See `untrusted`.
+        // Written by a member of the public and *about* the question being
+        // asked, which is what makes it the injection surface. Framed as
+        // evidence rather than as instructions — see `untrusted`.
         untrusted(
           `Statement from the ${file.dispute.raised_by}, opened ${file.dispute.opened_at}`,
           file.dispute.reason,
+        ),
+        // §8's evidence, each piece labelled with who filed it and when it was
+        // captured, so the model can weigh a handover photo against a later one
+        // without taking either as an instruction.
+        ...file.evidence.map((e, i) =>
+          untrusted(
+            `Evidence ${i + 1} of ${file.evidence.length}: ${e.kind} filed by the ` +
+              `${e.uploaded_by}` +
+              (e.captured_at ? `, captured ${e.captured_at}` : ', capture time unrecorded'),
+            e.description,
+          )
         ),
         trusted('Draft a suggested resolution.'),
       ],

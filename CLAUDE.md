@@ -27,7 +27,7 @@ the same habit so nothing leaks by copy-paste.
 ```
 PayHold/
 ├── payhold-backend/     Supabase project mwnbjjlilqrwdmwutbxr — schema, money
-│                        engine, 19 Edge Functions and 4 cron jobs built ✅
+│                        engine, 22 Edge Functions and 4 cron jobs built ✅
 └── payhold-dashboard/   React + Vite + Tailwind on Cloudflare Pages  ✅
 ```
 
@@ -234,9 +234,27 @@ interface PaymentProvider {
 
 - `FlutterwaveProvider` — full implementation. Cards + MTN MoMo + Airtel Money.
   Payouts via Transfers API to tokenized beneficiaries.
-- `StripeProvider` — same interface, active only when keys exist. PaymentIntents
-  with manual capture for deposits, Radar on.
+- `StripeProvider` — built. Hosted Checkout Sessions so card data never touches
+  our infrastructure, `capture_method: manual` for §22 deposits, Connect
+  transfers for payouts, and `request_three_d_secure: 'any'` rather than
+  Stripe's `automatic` default — letting Radar decide *is* the silent downgrade
+  §6 forbids.
 - `FakeProvider` — **demo mode with zero keys must work end-to-end.**
+- `paypal`, `cash_app_pay`, `china_wallet_partner` — §9's remaining adapters,
+  **declared and unbuilt**. They exist so a rail can be named and refused with a
+  reason; `loadProvider` throws for them rather than falling back to the fake.
+
+**What each adapter can do is a row, not a branch.** `provider_capabilities`
+carries §9's eight flags plus `implemented` and `enabled`, and those two are
+separate because they fail differently: an unbuilt adapter is a roadmap item, a
+disabled one is an outage. Switching one off disables exactly its own routes,
+because `route_evaluation` reads the row.
+
+**Which markets are open is also a row.** `payment_markets` is a per-country
+overlay with a required `reason` — collect and payout close independently, a
+tenant row replaces the platform's, and a country nobody has ruled on is open.
+The generated registry stays generated and says what is *possible*; the matrix
+says what is *on*. Spec §29.11.
 
 Stripe cannot pay out to Rwandan recipients. **African payouts always ride
 Flutterwave.** Adding Paystack/DPO later = one new class + one webhook function
@@ -250,9 +268,11 @@ Flutterwave.** Adding Paystack/DPO later = one new class + one webhook function
 (default true), `ai_monthly_budget_usd`, `ai_dispute_assistant`,
 `ai_risk_narrator`, `risk_rules_enabled` (default true),
 `risk_review_threshold_usd` (default $1,000, converted to the payout currency
-at compare time), `payout_backup_enabled` (default true) and
+at compare time), `payout_backup_enabled` (default true),
 `payout_primary_attempts` (default 2) — §5.1's explicit routing-policy check
-before a backup destination may be used.
+before a backup destination may be used — and `payout_retry_max_attempts`
+(default 5, floor 1), §13's budget before a refused payout stops being retried
+by anything automatic.
 
 In-flight deals keep the settings they were created with. Settings changes apply
 to new deals only.
@@ -263,14 +283,23 @@ Auth: `X-Api-Key`, hashed at rest, rate-limited per key.
 
 | Endpoint | Purpose |
 |---|---|
+| `POST /v1/checkout/sessions` | Issue a hosted payment link for a deal. Idempotent — one live session per deal |
+| `GET /v1/checkout/sessions/:id` | Its status. `POST …/cancel` withdraws it |
+| `GET /v1/checkout/public/:token` | What the buyer sees. **No credential** — the token is the credential |
+| `POST /v1/checkout/public/:token/pay` | The buyer chooses a method and is handed to the provider |
 | `POST /v1/deals` | Create deal → returns deal id + payment link |
 | `GET /v1/deals/:id` | Full status, timestamps, amounts |
+| `GET /v1/deals/:id/amounts` | §7's breakdown — buyer-paid, fees, tax, reserve, refunded, receivable, seller-net. Derived, never stored |
+| `GET /v1/deals/:id/refunds` | The refund records. A refund has a lifetime, not a moment |
 | `POST /v1/deals/:id/pay` | Start the charge on the rail the buyer's method implies |
 | `POST /v1/deals/:id/confirm` | `side=buyer\|seller` + end-user token; both → atomic release |
-| `POST /v1/deals/:id/refund` | Client-initiated, pre-release, policy-checked |
+| `POST /v1/deals/:id/refund` | Client-initiated, full or partial, policy-checked |
 | `POST /v1/deals/:id/deposit` `/capture` `/release` | Card pre-auth deposit lifecycle |
 | `GET /v1/payment-options` | What a buyer in a market can pay with — methods, wallets, card schemes, currencies |
 | `POST /v1/sellers` | Register payout destination → tokenized beneficiary |
+| `GET /v1/sellers/:id/capabilities` | Can this seller be paid, and if not, every reason. Two lists, kept apart |
+| `POST /v1/sellers/:id/verify` | Record the attestation. **Refuses an API key** — it is a person's decision |
+| `GET /v1/sellers/:id/destinations` | §5.1's preferred destination and verified backup |
 | `GET /v1/balance` | held / pending clearance / available / paid out |
 | `POST /v1/webhooks-endpoints` | Client registers their endpoint for signed notifications |
 | `GET /v1/webhook-deliveries` | Every attempt, with status and signature — the answer to "did you tell us?" |
@@ -278,9 +307,15 @@ Auth: `X-Api-Key`, hashed at rest, rate-limited per key.
 | `POST /v1/payouts/:id/hold` | Stop one payout. Takes a reason. Person-only, audited against them |
 | `POST /v1/payouts/:id/approve-review` | Clear a hold, a rule's or a person's. Person-only, audited against them |
 | `GET /v1/risk-signals` | What the deterministic rules noticed |
+| `POST /v1/disputes` `GET /v1/disputes/:id` | §8's Resolution Center — open one, and read it with its offers, evidence and timeline |
+| `POST /v1/disputes/:id/offers` `/offers/:id/respond` `/withdraw` | Request an update, extension, cancellation or refund. The other party has 48 hours |
+| `POST /v1/disputes/:id/evidence` | Photos, documents, check-ins. A description and a reference — never the file |
+| `GET /v1/disputes/:id/export` | §8's communication export, for a chargeback response or a regulator |
+| `POST /v1/disputes/:id/resolve` | Decide it. **Refuses an API key**, and refuses anyone who acted for a party |
 | `POST /ai-dispute` `/ai-risk-narrator` `/ai-support` | Draft, brief, answer. Advisory; each writes a suggestion and nothing else |
 | `POST /ai-decisions` | A person approves or rejects a draft. The only path from model output to money |
-| `/webhooks/flutterwave/:tenant` `/webhooks/stripe/:tenant` | Inbound provider webhooks |
+| `GET /v1/launch` `POST /v1/launch/:code/sign-off` | §16's checklist, and what stands between us and live money. PayHold staff only; refuses an API key |
+| `/flutterwave-webhook/:tenant` `/stripe-webhook/:tenant` | Inbound provider webhooks. Signature checked against *that tenant's* own secret, then the transaction re-fetched |
 
 **Dashboard access is separate from all of that.** A company signs up, and its
 people sign in with an email and password held by Supabase Auth — not an API
@@ -290,7 +325,7 @@ session into a tenant and a role. Signing in itself never touches our code: the
 dashboard exchanges the password with Supabase Auth directly.
 
 The dashboard is behind that gate in full. The hosted buyer and seller pages
-(`/pay/:id`, `/status/:id`) are not, and must never be — someone opening a
+(`/pay/:token`, `/status/:id`) are not, and must never be — someone opening a
 payment link from an email has no PayHold account.
 
 **A client site must never hardcode a payment method.** Which wallets exist in
@@ -315,7 +350,11 @@ should treat an unverified route as "probably" rather than "yes".
 → `order.funded_held`, `deal.confirmed` → `order.delivered` / `order.accepted`,
 `deal.released` → `order.clearing_started` (plus a new `order.released` at the
 end of the window), `deal.refunded` → `refund.succeeded`, `deal.disputed` →
-`dispute.opened`, `deal.paid_out` → `payout.paid`. The object stays a `deal` in
+`dispute.opened`, `deal.paid_out` → `payout.paid`. §8 added
+`dispute.offer_made` / `offer_accepted` / `offer_declined` / `offer_withdrawn` /
+`offer_expired`, `dispute.evidence_added` and `dispute.resolved` — and
+`offer_expired` is deliberately not `offer_declined`, because a client
+reconciling its own records needs to tell an answer from a silence. The object stays a `deal` in
 our own code; only the wire moved (§29.2).
 
 One event per transition. There is no per-event subscription — every registered
@@ -418,6 +457,41 @@ longer reads them — `dispatchPayout` takes the beneficiary token from the
 destination the routing decision chose, because a seller now has more than one
 and only the decision knows which was picked.
 
+## Disputes: the Resolution Center (spec §8)
+
+Either party may request an **update, extension, cancellation, partial refund or
+full refund**. The other has 48 hours. Only one request may be open per order at
+a time, evidence and structured reason codes sit alongside, and the whole thing
+reads back as one ordered timeline.
+
+**Silence lapses a request. It never accepts one.** §8 allows an unanswered
+request to be auto-resolved by platform rule; the rule here is that the offer
+expires and the dispute stays open. The other reading would make a clock the
+thing that refunds a buyer or pays a seller, and invariant 9 and invariant 11
+both forbid a machine deciding. The 48-hour window still closes without a
+human — which is what §15 phase 4 asks — and nothing moves when it does.
+`expired` is a separate status from `declined`, because declining is an act and
+§24.3's labels cannot be backfilled.
+
+**A dispute freezes the payout whole; the disputed amount bounds the
+resolution.** §8 asks for the freeze to cover only the affected amount, and the
+ledger could — but one payout row exists per deal, so paying the undisputed
+share now leaves nothing to send the rest with if the dispute later goes the
+seller's way. So the amount is enforced where it can be enforced honestly:
+nothing may take more from the seller than was ever in dispute. Splitting a
+payout is a second payout row with its own idempotency key and its own line in
+reconciliation, and it is not built.
+
+**An administrator who acted for a side cannot decide.** Not "who is a party" —
+that cannot be asked, because PayHold stores no buyer PII and a seller has no
+login, so there is no identity to join to. What is recorded is who did what, so
+raising the dispute, making a request or answering one disqualifies you from
+being named its decider. `both-parties` is the reserved name for the two sides
+agreeing with each other, and it is the one actor allowed to have acted.
+
+A resolution **requires a decider**, the same way clearing a payout hold and
+verifying a seller do. A decision without a name is not a record.
+
 ## Fraud controls (spec §6)
 
 Four layers, and only one of them is allowed to stop anything:
@@ -488,6 +562,24 @@ failed, it has failed `payout_primary_attempts` times, the tenant has
 `payout_backup_enabled` on, and the backup is verified and out of its security
 hold. Using it emits `payout.route_changed`, once.
 
+**A refused payout is retried on a ladder, and then it stops** (§13). 1m, 5m,
+30m, 2h and capped — the same shape the webhook dispatcher uses, because two
+backoff curves in one system are two things to reason about during an incident
+for no gain. The clock is `payouts.next_attempt_at`, and **null means no machine
+may try this again**: when the budget (`payout_retry_max_attempts`) is spent the
+payout goes to `blocked` and the clock is cleared, which is how "then move to
+`payout_blocked` for operator action" is expressed without a second status
+meaning "blocked, but really blocked". §5.1's no-route `blocked` keeps its clock
+and is re-asked every pass, because that answer can change with nobody doing
+anything; a rail that refused us five times is not that.
+
+The automatic retry is also what makes the backup destination reachable without
+a person: the third condition above — a payout that has failed
+`payout_primary_attempts` times — is now something a cron pass arrives at on its
+own. A person pressing retry gets **one** more attempt rather than a fresh
+series, because the attempt counter is what the backup gate reads and zeroing it
+would send the next attempt back to the primary that has been failing.
+
 **Five rails are declared and disabled** — PayPal, Venmo, Cash App Pay, Alipay,
 WeChat Pay. They exist so a seller who picks one gets a specific sentence
 instead of "unknown destination type", and their rows carry no `provider`, which
@@ -524,6 +616,19 @@ providers about one number. Any drift **freezes that tenant's payouts**
 automatically. Nothing unfreezes automatically: the numbers agreeing again is
 not the same as someone having understood why they did not.
 
+**Every pass writes a `reconciliation_runs` row per tenant per rail** (§13).
+The alerts table says what is wrong now; it cannot say that we looked, and a
+nightly control nobody can prove ran is not a control. A run carries its window,
+what matched, what did not, what was skipped because a provider could not be
+reached, and `missing` — verified inbound events in the window our ledger never
+posted. A pass that dies leaves its run open, and the next one records it as
+`failed` rather than tidying it away.
+
+`resolve_reconciliation_run` is where a person signs a case off, and it is the
+one place a freeze is lifted: named, audited, refused while any case on that
+tenant is still open, and behind a separate argument, because writing down what
+happened and declaring the money accounted for are two different claims.
+
 Scheduled jobs authenticate on `CRON_SECRET`, not an API key. A deployment
 without that secret set refuses to run them.
 
@@ -539,6 +644,60 @@ token **must** return 401, and one carrying a session belonging to another
 company must return that company's nothing rather than this one's rows. RLS is
 only proven against the real project (PGlite shims `auth.uid()`), so this is
 where that check lives.
+
+V2 adds four paths: a partial refund at each of §7.1's four positions, a routing
+failure that falls back to a verified backup destination, a payout to an
+unverified seller that must be refused, and a country closed in data that
+disappears from checkout with no redeploy.
+
+The whole of it is written out in order in
+`payhold-backend/scripts/sandbox-walkthrough.md`, and each part names the
+`launch_checklist` item it signs off. It is not automated on purpose: half of it
+is watching what happens on a provider's own dashboard, and a script that could
+green-light itself is the thing the launch gate exists to prevent.
+
+## The launch gate (spec §16, §17)
+
+**PayHold cannot take live money yet, and that is enforced rather than
+remembered.** §16's checklist — legal entities, provider contracts, seller and
+buyer terms, a sanctions process, a chargeback process, an incident-response
+plan, and **written provider confirmation for marketplace payouts in each of
+Rwanda, the UAE, Mainland China and the United States** — is rows in
+`launch_checklist`, and `POST /v1/provider-accounts` refuses `mode: "live"`
+while any required item is outstanding. There is exactly one writer of
+`tenant_provider_accounts`, so one check is the whole gate.
+
+Most items are **attestations**: a person states that a thing was done, with
+their name and a pointer to the evidence, exactly like `verify_seller`. No code
+can check whether a lawyer incorporated a company. The rest are **engineering**
+items whose acceptance is code, and those whose code is missing carry
+`blocked_by` — which makes them unsignable by anybody, whatever their authority.
+Clearing one is a row changed by the phase that does the work.
+
+A sign-off is an **event**, and the state is the latest one. Withdrawing is a
+new row saying so rather than an update, for the reason a ledger correction is
+an opposite entry: "who said this was fine, and when did they stop saying it" is
+exactly the question asked after something goes wrong.
+
+`GET /v1/launch` reads the list and `POST /v1/launch/:code/sign-off` signs one.
+Both are **PayHold staff only** — `platform_admins`, a separate axis from tenant
+role — and refuse an API key outright. A tenant `owner` is the most senior
+person inside one company; whether PayHold may take live money is not their
+statement to make.
+
+**`rails_verified` is derived from this**, per market on the payout branch of
+`/v1/payment-options` and across all four elsewhere. A market with no
+confirmation item is unverified, which is the right answer for every country
+outside the four.
+
+§17's non-goals are **not** rows here — they are prohibitions rather than tasks,
+nothing about them gets signed, and each is refused by something structural: an
+unbuilt adapter that cannot be enabled, the eligibility gate, a not-null
+`tenant_id` on every credential and every ledger entry, and
+`paid_needs_a_provider_reference`, which makes "no manual mark-as-paid control
+**anywhere**" a constraint rather than a convention — a payout can only be
+marked paid by quoting the rail's own reference for the transfer.
+`payhold-backend/tests/launch-gate.test.ts` pins each one where it binds.
 
 ## Working agreements
 

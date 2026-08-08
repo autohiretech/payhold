@@ -191,8 +191,15 @@ export interface PaymentProvider {
    * Verify an inbound webhook's signature. Flutterwave sends `verif-hash`,
    * Stripe an HMAC over the raw body — hence both arguments, and hence the
    * RAW body: parsing before verifying is how signature checks get defeated.
+   *
+   * A promise is allowed because those two are different kinds of check.
+   * Flutterwave's is a shared secret compared verbatim and answers
+   * synchronously; Stripe's is an HMAC, and Web Crypto has no synchronous
+   * digest. Callers await either way, which costs a synchronous rail nothing
+   * and is the only shape that lets a real signature scheme sit behind this
+   * interface at all.
    */
-  verifySignature(rawBody: string, headers: Headers): boolean
+  verifySignature(rawBody: string, headers: Headers): boolean | Promise<boolean>
 }
 
 // ---------------------------------------------------------------------------

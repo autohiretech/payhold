@@ -26,7 +26,23 @@ import type { Country, Currency } from '@/lib/countries'
 /** ISO-8601 timestamp. */
 export type Timestamp = string
 
-export type Provider = 'flutterwave' | 'stripe' | 'fake'
+/**
+ * §9's adapters. The first three are built; the last three are **declared and
+ * unbuilt** (§29.3), so they can be named, refused with a reason and carry a
+ * capability row — `loadProvider` throws for them rather than falling back to
+ * the fake.
+ *
+ * Distinct from `PayoutProvider`, which names a **rail** — the shape of
+ * destination a token was minted for. One adapter carries several: Venmo
+ * destinations are reached through PayPal's API.
+ */
+export type Provider =
+  | 'flutterwave'
+  | 'stripe'
+  | 'fake'
+  | 'paypal'
+  | 'cash_app_pay'
+  | 'china_wallet_partner'
 
 /**
  * How the buyer pays, at the level the rail cares about.
@@ -194,10 +210,12 @@ export interface Deal {
  * The rail a destination is tokenized against, which is provider and method
  * together — a MoMo token means nothing to a bank transfer.
  *
- * The last five are **declared and disabled** (spec §29.3): their
- * `payout_routes` rows carry no provider, and the `route_needs_an_adapter`
- * check makes such a row impossible to enable. They exist so a seller who picks
- * one is told why it will not work rather than told nothing.
+ * The last five are **declared and disabled** (spec §29.3). Their routes name
+ * an adapter that is not built — `paypal` carries Venmo too,
+ * `china_wallet_partner` carries both Chinese wallets — and a trigger refuses
+ * to enable a route whose adapter is not live in `provider_capabilities`. They
+ * exist so a seller who picks one is told why it will not work rather than
+ * told nothing.
  */
 export type PayoutProvider =
   | 'flutterwave_momo'
@@ -307,6 +325,15 @@ export interface Payout {
    */
   failure_reason: string | null
   attempts: number
+  /**
+   * When a machine may next attempt this payout — §13's capped backoff, on the
+   * same 1m / 5m / 30m / 2h ladder the webhook dispatcher uses.
+   *
+   * **Null means never**: the retry budget is spent and only a person can send
+   * it again. That is how "then move to blocked for operator action" is said
+   * without a second status meaning "blocked, but really blocked".
+   */
+  next_attempt_at: Timestamp | null
   /** The provider's transfer reference, set once it has one. */
   provider_ref?: string | null
   /** §5.1: which destination this payout actually went to. */
@@ -324,6 +351,78 @@ export interface Payout {
   /** Who let it through. Either kind of hold, only ever a person. */
   review_approved_by: string | null
   review_approved_at: Timestamp | null
+}
+
+// ---------------------------------------------------------------------------
+// Hosted checkout — §10.1
+// ---------------------------------------------------------------------------
+
+/**
+ * A scoped, expiring credential for one payment on one deal.
+ *
+ * It exists so a buyer can choose a payment method **without holding an API
+ * key** and without the client's server proxying the choice — and without
+ * anyone inventing a general end-user auth scheme to get there.
+ *
+ * `expired` is absent from the stored status and derived from `expires_at`,
+ * the same way §5.1's `clearing` and `available` come from the deal's window: a
+ * stored value would need a writer, and the writer would be a sweep that had
+ * not run yet.
+ */
+export type CheckoutSessionStatus = 'open' | 'completed' | 'canceled'
+
+/** What a reader sees, with expiry worked out. */
+export type CheckoutSessionState = CheckoutSessionStatus | 'expired'
+
+export interface CheckoutSession {
+  id: string
+  tenant_id: string
+  deal_id: string
+  /**
+   * The bearer token in the hosted page's URL. 256 bits, expiring, and
+   * authorising exactly one action — pay this one deal.
+   */
+  token: string
+  status: CheckoutSessionStatus
+  /** Held on the session so a tampered return_url cannot be injected later. */
+  return_url: string | null
+  /** What the buyer chose. Null until they choose. */
+  method: PaymentMethod | null
+  network: string | null
+  provider: Provider | null
+  provider_ref: string | null
+  payment_link: string | null
+  expires_at: Timestamp
+  completed_at: Timestamp | null
+  created_at: Timestamp
+}
+
+/**
+ * What a stranger holding a payment link is allowed to see.
+ *
+ * Curated by hand rather than by spreading the deal, and that is the point:
+ * whoever opens this is unauthenticated, so `buyer_ref`, the fee breakdown, the
+ * tenant's other business and the seller's payout details are absent because
+ * they were never added — not because something stripped them.
+ */
+export interface PublicCheckout {
+  status: CheckoutSessionState
+  expires_at: Timestamp
+  deal: {
+    id: string
+    description: string
+    amount: Money
+    currency: Currency
+    status: DealStatus
+  }
+  seller: { name: string | null }
+  /** Only rails that are open in this market and live right now — §29.11. */
+  methods: {
+    method: PaymentMethod
+    label: string
+    provider: Provider
+    networks: string[]
+  }[]
 }
 
 // ---------------------------------------------------------------------------
@@ -349,8 +448,12 @@ export interface PayoutRoute {
   id: string
   tenant_id: string | null
   payout_provider: PayoutProvider
-  /** Null means declared and unbuilt, and therefore impossible to enable. */
-  provider: Provider | null
+  /**
+   * The adapter that talks to this rail's API. One adapter carries several
+   * rails. Whether it is *built* is `ProviderCapability.implemented`, not a
+   * null here — and a route cannot be enabled while it is not.
+   */
+  provider: Provider
   method: PayoutMethod
   countries: Country[]
   currencies: Currency[]
@@ -373,6 +476,11 @@ export interface PayoutRoute {
  */
 export type RouteReasonCode =
   | 'routed'
+  /** §12: we have closed this market. Ahead of every rail reason. */
+  | 'market_closed'
+  /** §9: the adapter is unbuilt, or switched off. */
+  | 'provider_unavailable'
+  /** This corridor was switched off, on a rail that is otherwise live. */
   | 'provider_disabled'
   | 'route_suspended'
   | 'route_under_review'
@@ -429,6 +537,122 @@ export interface PayoutDecision {
 }
 
 /**
+ * §9: "each adapter declares its capabilities rather than letting the UI
+ * guess." This is the row behind that — the database half of the backend's
+ * `ProviderCapabilities`, and the two must agree.
+ *
+ * `implemented` and `enabled` are separate because they fail differently: an
+ * unbuilt adapter is a roadmap item, a disabled one is an outage or a
+ * commercial decision, and an operator needs to tell those apart at 3am.
+ */
+export interface ProviderCapability {
+  provider: Provider
+  implemented: boolean
+  enabled: boolean
+  supports_capture: boolean
+  supports_partial_refund: boolean
+  supports_marketplace_payout: boolean
+  supports_seller_onboarding: boolean
+  supports_dispute: boolean
+  supports_local_currency: boolean
+  supports_mobile_money: boolean
+  supports_async_refund: boolean
+  /** Why it is off, or what is missing. For an operator, never for a buyer. */
+  note: string | null
+}
+
+/**
+ * §12's country switch: a market closed without a redeploy.
+ *
+ * An **overlay**, not a copy of the registry. A country with no row behaves as
+ * `lib/countries.ts` says — collectable unless sanctioned, payable if a route
+ * reaches it. A row is a deliberate departure, and carries the reason, because
+ * "why can nobody in Kenya pay us" is asked three months after whoever switched
+ * it off has forgotten.
+ */
+export interface MarketClosure {
+  id: string
+  /** Null is the platform default; a tenant row replaces it. */
+  tenant_id: string | null
+  country: Country
+  collect: boolean
+  payout: boolean
+  reason: string
+  created_at: Timestamp
+}
+
+/**
+ * §16's launch checklist — what must be true before PayHold takes live money.
+ *
+ * Two kinds of item, and only one of them is a signature. Most are
+ * **attestations**: a person states that a thing was done, with their name and
+ * a pointer to the evidence, because no code can check whether a lawyer
+ * incorporated a company. The `engineering` ones have acceptance in code, and
+ * those that are not built yet carry `blocked_by` — which makes them
+ * unsignable, by anybody, until the work lands.
+ */
+export type LaunchItemKind = 'legal' | 'provider' | 'operational' | 'engineering'
+
+/** The item itself — `launch_checklist`, seeded by migration and changed by one. */
+export interface LaunchChecklistItem {
+  /** Stable and referenced by the endpoint. Not a uuid. */
+  code: string
+  title: string
+  /** What signing this actually claims. */
+  detail: string
+  kind: LaunchItemKind
+  /** Set on §16's four per-market payout confirmations; null on the rest. */
+  market: Country | null
+  /** Does the gate wait for it? */
+  required: boolean
+  /** The unbuilt work in the way, or null. Blocked items cannot be signed. */
+  blocked_by: string | null
+}
+
+/**
+ * The item with its current state — `launch_status()`.
+ *
+ * Separate from the row for the reason the SQL keeps them separate: the state
+ * is the latest sign-off, derived, and a stored flag would need a writer that
+ * is already writing the event.
+ */
+export interface LaunchItem extends LaunchChecklistItem {
+  signed: boolean
+  signed_by: string | null
+  signed_at: Timestamp | null
+  evidence: string | null
+}
+
+/**
+ * The checklist, plus the gate derived from it.
+ *
+ * `live_mode_allowed` is not a stored flag: it is "no required item is
+ * outstanding", answered off the same rows the caller is looking at. Two round
+ * trips that could disagree would be two answers to one question.
+ */
+export interface LaunchChecklist {
+  live_mode_allowed: boolean
+  outstanding: number
+  /** Of those, how many nobody *can* sign yet. */
+  blocked: number
+  items: LaunchItem[]
+}
+
+/**
+ * One statement, appended. Withdrawing a sign-off is a new row saying so, never
+ * an edit — "who said this was fine, and when did they stop saying it" is
+ * exactly the question asked after something goes wrong.
+ */
+export interface LaunchSignOff {
+  id: string
+  code: string
+  signed: boolean
+  actor: string
+  evidence: string
+  created_at: Timestamp
+}
+
+/**
  * §5.1: a seller has a preferred destination and may have a verified backup,
  * which one pair of columns on `sellers` could not express.
  *
@@ -453,6 +677,27 @@ export interface SellerDestination {
   /** §5.1's change protection: a newly added destination waits. */
   security_hold_until: Timestamp | null
   created_at: Timestamp
+}
+
+/**
+ * §10.1's `GET /v1/sellers/:id/capabilities` — can this seller be paid, and if
+ * not, what is missing. The same questions the eligibility gate asks, asked
+ * ahead of time, so a seller fixes it during onboarding rather than discovering
+ * it as a held payout three weeks later.
+ *
+ * **The two lists stay separate because the answers do.** `reasons` is what the
+ * seller has to go and do, and every one of them holds a payout.
+ * `route_reasons` is what PayHold cannot yet reach, and none of them do: a
+ * routing failure in the first list would make an unroutable payout
+ * `needs_verification`, hide it from the routing engine, and tell a verified
+ * seller to verify themselves again.
+ */
+export interface SellerCapabilities {
+  seller_id: string
+  can_receive_payouts: boolean
+  kyc_status: KycStatus
+  reasons: string[]
+  route_reasons: string[]
 }
 
 // ---------------------------------------------------------------------------
@@ -685,12 +930,57 @@ export interface Refund {
   settled_at: Timestamp | null
 }
 
+/**
+ * §8's structured reason codes. The free-text `reason` stays alongside rather
+ * than being replaced: a code is what a query groups by, a sentence is what a
+ * person needs to read.
+ */
+export type DisputeReasonCode =
+  | 'not_delivered'
+  | 'not_as_described'
+  | 'damaged'
+  | 'late_delivery'
+  | 'quality'
+  | 'incomplete'
+  | 'unauthorized_charge'
+  | 'duplicate_charge'
+  | 'cancellation_requested'
+  | 'other'
+
+/** §8's five requests. Only the last three can move money. */
+export type DisputeOfferKind =
+  | 'update'
+  | 'extension'
+  | 'cancellation'
+  | 'partial_refund'
+  | 'full_refund'
+
+/**
+ * `expired` is not `declined`, and the difference is who ended it. Declining is
+ * an act — somebody read it and said no. Expiring is silence, and §24.3's
+ * labels cannot be backfilled, so collapsing the two loses it permanently.
+ */
+export type DisputeOfferStatus =
+  | 'open'
+  | 'accepted'
+  | 'declined'
+  | 'withdrawn'
+  | 'expired'
+
 export interface Dispute {
   id: string
   tenant_id: string
   deal_id: string
   raised_by: ConfirmSide
+  raised_by_actor: string | null
   reason: string
+  reason_code: DisputeReasonCode
+  /**
+   * Presentment minor units, or null for the whole payment. It is a ceiling on
+   * the resolution: only this much may be taken from the seller, so a complaint
+   * about a third cannot quietly become a full refund.
+   */
+  disputed_amount: Money | null
   /** The other side's account, once they give one. Null while they are silent. */
   counter_statement: string | null
   /**
@@ -703,16 +993,59 @@ export interface Dispute {
   opened_at: Timestamp
   resolved_at: Timestamp | null
   resolution_note: string | null
+  /** §8's final decision record. `both-parties` when the two sides agreed. */
+  decided_by: string | null
 }
 
 export interface DisputeEvidence {
   side: ConfirmSide
-  kind: 'photo' | 'document'
+  kind: 'photo' | 'inspection_photo' | 'document' | 'message' | 'checkin' | 'other'
   /** What it shows. This, not the image, is what the assistant is given. */
   description: string
   /** Where the client site serves it. Null when they sent only a description. */
   url: string | null
+  /**
+   * When the photo was taken, as distinct from when it was uploaded. An
+   * inspection photo from handover is worth more than one from after the
+   * complaint, and only this field can tell them apart.
+   */
+  captured_at: Timestamp | null
   submitted_at: Timestamp
+}
+
+/**
+ * A request from one party to the other. §8 gives the other side 48 hours;
+ * silence **lapses** it and never accepts it, because a clock that refunded a
+ * buyer or paid a seller would be a machine deciding.
+ */
+export interface DisputeOffer {
+  id: string
+  tenant_id: string
+  dispute_id: string
+  deal_id: string
+  offered_by: ConfirmSide
+  offered_by_actor: string
+  kind: DisputeOfferKind
+  /** Presentment minor units. Only ever set for `partial_refund`. */
+  amount: Money | null
+  /** Only for `extension`: the new date being asked for. */
+  extend_to: Timestamp | null
+  note: string | null
+  status: DisputeOfferStatus
+  expires_at: Timestamp
+  created_at: Timestamp
+  responded_at: Timestamp | null
+  responded_by_actor: string | null
+}
+
+/** One ordered list of everything that happened — §8's timeline view. */
+export interface DisputeTimelineEvent {
+  at: Timestamp
+  kind: string
+  actor: string
+  side: ConfirmSide | null
+  summary: string
+  details: Record<string, unknown>
 }
 
 // ---------------------------------------------------------------------------
@@ -779,6 +1112,12 @@ export interface TenantSettings {
   payout_backup_enabled?: boolean
   /** How many refusals from the primary before the backup is considered. */
   payout_primary_attempts?: number
+  /**
+   * §13. How many attempts a payout gets before it stops being retried by
+   * anything automatic and waits for a person. Default 5, floor 1 — a budget of
+   * zero would block every payout on the first transient error a rail has.
+   */
+  payout_retry_max_attempts?: number
 }
 
 /**
@@ -864,6 +1203,15 @@ export interface WebhookEndpoint {
 export const WEBHOOK_EVENTS = [
   'order.payment_pending',
   'payment.failed',
+  /**
+   * §10.1: the buyer finished the hosted flow and was handed to the provider.
+   *
+   * **Not** the funding event, deliberately. This says the buyer is done with
+   * our page; `order.funded_held` says money arrived, after a provider webhook
+   * verified its signature and re-fetched the transaction. A client that
+   * conflated them would ship goods against a card that has not settled.
+   */
+  'checkout.completed',
   'order.funded_held',
   /** The seller says the work is done — V1's `deal.confirmed` with side=seller. */
   'order.delivered',
@@ -877,6 +1225,19 @@ export const WEBHOOK_EVENTS = [
   'order.expired',
   'refund.succeeded',
   'dispute.opened',
+  /**
+   * §8's Resolution Center. One event per thing that happened to a request, and
+   * `expired` is deliberately separate from `declined`: declining is an act,
+   * expiring is silence, and a client reconciling its own records needs to be
+   * able to tell which.
+   */
+  'dispute.offer_made',
+  'dispute.offer_accepted',
+  'dispute.offer_declined',
+  'dispute.offer_withdrawn',
+  'dispute.offer_expired',
+  'dispute.evidence_added',
+  'dispute.resolved',
   'deal.dispute_resolved',
   'payout.pending',
   'payout.paid',
@@ -1059,6 +1420,11 @@ export type DealOutcomeLabel =
   | 'refunded'
   | 'dispute_released'
   | 'dispute_refunded'
+  /**
+   * §7.1's split, kept apart from `dispute_refunded` so §24.4 does not learn
+   * that the buyer won outright when in fact both sides got part of it.
+   */
+  | 'dispute_split'
 
 export interface DealOutcome {
   id: string
@@ -1113,6 +1479,58 @@ export interface ReconciliationAlert {
   last_seen_at: Timestamp
   resolved_at: Timestamp | null
   resolution_note: string | null
+  /** Which pass first raised this case. Null on alerts predating §13's runs. */
+  run_id: string | null
+}
+
+/** Where a finished pass left things. */
+export type ReconciliationResolution =
+  /** Every rail on this provider agreed, and nothing is outstanding. */
+  | 'clean'
+  /**
+   * Nothing disagreed and nothing was proven either — a rail could not be
+   * reached. Folding this into `clean` would let a week of provider outages
+   * read as a week of clean books.
+   */
+  | 'incomplete'
+  | 'cases_open'
+  /** A named person has explained it. Only a person can put this here. */
+  | 'resolved'
+
+/**
+ * One reconciliation pass over one tenant's one rail — spec §13.
+ *
+ * The alerts above say what is wrong now; a run says we looked. "Did last
+ * night's pass check Stripe" is not a question a table of open alerts can
+ * answer, and a nightly control nobody can prove ran is not a control.
+ */
+export interface ReconciliationRun {
+  id: string
+  tenant_id: string
+  provider: Provider
+  /** `missing` is counted over this window; the balances are read at its end. */
+  period_start: Timestamp
+  period_end: Timestamp
+  started_at: Timestamp
+  finished_at: Timestamp | null
+  /** Currency comparisons made on this rail. */
+  rails_checked: number
+  matched: number
+  mismatched: number
+  /** Currencies with no external figure — an unreachable or demo provider. */
+  skipped: number
+  /**
+   * Verified inbound events in the window that never finished processing: what
+   * the provider told us and the ledger has not posted.
+   */
+  missing: number
+  status: 'running' | 'completed' | 'failed'
+  resolution: ReconciliationResolution | null
+  resolved_by: string | null
+  resolved_at: Timestamp | null
+  resolution_note: string | null
+  /** Why the pass did not finish, when it did not. */
+  error: string | null
 }
 
 // ---------------------------------------------------------------------------

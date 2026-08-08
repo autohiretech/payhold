@@ -1,0 +1,366 @@
+/**
+ * Hosted checkout sessions — spec §10.1.
+ *
+ *   POST /checkout/sessions               create (or return) a deal's live session
+ *   GET  /checkout/sessions/:id           its status, for the client's server
+ *   POST /checkout/sessions/:id/cancel    withdraw the link
+ *
+ *   GET  /checkout/public/:token          what the buyer sees. No credential
+ *   POST /checkout/public/:token/pay      the buyer chooses and is handed over
+ *
+ * **The two halves are separated by an explicit path segment**, not by a plural
+ * or a header. `public` is there so nobody reviewing a change has to work out
+ * which routes are unauthenticated — the ones that are say so in the URL.
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * §15 phase 2: *"test payments cannot be marked successful without verified
+ * provider events."* Nothing in this file can fund a deal. The furthest a
+ * session goes is `payment_pending`, which means a charge is with a rail; the
+ * hold is written by `flutterwave-webhook` / `stripe-webhook` after they check
+ * a signature **and** re-fetch the transaction. A session is a way for a buyer
+ * to choose a payment method without holding an API key, and it is nothing else.
+ * ─────────────────────────────────────────────────────────────────────────────
+ *
+ * The public routes are the second thing in this system with no caller to
+ * authenticate (provider webhooks are the first). What stands in for a
+ * credential is the session token: 256 bits, expiring, and scoped to one
+ * payment on one deal. It is no broader than the deal id that already opens
+ * today's `/pay/:id` page, and considerably harder to guess.
+ */
+
+import type { SupabaseClient } from 'npm:@supabase/supabase-js@2'
+import { resolveCaller, serviceClient, type Caller } from '../_shared/auth.ts'
+import { availableMethods, startCharge } from '../_shared/checkout.ts'
+import { handler, json, readJson, required } from '../_shared/http.ts'
+import { normaliseIp, payContext, recordContext } from '../_shared/request-context.ts'
+import { loadSettings } from '../_shared/settings.ts'
+import { PayHoldError, type Deal, type PaymentMethod } from '../_shared/types.ts'
+
+interface CheckoutSession {
+  id: string
+  tenant_id: string
+  deal_id: string
+  token: string
+  status: 'open' | 'completed' | 'canceled'
+  return_url: string | null
+  method: PaymentMethod | null
+  network: string | null
+  provider: string | null
+  provider_ref: string | null
+  payment_link: string | null
+  expires_at: string
+  completed_at: string | null
+  created_at: string
+}
+
+function hostedUrl(token: string): string {
+  const base = Deno.env.get('PUBLIC_URL') ?? 'https://app.payhold.local'
+  return `${base}/checkout/${token}`
+}
+
+/** `open | completed | canceled | expired`, with expiry derived, never stored. */
+function state(session: CheckoutSession): string {
+  if (session.status === 'open' && new Date(session.expires_at) <= new Date()) {
+    return 'expired'
+  }
+  return session.status
+}
+
+/** What the client's own server is told. Includes the token — it is theirs. */
+function clientView(session: CheckoutSession): Record<string, unknown> {
+  return {
+    id: session.id,
+    deal_id: session.deal_id,
+    status: state(session),
+    url: hostedUrl(session.token),
+    return_url: session.return_url,
+    method: session.method,
+    network: session.network,
+    provider: session.provider,
+    expires_at: session.expires_at,
+    completed_at: session.completed_at,
+    created_at: session.created_at,
+  }
+}
+
+// ---------------------------------------------------------------------------
+// The client's server
+// ---------------------------------------------------------------------------
+
+async function create(
+  req: Request,
+  db: SupabaseClient,
+  caller: Caller,
+): Promise<Response> {
+  const body = await readJson<{
+    deal_id: string
+    /** How long the link lives. Defaults to the tenant's setting. */
+    hours?: number
+    return_url?: string
+  }>(req)
+  required(body as unknown as Record<string, unknown>, 'deal_id')
+
+  // Tenant-scoped first: another tenant's deal is a 404 here, never an error
+  // out of the SQL function, and never a 403 — §4.
+  const { data: deal } = await db
+    .from('deals')
+    .select('id')
+    .eq('id', body.deal_id)
+    .eq('tenant_id', caller.tenant_id)
+    .maybeSingle()
+
+  if (!deal) throw new PayHoldError('not_found', `Deal ${body.deal_id} not found`)
+
+  const settings = await loadSettings(db, caller.tenant_id)
+
+  const { data, error } = await db.rpc('open_checkout_session', {
+    p_deal: body.deal_id,
+    p_hours: body.hours ?? settings.checkout_session_hours,
+    p_return_url: body.return_url ?? null,
+  })
+
+  if (error) throw rpcError(error, 'open a checkout session')
+
+  return json(req, clientView(data as unknown as CheckoutSession), 201)
+}
+
+async function show(
+  req: Request,
+  db: SupabaseClient,
+  caller: Caller,
+  id: string,
+): Promise<Response> {
+  const { data } = await db
+    .from('checkout_sessions')
+    .select('*')
+    .eq('id', id)
+    .eq('tenant_id', caller.tenant_id)
+    .maybeSingle()
+
+  if (!data) throw new PayHoldError('not_found', `Checkout session ${id} not found`)
+
+  return json(req, clientView(data as unknown as CheckoutSession))
+}
+
+async function cancel(
+  req: Request,
+  db: SupabaseClient,
+  caller: Caller,
+  id: string,
+): Promise<Response> {
+  const { data: session } = await db
+    .from('checkout_sessions')
+    .select('id')
+    .eq('id', id)
+    .eq('tenant_id', caller.tenant_id)
+    .maybeSingle()
+
+  if (!session) {
+    throw new PayHoldError('not_found', `Checkout session ${id} not found`)
+  }
+
+  const { data, error } = await db.rpc('cancel_checkout_session', {
+    p_session: id,
+    p_actor: caller.actor,
+  })
+
+  if (error) throw rpcError(error, 'cancel this checkout session')
+
+  return json(req, clientView(data as unknown as CheckoutSession))
+}
+
+// ---------------------------------------------------------------------------
+// The buyer
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolve a token to its session, refusing anything not live.
+ *
+ * The refusal is the same for a token that never existed, one that expired and
+ * one that was withdrawn. A buyer needs to know it will not work; distinguishing
+ * the three would let somebody probe for real tokens.
+ */
+async function bySession(
+  db: SupabaseClient,
+  token: string,
+): Promise<{ session: CheckoutSession; deal: Deal }> {
+  if (!token || token.length < 20) {
+    throw new PayHoldError('not_found', 'This payment link is not valid')
+  }
+
+  const { data } = await db
+    .from('checkout_sessions')
+    .select('*')
+    .eq('token', token)
+    .maybeSingle()
+
+  const session = data as unknown as CheckoutSession | null
+
+  if (!session || state(session) !== 'open') {
+    throw new PayHoldError(
+      'not_found',
+      'This payment link has expired or has already been used',
+    )
+  }
+
+  const { data: deal } = await db
+    .from('deals')
+    .select('id, tenant_id, description, presentment_amount, presentment_currency, ' +
+      'buyer_country, status, seller_id')
+    .eq('id', session.deal_id)
+    .maybeSingle()
+
+  if (!deal) throw new PayHoldError('not_found', 'This payment link is not valid')
+
+  return { session, deal: deal as unknown as Deal }
+}
+
+/**
+ * What a stranger holding the link is allowed to see.
+ *
+ * Curated by hand rather than by spreading the deal row, and that is the point:
+ * whoever opens this is unauthenticated, so `buyer_ref`, the fee breakdown, the
+ * tenant's other business and the seller's payout details are all absent
+ * because they were never added, not because something stripped them.
+ */
+async function publicView(
+  req: Request,
+  db: SupabaseClient,
+  token: string,
+): Promise<Response> {
+  const { session, deal } = await bySession(db, token)
+
+  const { data: seller } = await db
+    .from('sellers')
+    .select('name')
+    .eq('id', deal.seller_id)
+    .maybeSingle()
+
+  return json(req, {
+    status: state(session),
+    expires_at: session.expires_at,
+    deal: {
+      id: deal.id,
+      description: deal.description,
+      amount: deal.presentment_amount,
+      currency: deal.presentment_currency,
+      status: deal.status,
+    },
+    seller: { name: seller?.name ?? null },
+    methods: await availableMethods(db, deal.tenant_id, deal),
+  })
+}
+
+/**
+ * The buyer chooses, and we hand them to the provider.
+ *
+ * The provider call happens before any state write, for the reason `/pay` does
+ * the same: a charge that threw never started, and a deal left in
+ * `payment_pending` by a rail that refused it would be unretryable.
+ */
+async function payPublic(
+  req: Request,
+  db: SupabaseClient,
+  token: string,
+): Promise<Response> {
+  const body = await readJson<{
+    method: PaymentMethod
+    network?: string
+    buyer_ip?: string
+  }>(req)
+  required(body as unknown as Record<string, unknown>, 'method')
+
+  const { session, deal } = await bySession(db, token)
+
+  const charge = await startCharge(db, deal.tenant_id, deal, {
+    method: body.method,
+    network: body.network,
+    returnUrl: session.return_url,
+  })
+
+  const { data, error } = await db.rpc('complete_checkout_session', {
+    p_session: session.id,
+    p_method: body.method,
+    p_network: body.network ?? null,
+    p_provider: charge.rail,
+    p_provider_ref: charge.provider_ref,
+    p_payment_link: charge.payment_link,
+  })
+
+  if (error) throw rpcError(error, 'complete this checkout')
+
+  // §6's request context. This request came from the buyer's own browser, so
+  // the address is ours to observe rather than something a client told us —
+  // `hosted_page`, which is the middle of the three provenances and the reason
+  // they are kept apart.
+  const context = payContext(req, body)
+
+  await recordContext(db, {
+    deal_id: deal.id,
+    source: 'hosted_page',
+    event: 'pay_started',
+    ip: context.observed ?? normaliseIp(''),
+    ip_country: null,
+    user_agent: context.userAgent,
+  })
+
+  const completed = data as unknown as CheckoutSession
+
+  return json(req, {
+    status: state(completed),
+    // Where to send the buyer next. The only field the page actually acts on.
+    payment_link: completed.payment_link,
+  })
+}
+
+/** The same mechanical mapping the other functions use on a SQL failure. */
+function rpcError(error: { message: string }, what: string): PayHoldError {
+  const message = error.message
+
+  for (
+    const code of
+      ['not_found', 'invalid_state', 'policy_violation', 'insufficient_balance'] as const
+  ) {
+    if (message.startsWith(code)) {
+      return new PayHoldError(code, message.slice(code.length + 2).trim())
+    }
+  }
+
+  console.error(`unmapped ${what} failure`, { message })
+  return new PayHoldError('policy_violation', `Could not ${what}`)
+}
+
+Deno.serve(handler(async (req) => {
+  const db = serviceClient()
+
+  const segments = new URL(req.url).pathname.split('/').filter(Boolean)
+  const base = segments.indexOf('checkout')
+  const scope = segments[base + 1]
+  const key = segments[base + 2]
+  const action = segments[base + 3]
+
+  // --- the buyer, holding only a token -------------------------------------
+  if (scope === 'public') {
+    if (!key) throw new PayHoldError('not_found', 'This payment link is not valid')
+
+    if (req.method === 'GET' && !action) return await publicView(req, db, key)
+    if (req.method === 'POST' && action === 'pay') return await payPublic(req, db, key)
+
+    throw new PayHoldError('not_found', `No such action "${action ?? ''}"`)
+  }
+
+  if (scope !== 'sessions') {
+    throw new PayHoldError('not_found', `No such route "${scope ?? ''}"`)
+  }
+
+  // --- the client's server, holding a key ----------------------------------
+  const caller = await resolveCaller(db, req)
+
+  if (req.method === 'POST' && !key) return await create(req, db, caller)
+  if (req.method === 'GET' && key && !action) return await show(req, db, caller, key)
+  if (req.method === 'POST' && key && action === 'cancel') {
+    return await cancel(req, db, caller, key)
+  }
+
+  throw new PayHoldError('policy_violation', `${req.method} is not supported here`)
+}))

@@ -140,8 +140,13 @@ interface Decision {
 }
 
 async function route(payout: string): Promise<Decision> {
+  // `select * from fn(...)`, never `select (fn(...)).*`. The second form
+  // re-evaluates the function **once per output column** — fifteen calls
+  // wearing the shape of one. `route_payout` de-duplicates its decision rows so
+  // the assertions still held, which is exactly why this was worth finding: the
+  // test looked like it was exercising one call and was not.
   const { rows: [r] } = await h.db.query<Decision>(
-    `select (route_payout($1)).*`, [payout],
+    `select * from route_payout($1)`, [payout],
   )
   return r
 }

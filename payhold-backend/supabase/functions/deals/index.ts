@@ -27,13 +27,13 @@ import { serviceClient } from '../_shared/auth.ts'
 import { releaseFigures } from '../_shared/figures.ts'
 import { convertOrThrow, presentmentCurrencyFor } from '../_shared/fx.ts'
 import { handler, json, readJson, required } from '../_shared/http.ts'
+import { startCharge } from '../_shared/checkout.ts'
 import { loadProvider } from '../_shared/load-provider.ts'
 import { payContext, recordContext } from '../_shared/request-context.ts'
 import {
   countryInfo,
   currenciesFor,
   defaultProviderFor,
-  providerFor,
   SUPPORTED_CURRENCIES,
 } from '../_shared/rails.ts'
 import { feeFor, loadSettings } from '../_shared/settings.ts'
@@ -308,31 +308,16 @@ async function pay(
     )
   }
 
-  const rail = providerFor(deal.buyer_country, deal.presentment_currency, body.method)
-  if (!rail) {
-    throw new PayHoldError(
-      'policy_violation',
-      `${body.method} is not available for ${deal.presentment_currency} in ` +
-        `${countryInfo(deal.buyer_country).name}`,
-    )
-  }
-
-  const { provider } = await loadProvider(db, caller.tenant_id, rail)
-  const publicUrl = Deno.env.get('PUBLIC_URL') ?? 'https://app.payhold.local'
-
-  const charge = await provider.charge({
-    // Our deal id goes across as their reference, which is what lets the
-    // webhook find its way back to the right deal.
-    deal_id: deal.id,
-    amount: deal.presentment_amount,
-    currency: deal.presentment_currency,
+  // The one implementation, shared with the hosted checkout route so a buyer
+  // choosing on our page and a client choosing on their server cannot diverge
+  // — the argument `_shared/dispatch.ts` makes about payouts. It re-checks the
+  // method against the live capability matrix, so a rail we have switched off
+  // cannot be started from either entrance.
+  const charge = await startCharge(db, caller.tenant_id, deal, {
     method: body.method,
     network: body.network,
-    return_url: `${publicUrl}/deals/${deal.id}`,
-    // Spec §6: requested on every card charge, never silently downgraded.
-    three_d_secure: body.method === 'card',
-    idempotency_key: `charge:${deal.id}`,
   })
+  const rail = charge.rail
 
   // The rail is recorded now so the dashboard shows where the payment went
   // even while it is still pending. The reference and the hold wait for the

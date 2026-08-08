@@ -156,6 +156,60 @@ export async function resolveCaller(
 }
 
 /**
+ * Resolve a member of PayHold staff — §16's launch checklist, and nothing else
+ * so far.
+ *
+ * A third caller kind, and deliberately not a variation on the other two. A
+ * tenant `owner` is the most senior person *inside one company*; signing off
+ * that PayHold may take live money is not their statement to make, and
+ * `platform_admins` is the separate axis the RLS layer already draws for
+ * exactly that reason.
+ *
+ * It refuses an API key outright rather than falling through, on the same
+ * ground as `/sellers/:id/verify` and `/payouts/:id/approve-review`: a key is a
+ * server credential, and a compliance attestation is a person's.
+ */
+export async function platformAdminFromJwt(
+  db: SupabaseClient,
+  req: Request,
+): Promise<{ actor: string; auth_user_id: string }> {
+  if (req.headers.get('x-api-key')) {
+    throw new PayHoldError(
+      'unauthorized',
+      'This action needs a signed-in PayHold administrator, not an API key',
+    )
+  }
+
+  const header = req.headers.get('authorization')
+  if (!header?.startsWith('Bearer ')) {
+    throw new PayHoldError('unauthorized', 'Missing bearer token')
+  }
+
+  const { data, error } = await db.auth.getUser(header.slice('Bearer '.length))
+  if (error || !data.user) {
+    throw new PayHoldError('unauthorized', 'Invalid or expired session')
+  }
+
+  const { data: admin } = await db
+    .from('platform_admins')
+    .select('auth_user_id')
+    .eq('auth_user_id', data.user.id)
+    .maybeSingle()
+
+  // Same refusal whether they are a tenant user or nobody at all. Confirming
+  // that the endpoint exists and they are merely not senior enough tells a
+  // caller where to point the next attempt.
+  if (!admin) {
+    throw new PayHoldError('not_found', 'No such resource')
+  }
+
+  return {
+    actor: `admin:${data.user.email ?? data.user.id}`,
+    auth_user_id: data.user.id,
+  }
+}
+
+/**
  * Reject a caller who may read but not act.
  *
  * Connecting provider credentials and moving money are owner-level actions;

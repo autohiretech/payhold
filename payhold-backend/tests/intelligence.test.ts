@@ -255,7 +255,7 @@ describe('approving a dispute draft', () => {
     const id = await draft(s, { kind: 'dispute_resolution', recommendation: 'release' })
 
     await h.db.query(
-      `select resolve_dispute($1, 'release', 'Sorted on the phone', 90000, 'RWF', 10000)`,
+      `select resolve_dispute($1, 'release', 'Sorted on the phone', 90000, 'RWF', 10000, null, 'ops@payhold.test')`,
       [dispute],
     )
 
@@ -411,7 +411,7 @@ describe('outcome labels are written from the money path', () => {
       [s.deal],
     )
     await h.db.query(
-      `select resolve_dispute($1, 'refund', 'Photos back the buyer', 90000, 'RWF', 10000)`,
+      `select resolve_dispute($1, 'refund', 'Photos back the buyer', 90000, 'RWF', 10000, null, 'ops@payhold.test')`,
       [d.id],
     )
 

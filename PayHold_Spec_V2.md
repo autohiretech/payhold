@@ -813,6 +813,16 @@ a routing failure that falls back to a verified backup; a payout to an unverifie
 seller that must be refused; and a country disabled in data that disappears from
 checkout without a redeploy.
 
+The whole run is written out in order in
+`payhold-backend/scripts/sandbox-walkthrough.md`, and each part signs off a §16
+checklist item by name. It is deliberately not automated: half of it is watching
+what happens on a provider's own dashboard, and a script that could green-light
+itself is the thing §16 exists to prevent.
+
+**Nothing here is what permits live traffic.** §16's gate is, and it is
+enforced: `POST /v1/provider-accounts` refuses `mode: "live"` while any required
+checklist item is outstanding. The walkthrough is four of those items.
+
 ---
 
 # Part III — Standing divergences
@@ -896,8 +906,12 @@ No rail is enabled without written provider confirmation (§16).
 §12 requires that a country be disabled without redeploying code. Today
 `_shared/countries.ts` is *generated source* and enablement is a code change.
 The generator keeps emitting the country registry; **enablement moves into
-`payment_routes` and `payout_routes` tables.** This is a structural requirement
-and §5.2's eighth acceptance test exists to prove it.
+data.** This is a structural requirement and §5.2's eighth acceptance test
+exists to prove it.
+
+Implemented across Phases 5 and 6: `payout_routes` carries the rails,
+`payment_markets` carries the country switch, and §29.11 records exactly how
+much moved and what deliberately did not.
 
 ## 29.5 The language rule is stricter than §1 — Part II wins
 
@@ -994,6 +1008,86 @@ eligibility record §5.1 asks to be stored and are what answers a seller asking
 why the rail they chose will not work. Only the row matching the destination's
 own rail can win.
 
+## 29.11 The registry stays generated; only enablement is data — Part II scoping of §29.4
+
+§29.4 says country enablement moves out of code. It does not say the country
+*registry* does, and the difference is the whole of this ruling.
+
+`countries.ts` records which currency a market uses, which wallets exist there,
+whether Stripe can pay into it, whether it is sanctioned — roughly 200 rows of
+transcribed provider documentation, emitted into both repos by one generator
+(`gen-countries.py`) so the two copies cannot disagree. Copying that into SQL
+would give it a second home, and the first time somebody edited one and not the
+other the two would part company silently. That is precisely the failure the
+generator exists to prevent, and it would be reintroduced in the name of a
+requirement that does not ask for it.
+
+So the split is:
+
+| | lives in | changes when |
+|---|---|---|
+| what is **possible** | the generated registry | a provider's coverage actually changes |
+| what is **on** | `payment_markets`, `payout_routes`, `provider_capabilities` | somebody decides, with no deploy |
+
+`payment_markets` is an **overlay**, not a mirror: a country with no row behaves
+as the registry says, and a row is a deliberate departure carrying a required
+`reason`. Closing a market is one insert; reopening it is one delete. Both
+directions are covered by §5.2's eighth acceptance test and by §15 phase 3's.
+
+The same shape applies to adapters. `provider_capabilities` holds §9's eight
+flags plus `implemented` and `enabled`, and `route_evaluation` reads it — so
+switching an adapter off disables exactly its own routes, which is §15 phase 3's
+second sentence. `payout_routes.provider` became `not null` in the same change:
+Phase 5 used a null to mean "unbuilt" because §9's adapters had no enum values
+yet, and a check constraint cannot look at another table. Now each rail names
+the adapter that would carry it — one adapter carries several, since Venmo rides
+PayPal's API and both Chinese wallets ride one partner — and a trigger refuses
+to enable a route whose adapter is not live.
+
+Implemented 2026-08-07. `payhold-backend/tests/capability-matrix.test.ts` is the
+acceptance spec.
+
+## 29.12 A checkout session is a buyer's credential, not a payment — Part II reading of §10.1
+
+§10.1 asks for `POST /v1/checkout/sessions` and `GET /v1/checkout/sessions/{id}`
+and says only "deal-linked hosted checkout session". What that object *is* was
+left open, and getting it wrong is how §15 phase 2's acceptance test —
+"test payments cannot be marked successful without verified provider events" —
+stops being true.
+
+**A session is a scoped, expiring credential for one payment on one deal.** It
+exists so a buyer can choose a payment method without holding an API key, and
+without the client's server proxying the choice. It is not a payment, not a
+promise of one, and no function that touches it can reach `funded_held` or write
+a ledger entry. `tests/checkout-sessions.test.ts` asserts that against the
+function bodies and not only against their behaviour.
+
+Three consequences worth recording.
+
+**`checkout.completed` is not the funding event.** It fires when the buyer
+finishes the hosted flow and is handed to the provider — the deal is
+`payment_pending` at that moment. `order.funded_held` fires when money actually
+arrives, after a webhook verified a signature and re-fetched the transaction. A
+client that conflated them would ship goods against a card that has not settled,
+so the two are deliberately separate events rather than one event with a flag.
+
+**The token is stored in plaintext, unlike an API key.** The reasoning that
+makes hashing right for a key does not transfer: a key is only ever *compared*,
+so we never need it back, while a payment link has to stay re-derivable because
+re-sending one is an ordinary support action. What bounds the risk instead is
+scope and time — 256 bits, an expiry, and authority over exactly one payment on
+one deal, which is no broader than the deal id that already opens the hosted
+page.
+
+**`checkout_started -> created` became a legal transition**, the only backwards
+edge in §6's machine. It means a payment link was withdrawn. Nothing has
+happened to the deal at that point — no provider call, no money, no state anyone
+outside the system observed — so leaving it in `checkout_started` would have the
+status claim a buyer had somewhere to pay when they did not.
+
+Implemented 2026-08-07. `checkout_started` had been declared and unreachable
+since Phase 1; this is its first writer.
+
 ## 29.7 Clearance default moves from 7 days to 14 — Part I wins
 
 V1 defaulted `clearance_days` to 7. §6.1 defaults to 14 calendar days, matching
@@ -1002,6 +1096,96 @@ stays at 3, which both documents agree on.
 
 In-flight deals keep the settings they were created with, so this is a change to
 new deals only.
+
+## 29.13 §16 is enforced and §17 is structural — Part II, stricter than Part I
+
+§16 reads as a list to "create or confirm" and §15's phase 8 asks that "live
+keys remain disabled until approval", neither of which says who stops what. Both
+are now enforced rather than advisory, and §17 is enforced somewhere else
+entirely. The split is the ruling.
+
+**§16 is rows and a gate.** `launch_checklist` carries the section's items and
+`POST /v1/provider-accounts` refuses `mode: "live"` while any required one is
+outstanding. There is exactly one writer of `tenant_provider_accounts`, so one
+check is the whole gate, and a test asserts that stays true. Most items are
+attestations with a person's name and a pointer to the evidence; the rest have
+acceptance in code, and those whose code is missing carry `blocked_by` and
+cannot be signed off by anybody.
+
+The checklist is **platform-scoped and has no `tenant_id`**. The items are about
+PayHold — our legal entity, our contracts, our incident-response plan — so a
+tenant connecting live credentials is gated on our readiness, because it is our
+system their buyers' money would move through.
+
+**§17 is not on that list.** Its seven entries are prohibitions rather than
+tasks: nothing about them gets signed, and a checklist row saying "we do not
+support cryptocurrency" would be a tick somebody clicks rather than a control.
+Each is refused by something structural instead — an adapter that cannot be
+enabled while unbuilt, the §12 eligibility gate, a not-null `tenant_id` on every
+credential and every ledger entry, and `paid_needs_a_provider_reference`, which
+is what makes "no manual mark-as-paid control **anywhere**" true of a correction
+run by hand and not only of the code paths we know about.
+`payhold-backend/tests/launch-gate.test.ts` is where each is pinned.
+
+Implemented 2026-08-08. The gate ships shut.
+
+## 29.14 A reconciliation run's `missing` counts the inbox, not an export diff — Part II scoping of §13
+
+§13 asks the daily job to compare "provider balances **and transaction
+exports**" against the internal ledger. The balance half is built and has been
+since V1. The export half is not, and the run record says `missing` while
+meaning something narrower than the sentence does.
+
+`PaymentProvider` exposes `balances()` and nothing that enumerates
+transactions. Adding a listing call to satisfy the wording would mean one
+adapter implementing it, `FakeProvider` answering from fixtures, and every real
+rail reporting zero discrepancies — a control that looks authoritative and
+checks nothing. That is worse than a smaller claim.
+
+So `missing` counts **verified inbound events we never posted**:
+`provider_events` rows inside the run's window with `signature_ok` and no
+`processed_at`. It is the arrears half of §13's own inbox/outbox design — money
+the provider has told us about that our ledger has not booked — and it is true.
+A forgery we refused is excluded, or every probe at a webhook endpoint would
+read as a reconciliation failure.
+
+What it does not catch is a transaction the provider never webhooked at all.
+That shows up in the balance comparison as drift, which freezes payouts, so the
+gap is narrower than it sounds. Widening `missing` to a real export diff is one
+adapter method and one column when a provider agreement makes exports available.
+
+Implemented 2026-08-08. `payhold-backend/tests/reconciliation-runs.test.ts`.
+
+## 29.15 A spent retry budget is `blocked` with no clock — Part II reading of §13
+
+§13 says payout failures "retry with capped exponential backoff, then move to
+`payout_blocked` for operator action." We have no `payout_blocked` status and
+are not adding one: `blocked` already means "stopped by a fact that is neither
+the seller's to fix nor an operator's to approve", which is what this is.
+
+The difficulty is that `blocked` is **dispatchable**. §5.1's no-route case is
+re-screened every pass on purpose, because a route appearing is not something
+anybody has to do anything about, and a machine that re-asks and finds the
+reason gone overrules nobody (§29.9's reasoning, applied to routing). A payout a
+rail has refused five times is the opposite: re-asking sends the same failure to
+the same seller all night.
+
+So the stop is expressed on the retry clock rather than in a second status.
+`payouts.next_attempt_at` carries the backoff, and **null means no machine may
+attempt this payout again** — the dispatch scan filters `<= now()`, which
+excludes nulls by construction, while the approve and retry endpoints go through
+the same shared `dispatchPayout` and are unaffected. A person is not a machine,
+and that distinction is the column's whole purpose.
+
+Two consequences are deliberate. A person's retry is **one** more attempt rather
+than a fresh series, because `route_payout` reads the attempt counter to decide
+whether the seller's verified backup destination may be used (§29.10) and
+resetting it would quietly send the next attempt back to the primary that has
+been failing. And the ladder is the webhook dispatcher's — 1m, 5m, 30m, 2h,
+capped — because two backoff curves in one system are two things to reason about
+during an incident for no gain.
+
+Implemented 2026-08-08. `payhold-backend/tests/payout-retry.test.ts`.
 
 ---
 

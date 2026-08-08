@@ -27,6 +27,7 @@ import type {
   PaymentMethod,
   PayoutProvider,
   Provider,
+  RouteReasonCode,
 } from '@/api/types'
 import { COUNTRIES, countryInfo } from './countries'
 
@@ -203,6 +204,11 @@ export const PROVIDER_LABEL: Record<Provider, string> = {
   flutterwave: 'Flutterwave',
   stripe: 'Stripe',
   fake: 'Demo mode',
+  // §9's declared-and-unbuilt adapters. Named so a screen showing why a route
+  // is unavailable can say which adapter, rather than printing an enum value.
+  paypal: 'PayPal',
+  cash_app_pay: 'Cash App Pay',
+  china_wallet_partner: 'China wallet partner',
 }
 
 /**
@@ -224,12 +230,74 @@ export const PAYOUT_PROVIDER_LABEL: Record<PayoutProvider, string> = {
   wechat_pay: 'WeChat Pay',
 }
 
+/**
+ * §5.1: "the highest-ranked eligible fallback, **with the reason shown**", and
+ * "with the reason and the next action". A code is for the audit row; a person
+ * reading a stopped payout needs a sentence, and one sentence written here beats
+ * the same sentence written three slightly different ways on three screens.
+ *
+ * The mirror of SQL's `route_reason_text`, and it lives here rather than in the
+ * mock because both sides of the seam need it: the engine writes it onto
+ * `payout.failure_reason`, and the Routing Center turns a *stored* reason code
+ * from a real backend back into the same sentence. A screen reaching into
+ * `api/mock/` for it would have worked until the day the mock went away.
+ *
+ * **The rail is interpolated raw, not through `PAYOUT_PROVIDER_LABEL`**, and
+ * that is not an oversight: this string has to match what Postgres produces
+ * character for character, or one reason code would read two different ways
+ * depending on which half of the system answered.
+ */
+export function routeReasonText(
+  code: RouteReasonCode,
+  rail: PayoutProvider,
+  country: string,
+  currency: string,
+): string {
+  switch (code) {
+    case 'routed':
+      return `Paid by ${rail}.`
+    case 'market_closed':
+      return `PayHold is not sending payouts to ${country} at the moment.`
+    case 'provider_unavailable':
+    case 'provider_disabled':
+      return `${rail} is not available for payouts yet.`
+    case 'route_suspended':
+      return `${rail} payouts are suspended.`
+    case 'route_under_review':
+      return `${rail} payouts are under review and cannot be used right now.`
+    case 'payouts_not_supported':
+      return `${rail} can collect payments but cannot send them.`
+    case 'country_not_supported':
+      return `${rail} cannot pay a destination in ${country}.`
+    case 'currency_not_supported':
+      return `${rail} cannot pay out in ${currency}.`
+    case 'below_route_minimum':
+      return `This amount is below the minimum ${rail} will send.`
+    case 'above_route_maximum':
+      return `This amount is above the maximum ${rail} will send.`
+    case 'destination_not_verified':
+      return 'The payout destination has not been verified.'
+    case 'no_eligible_verified_destination':
+      return 'No verified payout destination has been registered.'
+    default:
+      return `PayHold has no payout route for ${rail} in ${country}.`
+  }
+}
+
 export const PROVIDER_BLURB: Record<Provider, string> = {
   flutterwave:
     'Local rails across Africa — mobile money, local-currency cards and bank transfers, and the only way to pay an African seller.',
   stripe:
     'International card acquiring. Charges a card issued anywhere in the world, but can only pay out in the countries Stripe operates in.',
   fake: 'No provider keys configured. Payments are simulated end to end so the product works without a live account.',
+  // Declared, not built — §29.3. The blurb says so rather than describing a
+  // capability nobody can use yet.
+  paypal:
+    'Declared so a seller who picks PayPal or Venmo gets a specific answer. No adapter is built and no agreement is signed.',
+  cash_app_pay:
+    'Declared for the United States. No adapter is built and no agreement is signed.',
+  china_wallet_partner:
+    'Alipay and WeChat Pay routes a Stripe account does not cover. Requires an approved local structure before anything can be promised.',
 }
 
 // ---------------------------------------------------------------------------

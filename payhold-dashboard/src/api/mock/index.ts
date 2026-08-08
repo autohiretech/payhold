@@ -35,8 +35,15 @@ import {
   type CreateSellerInput,
   type Currency,
   type Deal,
+  type DealAmounts,
   type DealOutcome,
   type Dispute,
+  type DisputeEvidence,
+  type DisputeOffer,
+  type DisputeOfferKind,
+  type DisputeReasonCode,
+  type DisputeTimelineEvent,
+  type LaunchChecklist,
   type LedgerEntry,
   type Money,
   type ConnectProviderInput,
@@ -49,10 +56,17 @@ import {
   type RailStatus,
   type RailBalance,
   type ReconciliationAlert,
+  type ReconciliationRun,
+  type Refund,
   type RequestContext,
   type RiskSignal,
   type Seller,
+  type SellerCapabilities,
+  type SellerDestination,
   type Tenant,
+  type CheckoutSession,
+  type CheckoutSessionState,
+  type PublicCheckout,
   type TenantSettings,
   type WebhookDelivery,
   type WebhookEndpoint,
@@ -80,11 +94,19 @@ import {
   draftRiskSummary,
 } from './ai'
 import {
+  addDisputeEvidence,
+  disputeTimeline,
+  makeDisputeOffer,
+  respondDisputeOffer,
+  withdrawDisputeOffer,
+} from './resolution'
+import {
   approvePayoutReview,
   holdPayout,
   audit,
   captureDeposit,
   computeBalances,
+  computeDealAmounts,
   computeRailBalances,
   confirmDeal,
   fundDeal,
@@ -97,9 +119,25 @@ import {
   retryPayout,
   runCron,
   runReconciliation,
+  resolveReconciliationRun,
+  sellerCapabilities,
   settingsFor,
+  verifySeller,
 } from './engine'
 import { attemptDelivery } from './webhooks'
+import {
+  availableMethods,
+  cancelCheckoutSession,
+  checkoutSessionState,
+  completeCheckoutSession,
+  openCheckoutSession,
+  sessionByToken,
+} from './checkout'
+import {
+  launchChecklist,
+  launchBlockers,
+  signOffLaunchItem,
+} from './launch'
 import { seedDb } from './seed'
 import {
   addDays,
@@ -168,6 +206,27 @@ function presentmentCurrencyFor(
 /** Deep copy on the way out — screens must never mutate the store by accident. */
 function clone<T>(value: T): T {
   return structuredClone(value)
+}
+
+/**
+ * Tenant-scoped first: a seller belonging to someone else is a 404, never a
+ * 403, because a 403 confirms they exist.
+ *
+ * A module function rather than a private method deliberately. A `private`
+ * member changes the class's *structural* type, and `DevPanel` casts the
+ * exported `api` back to `MockClient` to reach the simulation hooks — a
+ * private helper here breaks that cast at the far end of the app, for a
+ * detail nothing outside this file cares about.
+ */
+function requireOwnSeller(sellerId: string): Seller {
+  const db = getDb()
+  const seller = db.sellers.find(
+    (s) => s.id === sellerId && s.tenant_id === db.current_tenant_id,
+  )
+  if (!seller) {
+    throw new PayHoldError('not_found', `Seller ${sellerId} not found`)
+  }
+  return seller
 }
 
 export class MockClient implements PayHoldClient {
@@ -298,6 +357,23 @@ export class MockClient implements PayHoldClient {
     return delay(clone(deal))
   }
 
+  async getDealAmounts(id: string): Promise<DealAmounts> {
+    await this.getDeal(id) // tenant scoping
+    return delay(computeDealAmounts(getDb(), id))
+  }
+
+  async listRefunds(dealId?: string): Promise<Refund[]> {
+    const db = getDb()
+    if (dealId) await this.getDeal(dealId)
+
+    const refunds = db.refunds
+      .filter((r) => r.tenant_id === db.current_tenant_id)
+      .filter((r) => !dealId || r.deal_id === dealId)
+      .sort((a, b) => b.created_at.localeCompare(a.created_at))
+
+    return delay(clone(refunds))
+  }
+
   async listDeals(filter: DealListFilter = {}): Promise<Deal[]> {
     const db = getDb()
     const term = filter.search?.trim().toLowerCase()
@@ -356,6 +432,131 @@ export class MockClient implements PayHoldClient {
     return delay(clone(sellers))
   }
 
+  // -- Hosted checkout (§10.1) ---------------------------------------------
+
+  openCheckoutSession(
+    dealId: string,
+    options: { hours?: number; returnUrl?: string } = {},
+  ): Promise<CheckoutSession> {
+    return Promise.resolve(
+      mutate((db) =>
+        openCheckoutSession(db, dealId, {
+          hours: options.hours,
+          returnUrl: options.returnUrl ?? null,
+        })
+      ),
+    )
+  }
+
+  getCheckoutSession(id: string): Promise<CheckoutSession> {
+    const db = getDb()
+    const session = db.checkout_sessions.find(
+      (s) => s.id === id && s.tenant_id === db.current_tenant_id,
+    )
+    if (!session) {
+      return Promise.reject(
+        new PayHoldError('not_found', `Checkout session ${id} not found`),
+      )
+    }
+    return Promise.resolve(session)
+  }
+
+  cancelCheckoutSession(id: string): Promise<CheckoutSession> {
+    return Promise.resolve(
+      mutate((db) => cancelCheckoutSession(db, id, 'dashboard')),
+    )
+  }
+
+  /**
+   * The tokens are stripped on the way out, except on a live session.
+   *
+   * A withdrawn or expired token opens nothing, so keeping it would be a
+   * plaintext credential in a list nobody needs it in — and a support screen
+   * showing every token this account ever issued is a longer-lived copy of them
+   * than the sessions themselves.
+   */
+  async listCheckoutSessions(dealId?: string): Promise<CheckoutSession[]> {
+    const db = getDb()
+    if (dealId) await this.getDeal(dealId)
+
+    const sessions = db.checkout_sessions
+      .filter((s) => s.tenant_id === db.current_tenant_id)
+      .filter((s) => !dealId || s.deal_id === dealId)
+      .sort((a, b) => b.created_at.localeCompare(a.created_at))
+      .map((s) => ({
+        ...clone(s),
+        token: checkoutSessionState(s) === 'open' ? s.token : '',
+      }))
+
+    return delay(sessions)
+  }
+
+  /**
+   * Deliberately **not** tenant-scoped: whoever opens a payment link has no
+   * session and no tenant. The token is what authorises the read, and
+   * `sessionByToken` refuses anything that is not live.
+   */
+  getPublicCheckout(token: string): Promise<PublicCheckout> {
+    const db = getDb()
+    const session = sessionByToken(db, token)
+    const deal = requireDeal(db, session.deal_id)
+    const seller = db.sellers.find((s) => s.id === deal.seller_id)
+
+    return Promise.resolve({
+      status: checkoutSessionState(session),
+      expires_at: session.expires_at,
+      deal: {
+        id: deal.id,
+        description: deal.description,
+        amount: deal.presentment_amount,
+        currency: deal.presentment_currency,
+        status: deal.status,
+      },
+      seller: { name: seller?.name ?? null },
+      methods: availableMethods(db, deal),
+    })
+  }
+
+  payCheckout(
+    token: string,
+    choice: { method: PaymentMethod; network?: string },
+  ): Promise<{ status: CheckoutSessionState; payment_link: string | null }> {
+    return Promise.resolve(
+      mutate((db) => {
+        const session = sessionByToken(db, token)
+        const deal = requireDeal(db, session.deal_id)
+
+        // Re-checked against the live matrix rather than trusted from the
+        // request: this call comes from a browser, so a buyer who edited the
+        // form must not be able to start a charge on a rail we switched off.
+        const available = availableMethods(db, deal)
+        const chosen = available.find((m) => m.method === choice.method)
+
+        if (!chosen) {
+          throw new PayHoldError(
+            'policy_violation',
+            `${choice.method} is not available for ${deal.presentment_currency} in ${deal.buyer_country}`,
+          )
+        }
+
+        const completed = completeCheckoutSession(db, session.id, {
+          method: choice.method,
+          network: choice.network ?? null,
+          provider: chosen.provider,
+          providerRef: `${chosen.provider}_${session.id}`,
+          // The mock's stand-in for the provider's hosted page. The dev panel's
+          // "fund" is what plays the webhook afterwards — nothing here can.
+          paymentLink: `/status/${deal.id}`,
+        })
+
+        return {
+          status: checkoutSessionState(completed),
+          payment_link: completed.payment_link,
+        }
+      }),
+    )
+  }
+
   async createSeller(input: CreateSellerInput): Promise<Seller> {
     const seller = mutate((db) => {
       // The raw destination is tokenized here and immediately discarded — the
@@ -402,6 +603,38 @@ export class MockClient implements PayHoldClient {
       return clone(created)
     })
     return delay(seller)
+  }
+
+  async listSellerDestinations(sellerId?: string): Promise<SellerDestination[]> {
+    const db = getDb()
+    if (sellerId) requireOwnSeller(sellerId)
+
+    const destinations = db.seller_destinations
+      .filter((d) => d.tenant_id === db.current_tenant_id)
+      .filter((d) => !sellerId || d.seller_id === sellerId)
+      .sort(
+        (a, b) =>
+          Number(b.is_primary) - Number(a.is_primary) ||
+          a.created_at.localeCompare(b.created_at),
+      )
+
+    return delay(clone(destinations))
+  }
+
+  async getSellerCapabilities(sellerId: string): Promise<SellerCapabilities> {
+    requireOwnSeller(sellerId)
+    return delay(sellerCapabilities(getDb(), sellerId))
+  }
+
+  async verifySeller(
+    sellerId: string,
+    verifiedBy: string,
+    verified: boolean,
+  ): Promise<Seller> {
+    requireOwnSeller(sellerId)
+    return delay(
+      clone(mutate((db) => verifySeller(db, sellerId, verifiedBy, verified))),
+    )
   }
 
   // -- Money ---------------------------------------------------------------
@@ -508,18 +741,114 @@ export class MockClient implements PayHoldClient {
     dealId: string,
     raisedBy: ConfirmSide,
     reason: string,
+    opts: {
+      reasonCode?: DisputeReasonCode
+      actor?: string
+      disputedAmount?: Money
+    } = {},
   ): Promise<Dispute> {
     await this.getDeal(dealId)
-    return delay(clone(mutate((db) => openDispute(db, dealId, raisedBy, reason))))
+    return delay(clone(mutate((db) =>
+      openDispute(db, dealId, raisedBy, reason, {
+        reasonCode: opts.reasonCode,
+        actor: opts.actor,
+        disputedAmount: opts.disputedAmount ?? null,
+      })
+    )))
+  }
+
+  // -- The Resolution Center's requests, evidence and timeline (§8) ---------
+
+  async listDisputeOffers(disputeId: string): Promise<DisputeOffer[]> {
+    const db = getDb()
+    const rows = db.dispute_offers
+      .filter((o) => o.dispute_id === disputeId && o.tenant_id === db.current_tenant_id)
+      .sort((a, b) => a.created_at.localeCompare(b.created_at))
+    return delay(clone(rows))
+  }
+
+  async makeDisputeOffer(
+    disputeId: string,
+    offeredBy: ConfirmSide,
+    actor: string,
+    kind: DisputeOfferKind,
+    opts: { amount?: Money; extendTo?: string; note?: string } = {},
+  ): Promise<DisputeOffer> {
+    return delay(clone(mutate((db) =>
+      makeDisputeOffer(db, disputeId, offeredBy, actor, kind, {
+        amount: opts.amount ?? null,
+        extendTo: opts.extendTo ?? null,
+        note: opts.note ?? null,
+      })
+    )))
+  }
+
+  async respondDisputeOffer(
+    offerId: string,
+    side: ConfirmSide,
+    actor: string,
+    accept: boolean,
+  ): Promise<DisputeOffer> {
+    return delay(clone(mutate((db) =>
+      respondDisputeOffer(db, offerId, side, actor, accept, (
+        disputeId,
+        resolution,
+        note,
+        amount,
+        decidedBy,
+      ) => {
+        resolveDispute(db, disputeId, resolution, note, {
+          refundAmount: amount,
+          decidedBy,
+        })
+      })
+    )))
+  }
+
+  async withdrawDisputeOffer(offerId: string, actor: string): Promise<DisputeOffer> {
+    return delay(clone(mutate((db) => withdrawDisputeOffer(db, offerId, actor))))
+  }
+
+  async addDisputeEvidence(
+    disputeId: string,
+    side: ConfirmSide,
+    actor: string,
+    input: {
+      kind: DisputeEvidence['kind']
+      description: string
+      url?: string
+      capturedAt?: string
+    },
+  ): Promise<DisputeEvidence> {
+    return delay(clone(mutate((db) =>
+      addDisputeEvidence(db, disputeId, side, actor, {
+        kind: input.kind,
+        description: input.description,
+        url: input.url ?? null,
+        capturedAt: input.capturedAt ?? null,
+      })
+    )))
+  }
+
+  async disputeTimeline(disputeId: string): Promise<DisputeTimelineEvent[]> {
+    return delay(clone(disputeTimeline(getDb(), disputeId)))
   }
 
   async resolveDispute(
     id: string,
-    resolution: 'release' | 'refund',
+    resolution: 'release' | 'refund' | 'partial_refund',
     note: string,
+    decidedBy: string,
+    refundAmount?: Money,
   ): Promise<Dispute> {
-    return delay(clone(mutate((db) => resolveDispute(db, id, resolution, note))))
+    return delay(clone(mutate((db) =>
+      resolveDispute(db, id, resolution, note, {
+        refundAmount: refundAmount ?? null,
+        decidedBy,
+      })
+    )))
   }
+
 
   // -- Settings and access -------------------------------------------------
 
@@ -619,6 +948,27 @@ export class MockClient implements PayHoldClient {
       )
     }
 
+    // §16: the production release begins in test mode, and live keys stay
+    // disabled until the checklist is signed off. This is the only door live
+    // credentials come through — a rail with no stored account falls back to
+    // the demo provider — so one check here is the whole gate. Before the
+    // credential shapes are validated, deliberately: refusing after we would
+    // have used a live secret key is refusing too late.
+    if (input.mode === 'live') {
+      const blockers = launchBlockers(getDb())
+      if (blockers.length > 0) {
+        const named = blockers.slice(0, 3).map((b) => b.title).join(', ')
+        const rest = blockers.length - Math.min(3, blockers.length)
+        throw new PayHoldError(
+          'policy_violation',
+          `PayHold is in test mode: ${blockers.length} launch checklist ` +
+            `item${blockers.length === 1 ? ' is' : 's are'} outstanding ` +
+            `(${named}${rest > 0 ? `, and ${rest} more` : ''}). ` +
+            'Connect test keys for now.',
+        )
+      }
+    }
+
     const missing = spec.fields.filter((f) => !input.credentials[f]?.trim())
     if (missing.length > 0) {
       throw new PayHoldError(
@@ -702,6 +1052,34 @@ export class MockClient implements PayHoldClient {
     })
 
     return delay(undefined)
+  }
+
+  // -- The launch gate (§16) -----------------------------------------------
+
+  async getLaunchChecklist(): Promise<LaunchChecklist> {
+    return delay(launchChecklist(getDb()))
+  }
+
+  async signOffLaunchItem(
+    code: string,
+    signedBy: string,
+    evidence: string,
+    signed = true,
+  ): Promise<LaunchChecklist> {
+    return delay(mutate((db) => {
+      // The name is an argument here and comes from the session in the real
+      // endpoint — same split as `verifySeller`, and for the same reason: a
+      // caller who can name their own approver can forge one.
+      signOffLaunchItem(db, code, signedBy, evidence, signed)
+
+      audit(db, db.current_tenant_id, null, signedBy, 'launch.signed_off', {
+        code,
+        signed,
+        evidence,
+      })
+
+      return launchChecklist(db)
+    }))
   }
 
   async listApiKeys(): Promise<ApiKey[]> {
@@ -928,6 +1306,26 @@ export class MockClient implements PayHoldClient {
 
     async runReconciliation(): Promise<ReconciliationAlert[]> {
       return delay(clone(mutate((db) => runReconciliation(db))))
+    },
+
+    async listReconciliationRuns(): Promise<ReconciliationRun[]> {
+      const runs = getDb()
+        .reconciliation_runs.slice()
+        .sort((a, b) => b.started_at.localeCompare(a.started_at))
+      return delay(clone(runs))
+    },
+
+    async resolveReconciliationRun(
+      runId: string,
+      resolvedBy: string,
+      note: string,
+      unfreeze = false,
+    ): Promise<ReconciliationRun> {
+      return delay(
+        clone(
+          mutate((db) => resolveReconciliationRun(db, runId, resolvedBy, note, unfreeze)),
+        ),
+      )
     },
 
     async freezePayouts(tenantId: string): Promise<Tenant> {

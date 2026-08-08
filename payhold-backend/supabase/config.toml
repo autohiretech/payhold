@@ -454,6 +454,15 @@ verify_jwt = false
 [functions.deals]
 verify_jwt = false
 
+# Half of this function is deliberately unauthenticated: a buyer opening a
+# payment link from an email has no PayHold account and must never be asked for
+# one. The `/checkout/public/:token` routes stand on the session token — 256
+# bits, expiring, scoped to one payment — and the `/checkout/sessions` routes
+# still resolve a caller. The gateway check has to be off for the first pair,
+# which is why the split is an explicit path segment rather than a header.
+[functions.checkout]
+verify_jwt = false
+
 [functions.payment-options]
 verify_jwt = false
 
@@ -467,6 +476,18 @@ verify_jwt = false
 verify_jwt = false
 
 [functions.risk-signals]
+verify_jwt = false
+
+# §8's Resolution Center. Party actions take an API key like `/deals/:id/confirm`
+# does; `/resolve` refuses one and wants a signed-in person, checked in the
+# function rather than here.
+[functions.disputes]
+verify_jwt = false
+
+# §16's launch checklist. `verify_jwt = false` for the same reason as everything
+# else here — the gateway's check knows nothing about `platform_admins`, and the
+# function does its own, refusing an API key outright.
+[functions.launch]
 verify_jwt = false
 
 # The intelligence layer. Same `resolveCaller` as every other v1 endpoint —
@@ -494,6 +515,13 @@ verify_jwt = false
 # transaction. A forged webhook still returns 401; `flutterwave.test.ts`
 # covers that, and the launch gate tests it against the live URL.
 [functions.flutterwave-webhook]
+verify_jwt = false
+
+# The same arrangement on the other rail, with a real HMAC instead of a shared
+# secret: `Stripe-Signature` is checked against this tenant's own webhook
+# secret, and the PaymentIntent is re-fetched before any state changes. A forged
+# webhook returns 401 here too — the launch gate tests every rail.
+[functions.stripe-webhook]
 verify_jwt = false
 
 # Authenticated by CRON_SECRET. Not reachable without it.

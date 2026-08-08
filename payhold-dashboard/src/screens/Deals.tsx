@@ -248,23 +248,29 @@ function CreateDealForm({ onClose }: { onClose: () => void }) {
   const submit = async (e: React.FormEvent) => {
     e.preventDefault()
     const result = await create.mutateAsync()
-    setLink(result.payment_link)
+    setLink(result.deal.id)
   }
 
   if (link) {
     return (
       <Card className="mb-5 p-6">
         <h2 className="text-sm font-semibold text-fg">Deal created</h2>
+        {/* The payment link is issued on the deal, not here. §10.1 makes it a
+            checkout session — a scoped, expiring credential — and one live
+            session per deal is what stops two links existing against one hold.
+            A URL printed at creation would be the second. */}
         <p className="mt-1 text-sm text-fg-muted">
-          Send the buyer here to pay. Funds are held the moment the payment clears.
+          Open it to issue the buyer a payment link. Funds are held the moment
+          the payment clears.
         </p>
         <div className="mt-3 rounded-lg bg-surface-2 px-3 py-2">
           <Mono>{link}</Mono>
         </div>
         <div className="mt-4 flex gap-2">
-          <Button variant="primary" onClick={onClose}>
-            Done
-          </Button>
+          <Link to={`/deals/${link}`}>
+            <Button variant="primary">Open the deal</Button>
+          </Link>
+          <Button onClick={onClose}>Done</Button>
           <Button
             onClick={() => {
               setLink(null)

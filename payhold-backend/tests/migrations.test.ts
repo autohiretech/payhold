@@ -587,7 +587,7 @@ describe('disputes', () => {
       `select (open_dispute($1, 'buyer', 'Late delivery')).id as open_dispute`, [s.deal],
     )
     await h.db.query(
-      `select resolve_dispute($1, 'release', 'Seller provided proof', 90000, 'RWF', 10000)`,
+      `select resolve_dispute($1, 'release', 'Seller provided proof', 90000, 'RWF', 10000, null, 'ops@payhold.test')`,
       [d.open_dispute],
     )
     const { rows: [deal] } = await h.db.query<{ status: string }>(
@@ -603,7 +603,7 @@ describe('disputes', () => {
       `select (open_dispute($1, 'buyer', 'Never arrived')).id as open_dispute`, [s.deal],
     )
     await h.db.query(
-      `select resolve_dispute($1, 'refund', 'No proof of delivery', 0, 'RWF', 0)`,
+      `select resolve_dispute($1, 'refund', 'No proof of delivery', 0, 'RWF', 0, null, 'ops@payhold.test')`,
       [d.open_dispute],
     )
     const { rows: [deal] } = await h.db.query<{ status: string }>(
@@ -618,10 +618,10 @@ describe('disputes', () => {
       `select (open_dispute($1, 'buyer', 'Late')).id as open_dispute`, [s.deal],
     )
     await h.db.query(
-      `select resolve_dispute($1, 'release', 'ok', 90000, 'RWF', 10000)`, [d.open_dispute],
+      `select resolve_dispute($1, 'release', 'ok', 90000, 'RWF', 10000, null, 'ops@payhold.test')`, [d.open_dispute],
     )
     await rejects(
-      () => h.db.query(`select resolve_dispute($1, 'refund', 'again', 0, 'RWF', 0)`,
+      () => h.db.query(`select resolve_dispute($1, 'refund', 'again', 0, 'RWF', 0, null, 'ops@payhold.test')`,
                        [d.open_dispute]),
       /already resolved/,
     )
@@ -685,8 +685,12 @@ describe('data integrity', () => {
     const s = await seedDeal()
     await rejects(
       () => h.db.query(
-        `insert into payouts (tenant_id, deal_id, seller_id, amount, currency, status, scheduled_for)
-         values ($1, $2, $3, 90000, 'RWF', 'paid', now())`,
+        // The provider reference is present so the only thing wrong with this
+        // row is the missing `paid_at` — `paid_needs_a_provider_reference`
+        // (§17, migration `20260807000015`) would otherwise reject it first and
+        // this test would pass for the wrong reason.
+        `insert into payouts (tenant_id, deal_id, seller_id, amount, currency, status, scheduled_for, provider_ref)
+         values ($1, $2, $3, 90000, 'RWF', 'paid', now(), 'trf_ref')`,
         [s.tenant, s.deal, s.seller],
       ),
       /paid_at_matches_status/,

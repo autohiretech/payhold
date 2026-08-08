@@ -14,6 +14,9 @@
  */
 
 import type {
+  CheckoutSession,
+  CheckoutSessionState,
+  PublicCheckout,
   AiChatMessage,
   AiDecision,
   AiSuggestion,
@@ -27,9 +30,16 @@ import type {
   CreateDealResult,
   CreateSellerInput,
   Deal,
+  DealAmounts,
   DealOutcome,
   DealStatus,
   Dispute,
+  DisputeEvidence,
+  DisputeOffer,
+  DisputeOfferKind,
+  DisputeReasonCode,
+  DisputeTimelineEvent,
+  LaunchChecklist,
   LedgerEntry,
   Money,
   Payout,
@@ -43,11 +53,16 @@ import type {
   RailBalance,
   RailStatus,
   ReconciliationAlert,
+  ReconciliationRun,
+  Refund,
   RequestContext,
   RiskSignal,
   Seller,
+  SellerCapabilities,
+  SellerDestination,
   Tenant,
   TenantSettings,
+  Timestamp,
   WebhookDelivery,
   WebhookDeliveryStatus,
   WebhookEndpoint,
@@ -76,9 +91,69 @@ export interface WebhookDeliveryFilter {
 }
 
 export interface PayHoldClient {
+  // -- Hosted checkout (§10.1) ---------------------------------------------
+  /**
+   * Issue a payment link, or hand back the one already live.
+   *
+   * Idempotent: two open sessions would be two live links against one hold.
+   * The deal moves to `checkout_started` — a buyer has somewhere to pay and has
+   * not paid, which §6 keeps separate from `payment_pending` on purpose.
+   */
+  openCheckoutSession(
+    dealId: string,
+    options?: { hours?: number; returnUrl?: string },
+  ): Promise<CheckoutSession>
+  getCheckoutSession(id: string): Promise<CheckoutSession>
+  /** Withdraw a link. Refused once the buyer has used it. */
+  cancelCheckoutSession(id: string): Promise<CheckoutSession>
+  /**
+   * What the buyer sees, resolved from the token in their URL. **No credential
+   * required** — someone opening a payment link from an email has no PayHold
+   * account and must never be asked for one.
+   */
+  getPublicCheckout(token: string): Promise<PublicCheckout>
+  /**
+   * The buyer chooses, and is handed to the provider.
+   *
+   * The furthest a session goes is `payment_pending`. `funded_held` is the
+   * provider webhook's, after it verifies a signature *and* re-fetches the
+   * transaction — §15 phase 2, and the reason this returns a link to follow
+   * rather than a funded deal.
+   */
+  payCheckout(
+    token: string,
+    choice: { method: PaymentMethod; network?: string },
+  ): Promise<{ status: CheckoutSessionState; payment_link: string | null }>
+
+  /**
+   * Every link issued for a deal, newest first — including the withdrawn and
+   * the expired ones.
+   *
+   * A live session is reachable from the deal, but "which links has this
+   * account handed out" is a different question, and the answer to it is a
+   * record rather than a state: re-sending a payment link is ordinary support,
+   * and a support conversation starts with what was already sent.
+   */
+  listCheckoutSessions(dealId?: string): Promise<CheckoutSession[]>
+
   // -- Deals ---------------------------------------------------------------
   createDeal(input: CreateDealInput): Promise<CreateDealResult>
   getDeal(id: string): Promise<Deal>
+  /**
+   * §7's breakdown for one deal — buyer-paid, fees, tax, reserve, refunded,
+   * receivable, paid-out and seller-net, all in the presentment currency.
+   *
+   * Derived from the ledger and never stored, which is why it is its own call
+   * rather than columns on `Deal`: the deal's own figures are what was agreed,
+   * and these are what happened.
+   */
+  getDealAmounts(id: string): Promise<DealAmounts>
+  /**
+   * §7.1's refund records. A refund is not a bare ledger entry — Alipay and
+   * WeChat Pay settle asynchronously up to 90 days out, so it has a lifetime
+   * and a status of its own.
+   */
+  listRefunds(dealId?: string): Promise<Refund[]>
   listDeals(filter?: DealListFilter): Promise<Deal[]>
   /** Both sides present → atomic release. */
   confirmDeal(id: string, side: ConfirmSide): Promise<Deal>
@@ -101,6 +176,31 @@ export interface PayHoldClient {
   // -- Sellers -------------------------------------------------------------
   listSellers(): Promise<Seller[]>
   createSeller(input: CreateSellerInput): Promise<Seller>
+  /**
+   * §5.1: a seller has a preferred destination and may have a verified backup,
+   * which one pair of columns on the seller could not express. Omit the id for
+   * every destination this account has.
+   */
+  listSellerDestinations(sellerId?: string): Promise<SellerDestination[]>
+  /**
+   * §12: can this seller be paid, and if not, what is missing — every reason,
+   * so onboarding is not one round trip per missing document.
+   */
+  getSellerCapabilities(sellerId: string): Promise<SellerCapabilities>
+  /**
+   * Record that the identity check, the sanctions screen and the ownership
+   * check came back.
+   *
+   * **A person's decision, and the real endpoint refuses an API key** — a
+   * client that could verify its own sellers from its own server has turned KYC
+   * into a field it sets. `verified: false` is the other direction: it moves
+   * the seller to `review_required`, which holds their payouts again.
+   */
+  verifySeller(
+    sellerId: string,
+    verifiedBy: string,
+    verified: boolean,
+  ): Promise<Seller>
 
   // -- Money ---------------------------------------------------------------
   getBalance(): Promise<Balance[]>
@@ -146,14 +246,74 @@ export interface PayHoldClient {
    */
   listRequestContext(dealId?: string): Promise<RequestContext[]>
 
-  // -- Disputes ------------------------------------------------------------
+  // -- Disputes: the Resolution Center (§8) ---------------------------------
   listDisputes(): Promise<Dispute[]>
-  openDispute(dealId: string, raisedBy: ConfirmSide, reason: string): Promise<Dispute>
+  openDispute(
+    dealId: string,
+    raisedBy: ConfirmSide,
+    reason: string,
+    opts?: {
+      reasonCode?: DisputeReasonCode
+      /** Who filed it. Half of the conflict-of-interest control. */
+      actor?: string
+      /**
+       * Presentment minor units. Omitted disputes the whole payment — a dispute
+       * that named no amount must not be read as one that disputed nothing.
+       */
+      disputedAmount?: Money
+    },
+  ): Promise<Dispute>
+  /**
+   * §8's final decision record. `decidedBy` is taken from the session, never
+   * from a form: whoever spoke for a side in this dispute cannot decide it, and
+   * a caller who can name their own decider walks straight past that.
+   */
   resolveDispute(
     id: string,
-    resolution: 'release' | 'refund',
+    resolution: 'release' | 'refund' | 'partial_refund',
     note: string,
+    decidedBy: string,
+    refundAmount?: Money,
   ): Promise<Dispute>
+
+  /** Every request on a dispute, oldest first. */
+  listDisputeOffers(disputeId: string): Promise<DisputeOffer[]>
+  /**
+   * Request an update, extension, cancellation or refund. One may be open per
+   * order at a time, and it lapses after 48 hours rather than being accepted by
+   * silence.
+   */
+  makeDisputeOffer(
+    disputeId: string,
+    offeredBy: ConfirmSide,
+    actor: string,
+    kind: DisputeOfferKind,
+    opts?: { amount?: Money; extendTo?: Timestamp; note?: string },
+  ): Promise<DisputeOffer>
+  /** The **other** party answers. Accepting a refund kind settles the deal. */
+  respondDisputeOffer(
+    offerId: string,
+    side: ConfirmSide,
+    actor: string,
+    accept: boolean,
+  ): Promise<DisputeOffer>
+  withdrawDisputeOffer(offerId: string, actor: string): Promise<DisputeOffer>
+
+  addDisputeEvidence(
+    disputeId: string,
+    side: ConfirmSide,
+    actor: string,
+    input: {
+      kind: DisputeEvidence['kind']
+      description: string
+      url?: string
+      /** When it was captured, which is not when it was filed. */
+      capturedAt?: Timestamp
+    },
+  ): Promise<DisputeEvidence>
+
+  /** §8's timeline view, derived rather than stored. */
+  disputeTimeline(disputeId: string): Promise<DisputeTimelineEvent[]>
 
   // -- Payment provider accounts (bring-your-own-keys) ----------------------
   /** Which rails this company has connected, and which are still demo. */
@@ -164,10 +324,43 @@ export interface PayHoldClient {
   /**
    * Store a company's provider credentials. They are validated against the
    * provider before being accepted, and never readable afterwards.
+   *
+   * **`mode: 'live'` is refused while §16's checklist has anything
+   * outstanding.** That is the whole of "the production release begins in test
+   * mode": there is exactly one way live credentials enter the system, so one
+   * check here is the gate.
    */
   connectProvider(input: ConnectProviderInput): Promise<ProviderAccount>
   /** Blocked while deals still hold money on that rail. */
   disconnectProvider(provider: Provider): Promise<void>
+
+  // -- The launch gate (§16) -----------------------------------------------
+  /**
+   * §16's checklist, with `live_mode_allowed` derived from it.
+   *
+   * PayHold staff, not a tenant: the items are about the platform's own legal
+   * entity, contracts and processes. A tenant learns the gate is shut from the
+   * refusal on `connectProvider` and does not get to read the list.
+   */
+  getLaunchChecklist(): Promise<LaunchChecklist>
+  /**
+   * Record that an item is done, or withdraw that with `signed: false`.
+   *
+   * Appended, never edited — "who said this was fine, and when did they stop
+   * saying it" is exactly the question asked afterwards. A **blocked** item is
+   * refused whatever the caller's authority: no attestation makes unbuilt work
+   * exist.
+   *
+   * `signedBy` is an argument here and comes from the **session** in the real
+   * endpoint, the same split `verifySeller` has: a caller who can name their
+   * own approver can forge one.
+   */
+  signOffLaunchItem(
+    code: string,
+    signedBy: string,
+    evidence: string,
+    signed?: boolean,
+  ): Promise<LaunchChecklist>
 
   // -- Settings and access -------------------------------------------------
   getSettings(): Promise<TenantSettings>
@@ -232,6 +425,25 @@ export interface AdminApi {
    * this returns whatever the pass touched.
    */
   runReconciliation(): Promise<ReconciliationAlert[]>
+  /**
+   * §13's record of the passes themselves — one per tenant per rail, newest
+   * first. The alerts say what is wrong now; these say we looked, over what
+   * window, and what we covered.
+   */
+  listReconciliationRuns(): Promise<ReconciliationRun[]>
+  /**
+   * A person signing a finished pass off, and optionally lifting the freeze it
+   * caused. The two are separate arguments because they are separate claims:
+   * writing down what happened, and declaring the money accounted for. It
+   * refuses to lift while any case on that tenant is still open, and the name
+   * comes from the session in the real endpoint.
+   */
+  resolveReconciliationRun(
+    runId: string,
+    resolvedBy: string,
+    note: string,
+    unfreeze?: boolean,
+  ): Promise<ReconciliationRun>
   freezePayouts(tenantId: string): Promise<Tenant>
   unfreezePayouts(tenantId: string): Promise<Tenant>
 }

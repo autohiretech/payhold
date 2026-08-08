@@ -30,6 +30,7 @@ import type {
   Provider,
   ProviderAccount,
   ReconciliationAlert,
+  ReconciliationRun,
   RequestContext,
   Seller,
   SellerDestination,
@@ -51,7 +52,8 @@ import {
 import { collectionRails, defaultProviderFor, providerFor } from '@/lib/rails'
 import { makeAccount } from './accounts'
 import { payoutFindings, recordFindings } from './risk'
-import { platformPayoutRoutes } from './routing'
+import { platformLaunchChecklist } from './launch'
+import { platformPayoutRoutes, platformProviderCapabilities } from './routing'
 import { SCHEMA_VERSION, addDays, mintId, type MockDb } from './store'
 
 const AUTOHIRE = 'ten_0001'
@@ -891,6 +893,10 @@ export function seedDb(): MockDb {
         kind: e.kind,
         description: e.description,
         url: e.url,
+        // Fixtures record the capture time as the moment it was filed. A
+        // seeded photo claiming to have been taken at handover would be
+        // inventing evidence for a case nobody argued.
+        captured_at: null,
         submitted_at: addDays(createdAt, e.day),
       }))
 
@@ -900,7 +906,12 @@ export function seedDb(): MockDb {
         tenant_id: spec.tenant_id,
         deal_id: dealId,
         raised_by: d.raised_by,
+        raised_by_actor: `user:${d.raised_by}`,
         reason: d.reason,
+        // The fixtures predate §8's codes and none of them was filed under one.
+        // Defaulting rather than back-filling keeps them honest.
+        reason_code: 'other',
+        disputed_amount: null,
         counter_statement: d.counter_statement ?? null,
         evidence,
         status: !d.resolved
@@ -911,6 +922,7 @@ export function seedDb(): MockDb {
         opened_at: openedAt,
         resolved_at: resolvedAt,
         resolution_note: d.resolution_note ?? null,
+        decided_by: d.resolved ? 'payhold-staff' : null,
       })
       log(`user:${d.raised_by}`, 'deal.disputed', openedAt, { reason: d.reason })
       for (const e of evidence) {
@@ -978,6 +990,14 @@ export function seedDb(): MockDb {
           ? 'Beneficiary rejected: MoMo account not active'
           : null,
         attempts: spec.payout_failed ? 3 : paidAt ? 1 : 0,
+        // §13's retry clock. A failed fixture is mid-ladder rather than
+        // exhausted — the seeded state is a payout still being retried, which
+        // is the one an operator has a decision to make about.
+        next_attempt_at: spec.payout_failed
+          ? addDays(payoutDue, 0.3)
+          : paidAt
+            ? null
+            : payoutDue,
         review_held_at: null,
         review_held_by: null,
         review_hold_reason: null,
@@ -1183,6 +1203,10 @@ export function seedDb(): MockDb {
    * alert component. This demonstrates the job.
    */
   const alerts: ReconciliationAlert[] = []
+  // §13's run records. Empty at seed for the same reason `webhook_deliveries`
+  // is: a pass is something the cron does, and inventing one nobody ran would
+  // be a fixture claiming we had looked.
+  const reconciliation_runs: ReconciliationRun[] = []
 
   const provider_drift: Record<string, number> = {
     [`${EQUIPCO}:flutterwave:RWF`]: 25_000,
@@ -1312,7 +1336,22 @@ export function seedDb(): MockDb {
     // switch one off and watch a payout block — §5.2's eighth case.
     payout_routes: platformPayoutRoutes(ago(365)),
     payout_decisions: [],
+    // §9's matrix. Three adapters built, three declared — and no closed
+    // markets, because `payment_markets` is an overlay: a country nobody has
+    // ruled on is open.
+    provider_capabilities: platformProviderCapabilities(),
+    payment_markets: [],
+    // §16, and nothing signed. The gate ships shut, because the list is a list
+    // of things nobody has done yet — seeding a signature would make the demo
+    // teach that live keys are one click away.
+    launch_checklist: platformLaunchChecklist(),
+    launch_sign_offs: [],
+    // No fixture sessions: a payment link is a thing that was issued, not a
+    // state a deal rests in, and a seeded one would be expired by the time
+    // anybody loaded the demo.
+    checkout_sessions: [],
     disputes,
+    dispute_offers: [],
     // No fixture refunds: the seeded deals all ran cleanly or are still
     // running, and a refund is a thing that happened rather than a state.
     refunds: [],
@@ -1322,6 +1361,7 @@ export function seedDb(): MockDb {
     webhook_deliveries: [],
     audit,
     alerts,
+    reconciliation_runs,
     risk_signals: [],
     request_context,
     ai_suggestions,

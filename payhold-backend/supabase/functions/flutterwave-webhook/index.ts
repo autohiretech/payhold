@@ -148,7 +148,7 @@ Deno.serve(handler(async (req) => {
     : null
 
   // (3) Signature, against this tenant's own stored hash.
-  const signatureOk = loaded?.provider.verifySignature(raw, req.headers) ?? false
+  const signatureOk = await (loaded?.provider.verifySignature(raw, req.headers) ?? false)
   const connected = loaded?.connected ?? false
   const provider = loaded?.provider
 

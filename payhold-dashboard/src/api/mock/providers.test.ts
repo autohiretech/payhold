@@ -8,8 +8,9 @@
 
 import { beforeEach, describe, expect, it } from 'vitest'
 import { MockClient } from './index'
-import { resetDb } from './store'
+import { getDb, resetDb } from './store'
 import { seedDb } from './seed'
+import { signOffLaunchItem } from './launch'
 import { PayHoldError } from '../types'
 
 const FLW_TEST = {
@@ -20,6 +21,22 @@ const FLW_TEST = {
 }
 
 const FLW_LIVE = { ...FLW_TEST, secret_key: 'FLWSECK-live0987-X' }
+
+/**
+ * Open §16's launch gate.
+ *
+ * Live mode is refused outright while the checklist has anything outstanding,
+ * and refused *before* the credential shapes are looked at — so a test about
+ * the test/live key guard has to get past the gate to reach the guard it names.
+ * `launch.test.ts` is where the gate itself is tested.
+ */
+function openLaunchGate(): void {
+  const db = getDb()
+  for (const item of db.launch_checklist) {
+    item.blocked_by = null
+    signOffLaunchItem(db, item.code, 'Amina (compliance)', 'ticket LAUNCH-1', true)
+  }
+}
 
 let api: MockClient
 
@@ -104,6 +121,7 @@ describe('connecting', () => {
   })
 
   it('refuses a test key connected as live', async () => {
+    openLaunchGate()
     await expect(
       api.connectProvider({
         provider: 'flutterwave',
@@ -114,6 +132,7 @@ describe('connecting', () => {
   })
 
   it('replaces keys rather than creating a second account for the rail', async () => {
+    openLaunchGate()
     await api.connectProvider({
       provider: 'flutterwave',
       mode: 'test',

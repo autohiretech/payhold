@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import {
   Badge,
@@ -5,6 +6,7 @@ import {
   Card,
   CardHeader,
   EmptyState,
+  ErrorNote,
   Mono,
   PageHeader,
   Skeleton,
@@ -14,8 +16,10 @@ import {
   Th,
 } from '@/components/ui'
 import { ProviderChip } from '@/components/rails'
+import { useAuth } from '@/auth/AuthProvider'
 import {
   DEAL_STATUS_META,
+  KYC_STATUS_META,
   PAYOUT_STATUS_META,
   formatDate,
   formatDateTime,
@@ -34,12 +38,15 @@ import {
   simNow,
   useDeals,
   useDisputes,
+  useMoneyMutation,
   usePayouts,
   useRequestContext,
   useRiskSignals,
+  useSellerCapabilities,
+  useSellerDestinations,
   useSellers,
 } from '@/lib/queries'
-import type { Currency, Money, RiskSeverity } from '@/api'
+import { api, type Currency, type Money, type RiskSeverity, type Seller } from '@/api'
 
 /**
  * One counterparty, everything this account knows about them.
@@ -50,9 +57,12 @@ import type { Currency, Money, RiskSeverity } from '@/api'
  * whether a dispute has gone against them — and the answer was previously
  * spread across four screens that each showed a fragment of it.
  *
- * It is a record, not a verdict. Nothing here scores anybody and there is no
- * action on this page: clearing a hold lives on Payouts, where the approval is
- * recorded against the person who made it.
+ * It is a record, not a verdict. Nothing here scores anybody, and the one
+ * action it carries is **not** a payout decision: clearing a hold still lives on
+ * Payouts, because a hold is a question about one payment. Attesting that a
+ * seller's identity, sanctions screen and ownership came back is a fact about
+ * this seller and has nowhere else it could live — §12 says a person must
+ * record it, and this is the page that person is looking at.
  *
  * The one number worth explaining is **how old the seller was when each deal
  * was created**, shown per deal rather than as a single "registered" date. That
@@ -167,17 +177,20 @@ export function SellerDetailPage() {
         />
       </div>
 
+      {/* -- Onboarding ------------------------------------------------------- */}
+
+      <Onboarding seller={seller} now={now} />
+
       {/* -- Who they are ----------------------------------------------------- */}
 
       <Card className="mb-8">
         <CardHeader
-          title="Payout destination"
-          subtitle="Tokenized by the provider. PayHold never stores the real number."
+          title="Payout destinations"
+          subtitle="Tokenized by the provider. PayHold never stores the real number. §5.1 gives a seller a preferred destination and, optionally, one verified backup."
         />
         <dl className="grid gap-x-8 gap-y-5 px-6 pb-6 sm:grid-cols-2 lg:grid-cols-3">
           <Detail label="Seller id" value={<Mono>{seller.id}</Mono>} />
           <Detail label="Method" value={PAYOUT_PROVIDER_LABEL[seller.payout_provider]} />
-          <Detail label="Destination" value={<Mono>{seller.masked_destination}</Mono>} />
           <Detail label="Paid in" value={seller.payout_currency} />
           <Detail
             label="Paid via"
@@ -192,6 +205,8 @@ export function SellerDetailPage() {
           />
           <Detail label="Registered" value={formatDateTime(seller.created_at)} />
         </dl>
+
+        <Destinations sellerId={seller.id} now={now} />
       </Card>
 
       {/* -- Deals ------------------------------------------------------------ */}
@@ -418,6 +433,250 @@ export function SellerDetailPage() {
         buyer showing up twice is something you can see and we cannot name.
       </p>
     </>
+  )
+}
+
+/**
+ * §12's gate, from the seller's side of it.
+ *
+ * `getSellerCapabilities` returns **every** reason rather than the first,
+ * because a seller told to fix one thing at a time discovers the next one three
+ * weeks later as a held payout. The two lists stay apart on screen for the same
+ * reason they are apart in the API: one is work for them, the other is work for
+ * us, and a routing gap put in the first column would send a verified seller
+ * back to verify themselves again.
+ */
+function Onboarding({ seller, now }: { seller: Seller; now: Date }) {
+  const { account } = useAuth()
+  const capabilities = useSellerCapabilities(seller.id)
+  const [confirming, setConfirming] = useState(false)
+
+  // Recorded against whoever is signed in, never a name from a form: a caller
+  // that can name its own verifier can forge one.
+  const actor = account?.full_name ?? account?.email ?? ''
+  const verify = useMoneyMutation((verified: boolean) =>
+    api.verifySeller(seller.id, actor, verified),
+  )
+
+  const cap = capabilities.data
+
+  return (
+    <Card className="mb-8">
+      <CardHeader
+        title="Onboarding"
+        subtitle="§12: a seller must not be paid because a payment webhook said “success”. Somebody has to say the checks came back."
+        action={<Badge meta={KYC_STATUS_META[seller.kyc_status]} />}
+      />
+
+      <div className="grid gap-x-8 gap-y-5 px-6 pb-6 sm:grid-cols-2">
+        <div>
+          <dl className="space-y-5">
+            <Detail
+              label="Sanctions screened"
+              value={
+                seller.sanctions_checked_at
+                  ? `${formatDate(seller.sanctions_checked_at)} (${formatRelative(seller.sanctions_checked_at, now)})`
+                  : 'Never'
+              }
+              hint="Not a boolean — the question is “recently enough”, not “ever”."
+            />
+            <Detail
+              label="Destination last changed"
+              value={
+                seller.destination_changed_at
+                  ? formatRelative(seller.destination_changed_at, now)
+                  : 'Never moved'
+              }
+              hint="§5.1's change protection: a destination that just moved holds the next payout, so a stolen session cannot redirect money and have it leave before anyone notices."
+            />
+          </dl>
+        </div>
+
+        <div>
+          {capabilities.isPending ? (
+            <Skeleton className="h-24" />
+          ) : cap?.can_receive_payouts ? (
+            <p className="rounded-xl bg-released-soft px-4 py-3 text-sm leading-relaxed text-released">
+              This seller can be paid. Nothing is outstanding and a route reaches
+              them.
+            </p>
+          ) : (
+            <div className="space-y-3">
+              {cap && cap.reasons.length > 0 && (
+                <div className="rounded-xl bg-pending-soft px-4 py-3">
+                  <p className="text-xs font-semibold tracking-[0.06em] text-pending uppercase">
+                    Outstanding — holds their payouts
+                  </p>
+                  <ul className="mt-2 space-y-1 text-sm leading-relaxed text-fg">
+                    {cap.reasons.map((reason) => (
+                      <li key={reason}>{reason}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+              {cap && cap.route_reasons.length > 0 && (
+                <div className="rounded-xl bg-surface-2 px-4 py-3">
+                  <p className="text-xs font-semibold tracking-[0.06em] text-fg-muted uppercase">
+                    PayHold cannot reach them
+                  </p>
+                  <ul className="mt-2 space-y-1 text-sm leading-relaxed text-fg">
+                    {cap.route_reasons.map((reason) => (
+                      <li key={reason}>{reason}</li>
+                    ))}
+                  </ul>
+                  <p className="mt-2 text-xs leading-relaxed text-fg-muted">
+                    Nothing here is theirs to fix, and none of it asks them to verify
+                    anything again. It blocks the payout rather than holding it for
+                    verification.
+                  </p>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+
+      <div className="border-t border-line px-6 py-4">
+        {seller.kyc_status === 'verified' ? (
+          <div className="flex flex-wrap items-center gap-3">
+            <p className="flex-1 text-xs leading-relaxed text-fg-muted">
+              Verified. Withdrawing it moves them to “needs review” and holds their
+              payouts again — it does not stop a transfer already with the provider.
+            </p>
+            <Button
+              size="sm"
+              variant="ghost"
+              disabled={verify.isPending || !actor}
+              onClick={() => verify.mutate(false)}
+            >
+              Withdraw verification
+            </Button>
+          </div>
+        ) : confirming ? (
+          <div className="space-y-3">
+            <p className="text-sm leading-relaxed text-fg">
+              You are recording that the identity check, the sanctions screen and the
+              ownership check came back for {seller.name}. It is written against{' '}
+              <strong className="font-semibold">{actor}</strong> and it is what makes
+              their payouts payable.
+            </p>
+            <div className="flex gap-2">
+              <Button
+                size="sm"
+                variant="primary"
+                disabled={verify.isPending || !actor}
+                onClick={() => verify.mutate(true)}
+              >
+                {verify.isPending ? 'Recording…' : 'Yes, they came back'}
+              </Button>
+              <Button size="sm" variant="ghost" onClick={() => setConfirming(false)}>
+                Cancel
+              </Button>
+            </div>
+          </div>
+        ) : (
+          <div className="flex flex-wrap items-center gap-3">
+            <p className="flex-1 text-xs leading-relaxed text-fg-muted">
+              PayHold does not run these checks. Verifying records that you did, and
+              your name goes on it.
+            </p>
+            <Button size="sm" variant="primary" onClick={() => setConfirming(true)}>
+              Verify this seller
+            </Button>
+          </div>
+        )}
+
+        {verify.isError && (
+          <div className="mt-3">
+            <ErrorNote message={verify.error.message} />
+          </div>
+        )}
+      </div>
+    </Card>
+  )
+}
+
+/**
+ * §5.1's `seller_destinations`. The primary is the record;
+ * `Seller.beneficiary_token` and `masked_destination` are its copy, kept in
+ * step by a trigger with exactly one writer.
+ *
+ * The backup is read-only here and deliberately so: it is used only after a
+ * failed primary, `payout_primary_attempts` attempts, an explicit policy check,
+ * and its own verification and security hold. A button that could pick it would
+ * be the silent redirection §5.1 forbids.
+ */
+function Destinations({ sellerId, now }: { sellerId: string; now: Date }) {
+  const destinations = useSellerDestinations(sellerId)
+
+  if (destinations.isPending) {
+    return (
+      <div className="px-6 pb-6">
+        <Skeleton className="h-16" />
+      </div>
+    )
+  }
+
+  if (!destinations.data?.length) {
+    return (
+      <EmptyState
+        title="No destination registered"
+        body="A seller without one is unpayable for a reason nobody chose."
+      />
+    )
+  }
+
+  return (
+    <Table>
+      <thead>
+        <tr>
+          <Th>Role</Th>
+          <Th>Destination</Th>
+          <Th>Method</Th>
+          <Th>Market</Th>
+          <Th>Paid in</Th>
+          <Th align="right">Verified</Th>
+        </tr>
+      </thead>
+      <tbody>
+        {destinations.data.map((d) => {
+          const onHold =
+            d.security_hold_until !== null && new Date(d.security_hold_until) > now
+          return (
+            <tr key={d.id}>
+              <Td className="font-medium">
+                {d.is_primary ? 'Preferred' : d.is_backup ? 'Backup' : 'Other'}
+                {d.label && (
+                  <span className="block text-xs text-fg-muted">{d.label}</span>
+                )}
+              </Td>
+              <Td>
+                <Mono>{d.masked_destination}</Mono>
+              </Td>
+              <Td className="text-fg-muted">
+                {PAYOUT_PROVIDER_LABEL[d.payout_provider]}
+              </Td>
+              <Td className="text-fg-muted">
+                {countryFlag(d.country)} {countryName(d.country)}
+              </Td>
+              <Td className="tabular text-fg-muted">{d.payout_currency}</Td>
+              <Td align="right" className="text-fg-muted">
+                {d.verified_at ? (
+                  formatDate(d.verified_at)
+                ) : (
+                  <span className="font-semibold text-danger">Not verified</span>
+                )}
+                {onHold && (
+                  <span className="block text-xs text-pending">
+                    In its security hold until {formatDateTime(d.security_hold_until)}
+                  </span>
+                )}
+              </Td>
+            </tr>
+          )
+        })}
+      </tbody>
+    </Table>
   )
 }
 

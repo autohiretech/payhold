@@ -16,6 +16,7 @@ import type { SupabaseClient } from 'npm:@supabase/supabase-js@2'
 import { decryptCredentials } from './crypto.ts'
 import { FlutterwaveProvider, type FlutterwaveCredentials } from './flutterwave.ts'
 import { FakeProvider, type PaymentProvider } from './provider.ts'
+import { StripeProvider, type StripeCredentials } from './stripe.ts'
 import { PayHoldError, type Provider } from './types.ts'
 
 export interface LoadedProvider {
@@ -29,6 +30,26 @@ function publicUrl(): string {
   return Deno.env.get('PUBLIC_URL') ?? 'https://app.payhold.local'
 }
 
+/**
+ * §9's capability row for one adapter, or null if it has none.
+ *
+ * `provider_capabilities` is the database half of `ProviderCapabilities`, and
+ * the two must agree — the flags are declared in both because one side is what
+ * the code can do and the other is what an operator may switch off.
+ */
+export async function providerCapability(
+  db: SupabaseClient,
+  rail: Provider,
+): Promise<{ implemented: boolean; enabled: boolean; note: string | null } | null> {
+  const { data } = await db
+    .from('provider_capabilities')
+    .select('implemented, enabled, note')
+    .eq('provider', rail)
+    .maybeSingle()
+
+  return data as { implemented: boolean; enabled: boolean; note: string | null } | null
+}
+
 export async function loadProvider(
   db: SupabaseClient,
   tenantId: string,
@@ -36,6 +57,28 @@ export async function loadProvider(
 ): Promise<LoadedProvider> {
   if (rail === 'fake') {
     return { provider: new FakeProvider(publicUrl()), mode: 'test', connected: false }
+  }
+
+  // §9's declared-but-unbuilt adapters, and any rail an operator has switched
+  // off. Both fail here and neither falls back to the fake, for the reason
+  // Stripe used to: a deal routed to an adapter that silently collected nothing
+  // while reporting success is worse than a visible failure.
+  //
+  // The two are separate messages because they need different next actions —
+  // one is a roadmap item, the other is an outage or a commercial decision.
+  const capability = await providerCapability(db, rail)
+
+  if (capability && !capability.implemented) {
+    throw new PayHoldError(
+      'policy_violation',
+      `${rail} is declared but not built${capability.note ? ` — ${capability.note}` : ''}`,
+    )
+  }
+  if (capability && !capability.enabled) {
+    throw new PayHoldError(
+      'policy_violation',
+      `${rail} is switched off${capability.note ? ` — ${capability.note}` : ''}`,
+    )
   }
 
   const { data } = await db
@@ -64,12 +107,21 @@ export async function loadProvider(
         connected: true,
       }
     case 'stripe':
-      // StripeProvider is not written yet. Falling back to the fake here would
-      // be worse than failing: a deal routed to Stripe would silently collect
-      // nothing while reporting success.
+      return {
+        provider: new StripeProvider(
+          credentials as unknown as StripeCredentials,
+          publicUrl(),
+        ),
+        mode: data.mode,
+        connected: true,
+      }
+    default:
+      // An adapter with an enum value, a live capability row and no class here.
+      // Unreachable while the two stay in step, and a loud failure if they do
+      // not — which is the direction to fail in.
       throw new PayHoldError(
         'policy_violation',
-        'Stripe is connected but the Stripe rail is not implemented yet',
+        `${rail} has no adapter in this deployment`,
       )
   }
 }
@@ -96,6 +148,9 @@ export async function connectedRails(
     connected: true,
   }))
 
+  // The rails a tenant can actually connect today. The declared-but-unbuilt
+  // adapters are deliberately absent: offering a "connect" button for something
+  // `loadProvider` throws on would be an invitation to a dead end.
   const real: Provider[] = ['flutterwave', 'stripe']
   for (const rail of real) {
     if (!rows.some((r) => r.provider === rail)) {

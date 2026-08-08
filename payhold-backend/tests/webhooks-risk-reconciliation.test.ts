@@ -391,10 +391,13 @@ describe('risk rules', () => {
       [s.tenant, s.seller],
     )
     await h.db.query(
+      // A paid payout carries the rail's reference for the transfer — §17 makes
+      // that a constraint, so a fixture without one is not a payout that could
+      // have existed.
       `insert into payouts (tenant_id, deal_id, seller_id, amount, currency, status,
-                            scheduled_for, paid_at)
+                            scheduled_for, paid_at, provider_ref)
        values ($1, $2, $3, 90000, 'RWF', 'paid', now() - interval '30 days',
-               now() - interval '30 days')`,
+               now() - interval '30 days', 'FLW-OLD-TRF')`,
       [s.tenant, old.id, s.seller],
     )
 

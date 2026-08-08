@@ -12,6 +12,7 @@ import { beforeEach, describe, expect, it } from 'vitest'
 import type { Country, Currency, Payout, PayoutProvider, SellerDestination } from '../types'
 import { confirmDeal, fundDeal, requireDeal, runCron } from './engine'
 import {
+  marketOpen,
   payoutDisplayStatus,
   primaryDestination,
   routeEvaluation,
@@ -118,11 +119,16 @@ describe('§5.2 — payout routing acceptance tests', () => {
     const payout = payoutFor(id)
     payout.currency = 'USD'
 
-    expect(routePayout(db, payout).reason_code).toBe('provider_disabled')
+    // `provider_unavailable`, not `provider_disabled`: Phase 6 separated "the
+    // adapter is not built" from "we switched this corridor off". Same sentence
+    // to the seller, different next action for us.
+    expect(routePayout(db, payout).reason_code).toBe('provider_unavailable')
     expect(payout.failure_reason).toBe('venmo is not available for payouts yet.')
 
     // §5.2's case is about the border, so switch the rail on for one tenant to
-    // reach it. Hypothetical: nothing sends here — the test asks the engine.
+    // reach it. Hypothetical: it borrows a live adapter, because a route whose
+    // adapter is unbuilt cannot be enabled. Nothing sends here — the test asks
+    // the engine, not a provider.
     db.payout_routes.push({
       ...db.payout_routes.find((r) => r.payout_provider === 'venmo')!,
       id: 'route_venmo_tenant',
@@ -141,13 +147,14 @@ describe('§5.2 — payout routing acceptance tests', () => {
 
   it('3. a China seller on Alipay is routed only once the partner is approved', () => {
     // §5: "Do not promise cross-border payout until approved." The route exists
-    // so the seller gets an answer; it carries no adapter, so it cannot run.
+    // so the seller gets an answer; its adapter — `china_wallet_partner` — is
+    // declared and unbuilt, so it cannot run.
     const id = newDeal()
     relocate(id, 'CN', 'CNY', 'alipay')
     const payout = payoutFor(id)
     payout.currency = 'CNY'
 
-    expect(routePayout(db, payout).reason_code).toBe('provider_disabled')
+    expect(routePayout(db, payout).reason_code).toBe('provider_unavailable')
     expect(payout.status).toBe('blocked')
   })
 
@@ -277,7 +284,7 @@ describe('a decision is a record, not a return value', () => {
 
     // Including the losers, which is what answers "why not the one I picked".
     expect(decision.checks.find((c) => c.payout_provider === 'venmo')?.reason_code)
-      .toBe('provider_disabled')
+      .toBe('provider_unavailable')
   })
 
   it('an unchanged outcome does not write a second row', () => {
@@ -466,5 +473,127 @@ describe('payoutDisplayStatus', () => {
     // theirs and the word is what tells them so.
     payout.status = 'needs_verification'
     expect(payoutDisplayStatus(db, payout)).toBe('needs_verification')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// §9 and §12 — the capability matrix
+// ---------------------------------------------------------------------------
+
+describe('§9 — adapters declare what they can do', () => {
+  it('an adapter going down takes only its own routes', () => {
+    const id = newDeal()
+    relocate(id, 'RW', 'RWF', 'flutterwave_momo')
+    const payout = payoutFor(id)
+    expect(routePayout(db, payout).reason_code).toBe('routed')
+
+    // One row, one field. No deploy — §15 phase 3.
+    db.provider_capabilities.find((c) => c.provider === 'flutterwave')!.enabled = false
+
+    payout.status = 'scheduled'
+    expect(routePayout(db, payout).reason_code).toBe('provider_unavailable')
+
+    // Both Flutterwave rails, because the adapter is what went down — and
+    // nobody else's.
+    const checks = routeEvaluation(db, AUTOHIRE, 'US', 'USD', 90_000, 'stripe_connect')
+    expect(checks.find((c) => c.payout_provider === 'stripe_connect')?.eligible).toBe(true)
+    expect(checks.find((c) => c.payout_provider === 'flutterwave_bank')?.reason_code)
+      .toBe('provider_unavailable')
+  })
+
+  it('one adapter carries several rails', () => {
+    // Venmo destinations are reached through PayPal's API, and both Chinese
+    // wallets through one partner. `payout_provider` names the rail, `provider`
+    // names the adapter, and conflating them is what two types avoid.
+    const byPayPal = db.payout_routes
+      .filter((r) => r.tenant_id === null && r.provider === 'paypal')
+      .map((r) => r.payout_provider)
+      .sort()
+    expect(byPayPal).toEqual(['paypal', 'venmo'])
+  })
+
+  it('mobile money is Flutterwave\'s and no one else\'s', () => {
+    // The structural reason both adapters exist, stated as data so a caller can
+    // ask rather than branch on the provider's name.
+    const wallets = db.provider_capabilities
+      .filter((c) => c.implemented && c.supports_mobile_money)
+      .map((c) => c.provider)
+      .sort()
+    expect(wallets).toEqual(['fake', 'flutterwave'])
+  })
+})
+
+describe('§12 — closing a market is a row', () => {
+  it('a closed market blocks payout selection, ahead of every rail reason', () => {
+    const id = newDeal()
+    relocate(id, 'RW', 'RWF', 'flutterwave_momo')
+    const payout = payoutFor(id)
+    expect(routePayout(db, payout).reason_code).toBe('routed')
+
+    db.payment_markets.push({
+      id: mintId(db, 'mkt'),
+      tenant_id: null,
+      country: 'RW',
+      collect: false,
+      payout: false,
+      reason: 'Suspended pending a licence review',
+      created_at: nowIso(),
+    })
+
+    payout.status = 'scheduled'
+    const closed = routePayout(db, payout)
+    expect(closed.reason_code).toBe('market_closed')
+    expect(payout.failure_reason)
+      .toBe('PayHold is not sending payouts to RW at the moment.')
+  })
+
+  it('a market nobody has ruled on is open', () => {
+    // The overlay property. `payment_markets` is not a copy of the registry —
+    // it holds deliberate departures from it, and absence means nothing was
+    // decided rather than that everything is shut.
+    expect(db.payment_markets).toEqual([])
+    expect(marketOpen(db, AUTOHIRE, 'KE', 'payout')).toBe(true)
+  })
+
+  it('collect and payout close independently', () => {
+    // A market can be one-way. Collecting from a country we cannot pay into is
+    // the normal case for most of the world, and the reverse happens too.
+    db.payment_markets.push({
+      id: mintId(db, 'mkt'),
+      tenant_id: null,
+      country: 'RW',
+      collect: true,
+      payout: false,
+      reason: 'Payouts paused; collection unaffected',
+      created_at: nowIso(),
+    })
+
+    expect(marketOpen(db, AUTOHIRE, 'RW', 'collect')).toBe(true)
+    expect(marketOpen(db, AUTOHIRE, 'RW', 'payout')).toBe(false)
+  })
+
+  it('a tenant closure replaces the platform default rather than joining it', () => {
+    db.payment_markets.push({
+      id: mintId(db, 'mkt'),
+      tenant_id: null,
+      country: 'RW',
+      collect: false,
+      payout: false,
+      reason: 'Platform: closed',
+      created_at: nowIso(),
+    }, {
+      id: mintId(db, 'mkt'),
+      tenant_id: AUTOHIRE,
+      country: 'RW',
+      collect: true,
+      payout: true,
+      reason: 'This tenant has its own licence',
+      created_at: nowIso(),
+    })
+
+    // The same rule `resolvedRoutes` applies to rails: more specific wins, and
+    // it wins in both directions rather than only towards "closed".
+    expect(marketOpen(db, AUTOHIRE, 'RW', 'payout')).toBe(true)
+    expect(marketOpen(db, 'ten_0002', 'RW', 'payout')).toBe(false)
   })
 })

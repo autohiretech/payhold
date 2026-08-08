@@ -22,6 +22,8 @@ import {
   type DealAmounts,
   type DealOutcome,
   type Dispute,
+  type DisputeReasonCode,
+  type Money,
   type LedgerEntry,
   type LedgerEntryType,
   type PaymentMethod,
@@ -30,6 +32,9 @@ import {
   type Provider,
   type RailBalance,
   type ReconciliationAlert,
+  type ReconciliationRun,
+  type Seller,
+  type SellerCapabilities,
   type TenantSettings,
 } from '../types'
 import { METHOD_LABEL, collectionRails, providerFor } from '@/lib/rails'
@@ -41,12 +46,23 @@ import {
   hoursBetween,
   isDue,
   nextId,
+  now,
   nowIso,
   type MockDb,
 } from './store'
 import { dealFindings, payoutFindings, recordFindings } from './risk'
-import { primaryDestination, routePayout } from './routing'
+import {
+  primaryDestination,
+  routeEvaluation,
+  routePayout,
+  routeReasonText,
+} from './routing'
 import { deliverPending, emitWebhook } from './webhooks'
+import {
+  assertMayDecide,
+  assertWithinDisputedAmount,
+  openOfferForDeal,
+} from './resolution'
 
 /**
  * Re-exported so the many callers that reach for `audit` alongside the money
@@ -98,7 +114,7 @@ function ledgerEntry(
   })
 }
 
-function touch(deal: Deal): void {
+export function touch(deal: Deal): void {
   deal.updated_at = nowIso()
 }
 
@@ -394,6 +410,9 @@ function releaseDeal(db: MockDb, deal: Deal): Deal {
     paid_at: null,
     failure_reason: null,
     attempts: 0,
+    // §13's retry clock. Due immediately; `dispatchPayout` moves it out on a
+    // refusal and clears it altogether when the budget is spent.
+    next_attempt_at: nowIso(),
     review_held_at: null,
     review_held_by: null,
     review_hold_reason: null,
@@ -556,10 +575,14 @@ export function refundDeal(
     ledgerEntry(db, deal, 'deposit_release', -deal.deposit_amount)
   }
 
-  // Nothing is owed any more, so nothing should be scheduled.
+  // Nothing is owed any more, so nothing should be scheduled — and no machine
+  // may pick it up again. `failed` is dispatchable as of §13's retry, so the
+  // cleared clock is what keeps the cron from re-attempting a transfer nobody
+  // is owed. The backend does this in a trigger, so any writer gets it.
   if (payout && ['scheduled', 'frozen', 'held_for_review'].includes(payout.status)) {
     payout.status = 'failed'
     payout.failure_reason = 'Deal was refunded'
+    payout.next_attempt_at = null
   }
 
   audit(db, deal.tenant_id, deal.id, actor, 'deal.refunded', { reason, amount: value })
@@ -658,6 +681,11 @@ export function openDispute(
   dealId: string,
   raisedBy: ConfirmSide,
   reason: string,
+  opts: {
+    reasonCode?: DisputeReasonCode
+    actor?: string
+    disputedAmount?: Money | null
+  } = {},
 ): Dispute {
   const deal = requireDeal(db, dealId)
 
@@ -671,12 +699,30 @@ export function openDispute(
     )
   }
 
+  const amount = opts.disputedAmount ?? null
+  if (amount !== null && amount > deal.presentment_amount) {
+    throw new PayHoldError(
+      'policy_violation',
+      `${amount} is more than the buyer paid`,
+    )
+  }
+
+  // §8: a new dispute cannot open while another request for the same order is
+  // open. The existing one-open-dispute rule said this only about disputes; an
+  // outstanding request is the same sentence about the same order.
+  if (openOfferForDeal(db, deal.id)) {
+    throw new PayHoldError('invalid_state', 'A request on this order is still open')
+  }
+
   const dispute: Dispute = {
     id: nextId('dsp'),
     tenant_id: deal.tenant_id,
     deal_id: deal.id,
     raised_by: raisedBy,
+    raised_by_actor: opts.actor ?? null,
     reason,
+    reason_code: opts.reasonCode ?? 'other',
+    disputed_amount: amount,
     // The other side has not been asked yet — a dispute starts one-sided, and
     // the assistant is told so rather than left to assume silence means guilt.
     counter_statement: null,
@@ -685,6 +731,7 @@ export function openDispute(
     opened_at: nowIso(),
     resolved_at: null,
     resolution_note: null,
+    decided_by: null,
   }
   db.disputes.push(dispute)
 
@@ -702,8 +749,9 @@ export function openDispute(
 export function resolveDispute(
   db: MockDb,
   disputeId: string,
-  resolution: 'release' | 'refund',
+  resolution: 'release' | 'refund' | 'partial_refund',
   note: string,
+  opts: { refundAmount?: Money | null; decidedBy?: string } = {},
 ): Dispute {
   const dispute = db.disputes.find((d) => d.id === disputeId)
   if (!dispute) throw new PayHoldError('not_found', `Dispute ${disputeId} not found`)
@@ -712,8 +760,37 @@ export function resolveDispute(
   }
 
   const deal = requireDeal(db, dispute.deal_id)
+  const decidedBy = opts.decidedBy ?? ''
+  const refundAmount = opts.refundAmount ?? null
 
-  if (resolution === 'release') {
+  // §8's two guards, in the order the backend applies them: who may decide,
+  // then how much they may take.
+  assertMayDecide(db, dispute, decidedBy)
+  assertWithinDisputedAmount(dispute, resolution, refundAmount, deal.presentment_amount)
+
+  if (resolution === 'partial_refund') {
+    if (refundAmount === null || refundAmount <= 0) {
+      throw new PayHoldError('policy_violation', 'A partial refund must name an amount')
+    }
+    if (refundAmount >= deal.presentment_amount) {
+      throw new PayHoldError(
+        'policy_violation',
+        'A partial refund cannot be the whole payment — resolve it as a refund',
+      )
+    }
+
+    deal.status = 'funded_held'
+    // The buyer's share first, so the release that follows lets out only what
+    // is left — the same order `resolve_dispute` uses.
+    refundDeal(db, deal.id, `Dispute resolved in part: ${note}`, refundAmount)
+    for (const side of ['buyer', 'seller'] as ConfirmSide[]) {
+      if (!deal.confirmations.some((c) => c.side === side)) {
+        deal.confirmations.push({ side, confirmed_at: nowIso(), actor: 'auto' })
+      }
+    }
+    releaseDeal(db, deal)
+    dispute.status = 'resolved_split'
+  } else if (resolution === 'release') {
     // Staff resolution stands in for the parties: both sides are recorded as
     // confirmed by the system, then the normal release path runs.
     deal.status = 'funded_held'
@@ -732,8 +809,20 @@ export function resolveDispute(
 
   dispute.resolved_at = nowIso()
   dispute.resolution_note = note
-  audit(db, deal.tenant_id, deal.id, 'payhold-staff', 'dispute.resolved', {
+  dispute.decided_by = decidedBy
+
+  // Any request still outstanding is moot now, and leaving it open would block
+  // the next dispute on this order through the one-open-request rule.
+  for (const offer of db.dispute_offers) {
+    if (offer.dispute_id !== dispute.id || offer.status !== 'open') continue
+    offer.status = 'withdrawn'
+    offer.responded_at = nowIso()
+    offer.responded_by_actor = decidedBy
+  }
+
+  audit(db, deal.tenant_id, deal.id, decidedBy, 'dispute.resolved', {
     resolution,
+    refund_amount: refundAmount,
     note,
   })
   emitWebhook(db, deal.tenant_id, 'deal.dispute_resolved', deal.id, {
@@ -741,10 +830,19 @@ export function resolveDispute(
     resolution,
     note,
   })
+  emitWebhook(db, deal.tenant_id, 'dispute.resolved', deal.id, {
+    dispute_id: dispute.id,
+    status: dispute.status,
+    decided_by: decidedBy,
+  })
   recordOutcome(
     db,
     deal,
-    resolution === 'release' ? 'dispute_released' : 'dispute_refunded',
+    resolution === 'release'
+      ? 'dispute_released'
+      : resolution === 'partial_refund'
+      ? 'dispute_split'
+      : 'dispute_refunded',
     `dispute_${dispute.raised_by}_raised`,
     note,
     deal.amount,
@@ -763,9 +861,14 @@ export function resolveDispute(
  *
  * Every reason, not the first — a client showing a seller what is missing
  * should not make them fix one thing at a time.
+ *
+ * It takes a **seller** rather than a payout because none of these questions is
+ * about one: that is what lets `sellerCapabilities` answer them before a payout
+ * exists, and it is the property that makes the onboarding read and the gate
+ * the same arithmetic rather than two lists that drift.
  */
-function sellerEligibility(db: MockDb, payout: Payout): string[] {
-  const seller = db.sellers.find((s) => s.id === payout.seller_id)
+export function sellerEligibility(db: MockDb, sellerId: string): string[] {
+  const seller = db.sellers.find((s) => s.id === sellerId)
   if (!seller) return ['The seller no longer exists']
 
   const reasons: string[] = []
@@ -800,6 +903,115 @@ function sellerEligibility(db: MockDb, payout: Payout): string[] {
 }
 
 /**
+ * `GET /v1/sellers/:id/capabilities` — the mirror of SQL's
+ * `seller_capabilities`, and the read the onboarding screens are built on.
+ *
+ * `reasons` is `sellerEligibility` unchanged, so what this page says is missing
+ * is exactly what the gate will hold a payout for. `route_reasons` is the
+ * separate question — asked with an amount of zero, because this is a question
+ * about a seller and a per-route minimum is a question about a payout.
+ */
+export function sellerCapabilities(db: MockDb, sellerId: string): SellerCapabilities {
+  const seller = db.sellers.find((s) => s.id === sellerId)
+  if (!seller) throw new PayHoldError('not_found', `Seller ${sellerId} not found`)
+
+  const reasons = sellerEligibility(db, sellerId)
+  const routeReasons: string[] = []
+
+  const destination = primaryDestination(db, sellerId)
+  if (destination) {
+    const preferred = routeEvaluation(
+      db,
+      seller.tenant_id,
+      destination.country,
+      destination.payout_currency,
+      0,
+      destination.payout_provider,
+    ).find((check) => check.preferred)
+
+    // No row at all means the rail this destination was tokenized against has
+    // no route defined, which is a different sentence from a route that exists
+    // and refused — §5.2's second case, where a verified seller picked Venmo.
+    if (!preferred) {
+      routeReasons.push(
+        routeReasonText(
+          'no_route_for_destination',
+          destination.payout_provider,
+          destination.country,
+          destination.payout_currency,
+        ),
+      )
+    } else if (!preferred.eligible) {
+      routeReasons.push(
+        routeReasonText(
+          preferred.reason_code,
+          destination.payout_provider,
+          destination.country,
+          destination.payout_currency,
+        ),
+      )
+    }
+  }
+
+  return {
+    seller_id: seller.id,
+    can_receive_payouts: reasons.length === 0 && routeReasons.length === 0,
+    kyc_status: seller.kyc_status,
+    reasons,
+    route_reasons: routeReasons,
+  }
+}
+
+/**
+ * §12's attestation: somebody says the identity check, the sanctions screen and
+ * the ownership check came back.
+ *
+ * One function rather than three column writes because the three travel
+ * together — a seller marked verified with no sanctions date, or with an
+ * unverified destination, is still unpayable, and a caller would have to know
+ * that to get it right. It takes a name for the same reason
+ * `approvePayoutReview` does: the record is of a person's decision, and the
+ * real endpoint refuses an API key outright.
+ */
+export function verifySeller(
+  db: MockDb,
+  sellerId: string,
+  actor: string,
+  verified: boolean,
+): Seller {
+  const seller = db.sellers.find((s) => s.id === sellerId)
+  if (!seller) throw new PayHoldError('not_found', `Seller ${sellerId} not found`)
+
+  if (!actor.trim()) {
+    throw new PayHoldError(
+      'policy_violation',
+      'A verification must record who made it',
+    )
+  }
+
+  seller.kyc_status = verified ? 'verified' : 'review_required'
+  if (verified) {
+    seller.sanctions_checked_at = nowIso()
+
+    const destination = primaryDestination(db, sellerId)
+    // `coalesce`, not an overwrite: re-attesting must not restart the clock on
+    // a destination that has been verified for months.
+    if (destination) destination.verified_at ??= nowIso()
+  }
+
+  audit(
+    db,
+    seller.tenant_id,
+    null,
+    actor,
+    verified ? 'seller.verified' : 'seller.review_required',
+    { seller_id: seller.id, name: seller.name },
+  )
+
+  return seller
+}
+
+/**
  * Run the deterministic rules against a payout that is about to leave.
  *
  * Returns true when the payout was held. The signals are written either way —
@@ -828,7 +1040,7 @@ function screenPayout(db: MockDb, payout: Payout): boolean {
   // behind an earlier approval. The discretionary rules below are arithmetic a
   // tenant may reasonably decline to act on; "we have never verified this
   // seller" is not, and neither is an approval that predates a revocation.
-  const reasons = sellerEligibility(db, payout)
+  const reasons = sellerEligibility(db, payout.seller_id)
 
   if (reasons.length > 0) {
     // Written on entry and on a change of reasons, not on every pass:
@@ -905,6 +1117,68 @@ function screenPayout(db: MockDb, payout: Payout): boolean {
   return true
 }
 
+/**
+ * One refused transfer — §13's capped backoff, mirroring `fail_payout` in
+ * `20260807000014_payout_retry.sql`.
+ *
+ * The ladder is 1m / 5m / 30m / 2h and then flat, the same one
+ * `deliverPending` uses for outbound webhooks: two backoff curves in one system
+ * are two things to reason about during an incident for no gain.
+ *
+ * When the budget is spent the payout becomes `blocked` **and loses its clock**.
+ * A null `next_attempt_at` is what `runCron` skips on, which is how "then move
+ * to blocked for operator action" is expressed without a second status meaning
+ * "blocked, but really blocked".
+ */
+const RETRY_LADDER_MINUTES = [1, 5, 30, 120]
+
+function failPayout(db: MockDb, payout: Payout, reason: string): void {
+  const cfg = settingsFor(db, payout.tenant_id)
+  // At least one attempt whatever a tenant sets: a budget of zero would block
+  // every payout on the first transient error a rail has.
+  const max = Math.max(1, cfg.payout_retry_max_attempts ?? 5)
+  const spent = payout.attempts >= max
+
+  const wait =
+    RETRY_LADDER_MINUTES[Math.min(payout.attempts - 1, RETRY_LADDER_MINUTES.length - 1)] ??
+      RETRY_LADDER_MINUTES[RETRY_LADDER_MINUTES.length - 1]!
+
+  payout.status = spent ? 'blocked' : 'failed'
+  payout.failure_reason = spent
+    ? `${reason} (no further automatic attempts after ${payout.attempts} tries)`
+    : reason
+  payout.next_attempt_at = spent
+    ? null
+    : new Date(now().getTime() + wait * 60_000).toISOString()
+
+  audit(db, payout.tenant_id, payout.deal_id, 'system', 'payout.failed', {
+    reason,
+    attempts: payout.attempts,
+    next_attempt_at: payout.next_attempt_at,
+  })
+  emitWebhook(db, payout.tenant_id, 'payout.failed', payout.deal_id, {
+    payout_id: payout.id,
+    reason,
+    attempts: payout.attempts,
+  })
+
+  // Said separately because it is the different fact, and the one an operator
+  // is paged on: this seller is not getting paid until somebody does something.
+  if (spent) {
+    audit(db, payout.tenant_id, payout.deal_id, 'system', 'payout.retries_exhausted', {
+      payout_id: payout.id,
+      attempts: payout.attempts,
+      reason,
+    })
+    emitWebhook(db, payout.tenant_id, 'payout.blocked', payout.deal_id, {
+      payout_id: payout.id,
+      amount: payout.amount,
+      currency: payout.currency,
+      reason: payout.failure_reason,
+    })
+  }
+}
+
 function dispatchPayout(db: MockDb, payout: Payout): void {
   const tenant = db.tenants.find((t) => t.id === payout.tenant_id)
   if (tenant?.status === 'payouts_frozen') {
@@ -930,17 +1204,7 @@ function dispatchPayout(db: MockDb, payout: Payout): void {
 
   if (db.fail_next_payout) {
     db.fail_next_payout = false
-    payout.status = 'failed'
-    payout.failure_reason = 'Provider rejected the transfer (simulated failure)'
-    audit(db, payout.tenant_id, payout.deal_id, 'system', 'payout.failed', {
-      reason: payout.failure_reason,
-      attempts: payout.attempts,
-    })
-    emitWebhook(db, payout.tenant_id, 'payout.failed', payout.deal_id, {
-      payout_id: payout.id,
-      reason: payout.failure_reason,
-      attempts: payout.attempts,
-    })
+    failPayout(db, payout, 'Provider rejected the transfer (simulated failure)')
     return
   }
 
@@ -1002,6 +1266,18 @@ export function retryPayout(db: MockDb, payoutId: string): Payout {
       'This seller has something outstanding — verify them to send it',
     )
   }
+  // Put the automatic clock back before sending. Otherwise one manual attempt
+  // is all an exhausted payout ever gets, and if that attempt is the one that
+  // fails it leaves the queue silently. The attempt *counter* is deliberately
+  // untouched: `routePayout` reads it to decide whether the seller's verified
+  // backup destination may be used, and zeroing it would send this attempt
+  // straight back to the primary that has been failing.
+  payout.next_attempt_at = nowIso()
+  audit(db, payout.tenant_id, payout.deal_id, 'dashboard', 'payout.retry_requested', {
+    payout_id: payout.id,
+    attempts: payout.attempts,
+  })
+
   dispatchPayout(db, payout)
   return payout
 }
@@ -1156,6 +1432,9 @@ const DISPATCHABLE: PayoutStatus[] = [
   'frozen',
   'blocked',
   'needs_verification',
+  // §13's automatic retry. Gated a second time on `next_attempt_at`, below —
+  // a refused transfer is re-sent on a ladder, not on every pass.
+  'failed',
 ]
 
 export function runCron(db: MockDb): CronResult {
@@ -1241,6 +1520,12 @@ export function runCron(db: MockDb): CronResult {
     // fact — so a pass that re-asks and finds the reason gone overrules nobody.
     // The same shape as `frozen` clearing once reconciliation is resolved.
     if (!DISPATCHABLE.includes(payout.status) || !isDue(payout.scheduled_for)) continue
+    // §13's backoff, and the reason it is a filter rather than a branch inside
+    // `dispatchPayout`: a null clock means no machine may try this again, while
+    // the retry and approve buttons go through the same function on purpose. A
+    // person is not a machine, which is the whole distinction the column
+    // encodes.
+    if (payout.next_attempt_at === null || !isDue(payout.next_attempt_at)) continue
 
     dispatchPayout(db, payout)
     if (payout.status === 'paid') result.paid += 1
@@ -1546,6 +1831,54 @@ export function runReconciliation(db: MockDb, tenantId?: string): Reconciliation
 
   for (const tenant of tenants) {
     let raisedNew = false
+    // §13's record of the pass itself, one per rail. Opened before anything is
+    // compared, so a pass that dies half way still leaves a row saying it
+    // started — an alert table can say what is wrong now and never that we
+    // looked.
+    const runs = new Map<Provider, ReconciliationRun>()
+
+    const runFor = (provider: Provider): ReconciliationRun => {
+      const existing = runs.get(provider)
+      if (existing) return existing
+
+      const previous = db.reconciliation_runs
+        .filter((r) =>
+          r.tenant_id === tenant.id && r.provider === provider && r.status === 'completed'
+        )
+        .map((r) => r.period_end)
+        .sort()
+        .pop()
+
+      const run: ReconciliationRun = {
+        id: nextId('rcr'),
+        tenant_id: tenant.id,
+        provider,
+        // The window picks up where the last completed pass stopped, so an
+        // inbound event cannot fall between two passes and be counted by
+        // neither.
+        period_start: previous ?? addDays(nowIso(), -1),
+        period_end: nowIso(),
+        started_at: nowIso(),
+        finished_at: null,
+        rails_checked: 0,
+        matched: 0,
+        mismatched: 0,
+        skipped: 0,
+        // Always zero here, and honestly so: the mock has no inbound-event
+        // table to have arrears in. The backend counts `provider_events` that
+        // verified and never finished processing.
+        missing: 0,
+        status: 'running',
+        resolution: null,
+        resolved_by: null,
+        resolved_at: null,
+        resolution_note: null,
+        error: null,
+      }
+      db.reconciliation_runs.push(run)
+      runs.set(provider, run)
+      return run
+    }
 
     for (const rail of computeRailBalances(db, tenant.id)) {
       // Five buckets, not three. `reserved` and `fees_retained` are money that
@@ -1560,6 +1893,11 @@ export function runReconciliation(db: MockDb, tenantId?: string): Reconciliation
         rail.fees_retained
       const providerBalance = providerReportedBalance(db, tenant.id, rail)
       const drift = providerBalance - ledgerBalance
+
+      const run = runFor(rail.provider)
+      run.rails_checked += 1
+      if (drift === 0) run.matched += 1
+      else run.mismatched += 1
 
       const open = db.alerts.find(
         (a) =>
@@ -1611,6 +1949,7 @@ export function runReconciliation(db: MockDb, tenantId?: string): Reconciliation
         last_seen_at: nowIso(),
         resolved_at: null,
         resolution_note: null,
+        run_id: run.id,
       }
       db.alerts.push(alert)
       touched.push(alert)
@@ -1626,6 +1965,30 @@ export function runReconciliation(db: MockDb, tenantId?: string): Reconciliation
       })
     }
 
+    for (const run of runs.values()) {
+      run.status = 'completed'
+      run.finished_at = nowIso()
+      run.resolution = run.mismatched > 0 || run.missing > 0
+        ? 'cases_open'
+        // Nothing disagreed, and on a rail with nothing to compare nothing was
+        // proven either. Reading that as clean is how a run of unreachable
+        // providers passes for a run of clean books.
+        : run.rails_checked === 0 || run.skipped > 0
+        ? 'incomplete'
+        : 'clean'
+
+      audit(db, tenant.id, null, 'system', 'reconciliation.run_completed', {
+        run_id: run.id,
+        provider: run.provider,
+        rails_checked: run.rails_checked,
+        matched: run.matched,
+        mismatched: run.mismatched,
+        skipped: run.skipped,
+        missing: run.missing,
+        resolution: run.resolution,
+      })
+    }
+
     if (raisedNew && tenant.status === 'active') {
       tenant.status = 'payouts_frozen'
       audit(db, tenant.id, null, 'system', 'tenant.payouts_frozen', {
@@ -1635,6 +1998,86 @@ export function runReconciliation(db: MockDb, tenantId?: string): Reconciliation
   }
 
   return touched
+}
+
+/**
+ * A person signing a pass off — the mirror of `resolve_reconciliation_run`.
+ *
+ * Freezing is arithmetic and automatic. Unfreezing is a judgement about whether
+ * the difference has been *explained*, so it takes a name, refuses while any
+ * case on the tenant is still open, and is a separate argument rather than a
+ * side effect: writing down what happened and declaring the money accounted for
+ * are two different claims.
+ */
+export function resolveReconciliationRun(
+  db: MockDb,
+  runId: string,
+  actor: string,
+  note: string,
+  unfreeze = false,
+): ReconciliationRun {
+  const run = db.reconciliation_runs.find((r) => r.id === runId)
+  if (!run) throw new PayHoldError('not_found', `Reconciliation run ${runId} not found`)
+  if (!actor.trim()) {
+    throw new PayHoldError(
+      'policy_violation',
+      'Resolving a reconciliation case needs a name',
+    )
+  }
+  if (run.status !== 'completed') {
+    throw new PayHoldError(
+      'invalid_state',
+      `This pass is ${run.status}, not completed`,
+    )
+  }
+
+  // Checked before anything is written. The backend gets atomicity from the
+  // transaction — a raise there rolls the whole function back — and the mock
+  // has to get it by asking first, or a refused unfreeze would leave the case
+  // signed off anyway.
+  const stillOpen = db.alerts.filter(
+    (a) => a.tenant_id === run.tenant_id && a.resolved_at === null && a.run_id !== run.id,
+  ).length
+
+  if (unfreeze && stillOpen > 0) {
+    throw new PayHoldError(
+      'policy_violation',
+      `${stillOpen} reconciliation cases are still open on this tenant`,
+    )
+  }
+
+  // The cases this run raised are closed with it. An alert left open behind a
+  // resolved run would be a case nobody is looking at and a run saying somebody
+  // did.
+  for (const alert of db.alerts) {
+    if (alert.run_id !== run.id || alert.resolved_at !== null) continue
+    alert.resolved_at = nowIso()
+    alert.resolution_note = note
+  }
+
+  run.resolution = 'resolved'
+  run.resolved_by = actor
+  run.resolved_at = nowIso()
+  run.resolution_note = note
+
+  audit(db, run.tenant_id, null, actor, 'reconciliation.run_resolved', {
+    run_id: run.id,
+    provider: run.provider,
+    note,
+  })
+
+  if (unfreeze) {
+    const tenant = db.tenants.find((t) => t.id === run.tenant_id)
+    if (tenant?.status === 'payouts_frozen') {
+      tenant.status = 'active'
+      audit(db, run.tenant_id, null, actor, 'tenant.payouts_resumed', {
+        run_id: run.id,
+        note,
+      })
+    }
+  }
+
+  return run
 }
 
 /**

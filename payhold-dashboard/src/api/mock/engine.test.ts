@@ -508,7 +508,7 @@ describe('disputes', () => {
     fundDeal(db, id)
     const dispute = openDispute(db, id, 'seller', 'Buyer is unreachable')
 
-    resolveDispute(db, dispute.id, 'release', 'Delivery photos check out')
+    resolveDispute(db, dispute.id, 'release', 'Delivery photos check out', { decidedBy: 'user:ops@payhold.test' })
 
     expect(requireDeal(db, id).status).toBe('clearing')
     expect(dispute.status).toBe('resolved_released')
@@ -519,7 +519,7 @@ describe('disputes', () => {
     fundDeal(db, id)
     const dispute = openDispute(db, id, 'buyer', 'Never delivered')
 
-    resolveDispute(db, dispute.id, 'refund', 'No proof of delivery')
+    resolveDispute(db, dispute.id, 'refund', 'No proof of delivery', { decidedBy: 'user:ops@payhold.test' })
 
     expect(requireDeal(db, id).status).toBe('refunded')
     expect(dispute.status).toBe('resolved_refunded')
@@ -529,9 +529,9 @@ describe('disputes', () => {
     const id = newDeal()
     fundDeal(db, id)
     const dispute = openDispute(db, id, 'buyer', 'Never delivered')
-    resolveDispute(db, dispute.id, 'refund', 'first')
+    resolveDispute(db, dispute.id, 'refund', 'first', { decidedBy: 'user:ops@payhold.test' })
 
-    expect(() => resolveDispute(db, dispute.id, 'release', 'second')).toThrow(
+    expect(() => resolveDispute(db, dispute.id, 'release', 'second', { decidedBy: 'user:ops@payhold.test' })).toThrow(
       PayHoldError,
     )
   })

@@ -1,6 +1,7 @@
 import type {
   Currency,
   DealStatus,
+  KycStatus,
   Money,
   PayoutStatus,
   WebhookDeliveryStatus,
@@ -229,6 +230,42 @@ export const PAYOUT_STATUS_META: Record<PayoutStatus, StatusMeta> = {
     label: 'Blocked',
     tone: 'danger',
     hint: 'No eligible payout route, or the deal is disputed. The money is untouched.',
+  },
+}
+
+/**
+ * §12's onboarding states.
+ *
+ * Only `verified` is payable, and the hints say what to do rather than what
+ * went wrong: every one of these is a seller waiting on somebody here, and a
+ * label that reads as a verdict on them would be wrong about most of them —
+ * `pending` is the state every new seller starts in.
+ */
+export const KYC_STATUS_META: Record<KycStatus, StatusMeta> = {
+  pending: {
+    label: 'Unverified',
+    tone: 'neutral',
+    hint: 'Where every new seller starts. They cannot be paid until somebody attests.',
+  },
+  verified: {
+    label: 'Verified',
+    tone: 'released',
+    hint: 'Identity, sanctions and ownership all attested. Payouts can go.',
+  },
+  review_required: {
+    label: 'Needs review',
+    tone: 'pending',
+    hint: 'Something came back that a person has to look at. Payouts are held.',
+  },
+  restricted: {
+    label: 'Restricted',
+    tone: 'danger',
+    hint: 'Deliberately barred from payouts.',
+  },
+  rejected: {
+    label: 'Rejected',
+    tone: 'danger',
+    hint: 'The checks came back against them. They cannot be paid.',
   },
 }
 

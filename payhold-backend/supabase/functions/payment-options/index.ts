@@ -35,12 +35,13 @@ import {
   METHOD_BLURB,
   METHOD_LABEL,
   payoutRoute,
-  RAILS_VERIFIED,
   SCHEME_LABEL,
   SUPPORTED_CURRENCIES,
   type CardScheme,
 } from '../_shared/rails.ts'
 import { COUNTRIES } from '../_shared/countries.ts'
+import { allMarketsVerified, marketVerified } from '../_shared/launch.ts'
+import { closedMarkets, liveProviders } from '../_shared/matrix.ts'
 import { loadSettings } from '../_shared/settings.ts'
 import { PayHoldError, type Currency, type PaymentMethod } from '../_shared/types.ts'
 
@@ -63,8 +64,18 @@ interface MethodOption {
   note: string | null
 }
 
-function methodsFor(country: string, currency: Currency): MethodOption[] {
-  return collectionRails(country, currency).map((rail) => ({
+function methodsFor(
+  country: string,
+  currency: Currency,
+  live: Set<string>,
+): MethodOption[] {
+  return collectionRails(country, currency)
+    // §15 phase 3: a provider outage disables only its own routes. The rail
+    // table says what each provider *can* do here; `provider_capabilities` says
+    // whether that provider is answering the phone today, and the two are
+    // separate questions on purpose.
+    .filter((rail) => live.has(rail.provider))
+    .map((rail) => ({
     method: rail.method,
     label: METHOD_LABEL[rail.method],
     blurb: METHOD_BLURB[rail.method],
@@ -95,20 +106,57 @@ Deno.serve(handler(async (req) => {
     ? settings.currencies
     : SUPPORTED_CURRENCIES
 
+  // §12's two switches, both data. `closed` is which markets we have turned
+  // off; `live` is which adapters are built and answering. Neither is in
+  // `countries.ts`, which records what is *possible* — see `matrix.ts`.
+  const [closed, live] = await Promise.all([
+    closedMarkets(db, caller.tenant_id),
+    liveProviders(db),
+  ])
+
   // --- Seller onboarding: can we pay someone here at all? ------------------
   if (payoutCountry) {
     const info = countryInfo(payoutCountry)
     const currency = params.get('payout_currency') ?? info.currency
-    const route = payoutRoute(payoutCountry, currency)
+    const closure = closed.get(payoutCountry)
+
+    // §16 wants written provider confirmation for marketplace payouts, market
+    // by market, and this is the flag that reports whether we have it. Asked
+    // per country here because the four conversations have four outcomes —
+    // telling a seller in Kigali that the corridor is confirmed because a
+    // different one was is the wrong answer confidently given.
+    const verified = await marketVerified(db, payoutCountry)
+
+    // A closed market outranks the registry: the corridor may exist and still
+    // be shut, and telling a seller "Flutterwave can pay you" when we have
+    // switched their country off would be the wrong answer confidently given.
+    const route = closure && !closure.payout
+      ? {
+        provider: null,
+        kind: null,
+        currency,
+        blocked: true,
+        verified: false,
+        reason: closure.reason,
+      }
+      : { ...payoutRoute(payoutCountry, currency), verified }
 
     return json(req, {
       country: { code: info.code, name: info.name, flag: flag(info.code) },
       payout: route,
-      // Not verified against a signed provider agreement — a client should
-      // treat an unverified route as "probably" rather than "yes".
-      rails_verified: RAILS_VERIFIED,
+      // False until §16's written confirmation for this market is signed off —
+      // a client should treat an unverified route as "probably" rather than
+      // "yes".
+      rails_verified: verified,
     })
   }
+
+  // Everything below answers about collection rather than about one payout
+  // corridor, so it reports the set: anything short of all four of §16's
+  // markets being confirmed is not "verified rails" to a client reading one
+  // flag. Asked after the payout branch has returned, so a seller-onboarding
+  // call does not pay for a question it did not ask.
+  const railsVerified = await allMarketsVerified(db)
 
   // --- The whole catalogue -------------------------------------------------
   if (!country) {
@@ -121,12 +169,17 @@ Deno.serve(handler(async (req) => {
         currency: info.currency,
         // Every market can pay unless sanctions say otherwise; far fewer can
         // be paid. A client picking a seller's country needs both facts.
-        can_collect: !info.restricted,
-        can_payout: !payoutRoute(info.code, info.currency).blocked,
+        can_collect: !info.restricted && (closed.get(info.code)?.collect ?? true),
+        can_payout: !payoutRoute(info.code, info.currency).blocked &&
+          (closed.get(info.code)?.payout ?? true),
         restricted: info.restricted,
+        // Why we closed it, when we did. Absent for the great majority, which
+        // is what makes `payment_markets` an overlay rather than a copy of the
+        // registry — a market nobody has ruled on is open.
+        closed_reason: closed.get(info.code)?.reason ?? null,
       })),
       currencies: enabled,
-      rails_verified: RAILS_VERIFIED,
+      rails_verified: railsVerified,
     })
   }
 
@@ -141,7 +194,24 @@ Deno.serve(handler(async (req) => {
       currencies: [],
       reason: `${info.name} is under sanctions or embargo. No acquirer will ` +
         'process a payment from there.',
-      rails_verified: RAILS_VERIFIED,
+      rails_verified: railsVerified,
+    })
+  }
+
+  const closure = closed.get(country)
+
+  if (closure && !closure.collect) {
+    // Switched off in data, with no deploy behind it — §12, and §15 phase 3's
+    // acceptance case. The shape matches the sanctions answer because to a
+    // client they are the same fact: nobody here can pay today.
+    return json(req, {
+      country: { code: info.code, name: info.name, flag: flag(info.code) },
+      restricted: false,
+      closed: true,
+      methods: [],
+      currencies: [],
+      reason: closure.reason,
+      rails_verified: railsVerified,
     })
   }
 
@@ -203,11 +273,11 @@ Deno.serve(handler(async (req) => {
     restricted: false,
     /** The currency the methods below are quoted in. */
     charged_in: currency,
-    methods: methodsFor(country, currency),
+    methods: methodsFor(country, currency, live),
     // Everything this market could be charged in, intersected with what the
     // tenant has enabled.
     currencies: payable.filter((c) => enabled.includes(c)),
     presentment,
-    rails_verified: RAILS_VERIFIED,
+    rails_verified: railsVerified,
   })
 }))

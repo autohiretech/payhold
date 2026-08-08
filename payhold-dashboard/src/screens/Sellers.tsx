@@ -12,6 +12,7 @@ import {
   payoutRoute,
 } from '@/lib/rails'
 import {
+  Badge,
   Button,
   Card,
   CardHeader,
@@ -28,7 +29,7 @@ import {
   Th,
   cx,
 } from '@/components/ui'
-import { formatDate } from '@/lib/format'
+import { formatDate, KYC_STATUS_META } from '@/lib/format'
 import { useMoneyAction, useSellers } from '@/lib/queries'
 
 /**
@@ -68,7 +69,7 @@ export function SellersPage() {
       <Card>
         <CardHeader
           title="Registered sellers"
-          subtitle="Destinations are tokenized by the provider. PayHold never stores the real number."
+          subtitle="Destinations are tokenized by the provider. PayHold never stores the real number. A new seller starts unverified and cannot be paid until somebody attests — open them to do it."
         />
         {sellers.isPending ? (
           <div className="space-y-2 p-6">
@@ -86,6 +87,7 @@ export function SellersPage() {
             <thead>
               <tr>
                 <Th>Name</Th>
+                <Th>Onboarding</Th>
                 <Th>Market</Th>
                 <Th>Payout method</Th>
                 <Th>Destination</Th>
@@ -103,6 +105,9 @@ export function SellersPage() {
                       <Link className="text-brand hover:underline" to={`/sellers/${s.id}`}>
                         {s.name}
                       </Link>
+                    </Td>
+                    <Td>
+                      <Badge meta={KYC_STATUS_META[s.kyc_status]} />
                     </Td>
                     <Td className="text-fg-muted">
                       {countryFlag(s.country)} {countryName(s.country)}

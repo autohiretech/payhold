@@ -163,7 +163,7 @@ describe('invariant 9 — AI advises, it never decides', () => {
     const dispute = openDisputeFor('bumper')
     const suggestion = draftDisputeSuggestion(db, dispute.id)
 
-    resolveDispute(db, dispute.id, 'release', 'Handled by hand in the meantime')
+    resolveDispute(db, dispute.id, 'release', 'Handled by hand in the meantime', { decidedBy: 'user:ops@payhold.test' })
 
     expect(() =>
       decideSuggestion(db, suggestion.id, 'approved', 'grace@autohire.rw'),
@@ -369,7 +369,7 @@ describe('the training set (§12.3)', () => {
     const dispute = openDisputeFor('never delivered')
     const deal = requireDeal(db, dispute.deal_id)
 
-    resolveDispute(db, dispute.id, 'refund', 'No evidence of delivery')
+    resolveDispute(db, dispute.id, 'refund', 'No evidence of delivery', { decidedBy: 'user:ops@payhold.test' })
 
     const outcome = db.deal_outcomes.find((o) => o.deal_id === dispute.deal_id)
     expect(outcome?.outcome).toBe('dispute_refunded')
@@ -378,7 +378,7 @@ describe('the training set (§12.3)', () => {
 
   it('records one label per deal, however it got there', () => {
     const dispute = openDisputeFor('never delivered')
-    resolveDispute(db, dispute.id, 'refund', 'No evidence of delivery')
+    resolveDispute(db, dispute.id, 'refund', 'No evidence of delivery', { decidedBy: 'user:ops@payhold.test' })
 
     expect(
       db.deal_outcomes.filter((o) => o.deal_id === dispute.deal_id),

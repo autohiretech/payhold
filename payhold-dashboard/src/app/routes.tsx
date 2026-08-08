@@ -13,6 +13,7 @@ import { IntelligencePage } from '@/screens/Intelligence'
 import { SellersPage } from '@/screens/Sellers'
 import { SellerDetailPage } from '@/screens/SellerDetail'
 import { RailsPage } from '@/screens/Rails'
+import { RoutingPage } from '@/screens/Routing'
 import { SettingsPage } from '@/screens/Settings'
 import { ApiKeysPage } from '@/screens/ApiKeys'
 import { AuditPage } from '@/screens/Audit'
@@ -43,6 +44,7 @@ export const routes: RouteObject[] = [
       { path: 'deals', element: <DealsPage /> },
       { path: 'deals/:id', element: <DealDetailPage /> },
       { path: 'payouts', element: <PayoutsPage /> },
+      { path: 'routing', element: <RoutingPage /> },
       { path: 'disputes', element: <DisputesPage /> },
       { path: 'intelligence', element: <IntelligencePage /> },
       { path: 'fraud', element: <FraudPage /> },
@@ -62,7 +64,11 @@ export const routes: RouteObject[] = [
   // Hosted pages a client site links to. No dashboard chrome, no auth — these
   // are what the buyer and seller actually see. A buyer opening a payment link
   // from an email has no PayHold account and must never be asked for one.
-  { path: '/pay/:id', element: <CheckoutPage /> },
+  //
+  // `/pay` takes a **checkout session token** rather than a deal id (§10.1).
+  // The token is the credential: reading a deal needs an API key, and whoever
+  // opens this has none.
+  { path: '/pay/:token', element: <CheckoutPage /> },
   { path: '/status/:id', element: <DealStatusPage /> },
 ]
 

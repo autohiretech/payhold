@@ -56,7 +56,7 @@ secrets, since they end up in the bundle either way. The service-role key has
 no `VITE_` name it could hide behind and must never appear here.
 
 `public/_redirects` is what makes client-side routing work: without it a buyer
-opening `/pay/:id` from an email gets Cloudflare's 404, because there is no
+opening `/pay/:token` from an email gets Cloudflare's 404, because there is no
 file at that path. `public/_headers` denies framing — a payment page inside
 someone else's iframe is the setup for a clickjacked confirmation.
 
@@ -71,7 +71,7 @@ reason and by the same switch — see **Signing in**.
 
 **The dashboard is behind a login.** One gate — `RequireAuth` wrapping the one
 route that has dashboard chrome, so a screen added under it cannot forget to be
-protected. The hosted buyer and seller pages (`/pay/:id`, `/status/:id`) are
+protected. The hosted buyer and seller pages (`/pay/:token`, `/status/:id`) are
 deliberately outside it: someone opening a payment link from an email has no
 PayHold account and must never be asked for one.
 
@@ -187,6 +187,24 @@ backend written most recently:
   balance, not handed to the dashboard. One alert per rail, refreshed. Drift
   freezes; nothing unfreezes itself.
 
+  **Every pass now writes a run** (§13): one `reconciliation_runs` row per
+  tenant per rail, with the window it covered and what it found. The alerts say
+  what is wrong now and cannot say that we looked.
+  `resolveReconciliationRun` is a person signing one off, and the only path that
+  lifts a freeze — named, audited, refused while any case on that tenant is
+  still open, and with the unfreeze behind its own argument because writing down
+  what happened and declaring the money accounted for are two different claims.
+  `missing` is always zero here and honestly so: the mock has no inbound-event
+  table to have arrears in, and the backend counts `provider_events` that
+  verified and never finished processing.
+- `retry.test.ts` — §13's capped payout backoff, mirroring
+  `payhold-backend/tests/payout-retry.test.ts`. `next_attempt_at` is the whole
+  mechanism and **null means no machine may try this payout again**, which is
+  how "then blocked for operator action" is said without a second status. The
+  helper parks the account's other payouts for the duration of a forced failure,
+  because `fail_next_payout` is one flag and the first payout dispatched in the
+  pass consumes it.
+
   **`providerReportedBalance` is now derived independently**, from entries that
   genuinely crossed the provider boundary (`hold`, `provider_fee`, `refund`,
   `payout`). It used to be our own expected figure plus injected drift, which
@@ -300,10 +318,13 @@ re-derive.
 
 Two differences to expect when the live flag is on. `input_hash` is a full
 sha-256 there against this file's FNV-1a, because a hash that has to survive an
-audit is not the place for a short one. And a real dispute draft is thinner than
-the mock's: the backend's `disputes` table has a reason and no evidence rows
-yet, so the model weighs the opening statement, the timeline and the seller's
-record. That gap is listed in the backend's *Not built yet*.
+audit is not the place for a short one. The gap that used to be here — a real dispute
+draft being thinner than the mock's, because the backend's `disputes` table had
+a reason and no evidence rows — closed in Phase 8. `dispute-assistant@2` reads
+§8's evidence and the offers the parties have already exchanged, and each
+description is handed over wrapped as untrusted, the same way the opening
+statement is: it is written by a member of the public and it is *about* the
+question being asked, which is what makes it the injection surface.
 
 ## The Fraud screen
 
@@ -359,13 +380,59 @@ somebody, so seller names go to `/sellers/:id` and each table carries the deal's
 buyer-side handle PayHold has — we store no buyer PII — which is why the same
 buyer appearing twice is something an operator can see and we cannot name.
 
+## The Routing Center (spec §5.1)
+
+`src/screens/Routing.tsx` answers three questions in the order somebody asks
+them: what is stopped and why, where money can go at all, and where it would
+land.
+
+**It is read-only, and that is structural.** Enablement is a row an operator
+changes deliberately; a dashboard that could switch its own corridors on would
+have turned §5's country-launch checklist into a field it sets. Nothing here
+moves money either — the button that ends a hold stays on Payouts, where the
+approval is recorded against a person.
+
+The stopped queue **reads the recorded decision** rather than re-deriving one.
+`payout_decisions` exists because §5.1 wants the choice auditable after the
+fact, and re-running `routeEvaluation` now would answer a different question —
+"what would we do today" instead of "what did we do". `scheduled` is deliberately
+not in `STUCK`: a scheduled payout is waiting for a date the deal already
+states, and a queue full of rows nobody has to act on is a queue nobody reads.
+
+One routing read per stopped payout, via `useQueries`. That is the shape the API
+offers — a decision hangs off a payout and there is no bulk endpoint — and
+scoping it to the stopped ones is what keeps a busy account from fetching a
+decision for every payout it has ever made.
+
+**`routeReasonText` moved to `src/lib/rails.ts`.** It is still the mirror of
+SQL's `route_reason_text`, but both sides of the seam need it now: the engine
+writes it onto `payout.failure_reason`, and this screen turns a *stored* reason
+code back into the same sentence. A screen importing it from `api/mock/` would
+have worked right up until the mock went away. The rail is still interpolated
+raw rather than through `PAYOUT_PROVIDER_LABEL`, because the string has to match
+what Postgres produces character for character.
+
 ## The seller page
 
 `src/screens/SellerDetail.tsx` is one counterparty and everything this account
-knows about them: destination and route, every deal, every payout, every signal
-their name is on, and where their buyers paid from. It is a record and not a
-verdict — nothing on it scores anybody, and it carries no action, because
-clearing a hold belongs on Payouts where the approval is recorded.
+knows about them: onboarding state, destinations and route, every deal, every
+payout, every signal their name is on, and where their buyers paid from. It is a
+record and not a verdict — nothing on it scores anybody.
+
+**It now carries exactly one action, and it is not a payout decision.** Clearing
+a hold still belongs on Payouts, because a hold is a question about one payment.
+Attesting that a seller's identity, sanctions screen and ownership came back is
+a fact about the seller, §12 requires a person to record it, and this is the page
+that person is looking at. `verifySeller` takes the name from the session and
+never from a form — a caller that can name its own verifier can forge one.
+
+The onboarding card renders `getSellerCapabilities`, which returns **every**
+reason rather than the first. The two lists stay visually apart because they are
+apart in the API: `reasons` is work for the seller and each one holds a payout,
+`route_reasons` is work for us and none of them do. `onboarding.test.ts` pins
+that the first list is `sellerEligibility` unchanged — a capabilities read that
+drifted from the gate would be a page telling a seller they are fine while their
+payout sits held, which is the failure §10.1's endpoint exists to prevent.
 
 The column worth keeping is **age at creation**, shown per deal rather than as
 one "registered" date. That is the figure the new-seller rule fires on, and
@@ -472,6 +539,152 @@ a review queue at them invites them to fix what is not theirs to fix.
 `routing.test.ts` mirrors `payhold-backend/tests/payout-routing.test.ts` case
 for case, §5.2's eight included.
 
+## Hosted checkout sessions (spec §10.1)
+
+`src/api/mock/checkout.ts` mirrors `20260807000012_checkout_sessions.sql`.
+
+**A session is a scoped, expiring credential for one payment on one deal** — so
+a buyer can choose a payment method without holding an API key and without the
+client's server proxying the choice. `getPublicCheckout` and `payCheckout` are
+the only client methods that are **not** tenant-scoped, deliberately: whoever
+opens a payment link has no session and no tenant, and the token is what
+authorises the read.
+
+**Nothing in it funds a deal.** Completing a session moves the deal to
+`payment_pending` and stops; in the mock, `simulateFunding` is what plays the
+provider webhook afterwards, and it stays a dev-panel action rather than
+something the checkout path can reach. That is §15 phase 2, and
+`checkout.test.ts` is the acceptance spec.
+
+`checkout.completed` is not the funding event — it says the buyer is done with
+our page, `order.funded_held` says money arrived. Expiry is derived from
+`expires_at` rather than stored, the same way `payoutDisplayStatus` derives
+`clearing` and `available` from the deal's window.
+
+`PublicCheckout` is curated by hand rather than spread from the deal: whoever
+opens it is unauthenticated, so `buyer_ref`, the fee breakdown and the seller's
+payout details are absent because they were never added.
+
+**The hosted page is `/pay/:token`, not `/pay/:id`** — Phase 10 moved it. The
+old screen read the deal directly, and `getDeal` is tenant-scoped: it only ever
+worked because the mock lives in the same browser. A stranger opening a payment
+link has no credential, so the token has to *be* the credential.
+
+Two capabilities went with that move, both on purpose:
+
+- **The method list comes from the server.** `PublicCheckout.methods` is
+  `availableMethods`, which reads the capability matrix; the screen no longer
+  calls `collectionRails` for itself. The registry says what is possible and
+  the matrix says what is on (§29.11), and only the backend can read the
+  second.
+- **The country picker is gone.** The old page let a buyer say they were
+  elsewhere and re-priced in the browser. A session is one payment at one
+  amount, so re-pricing without re-creating the deal would quote a figure
+  nothing agreed to. A buyer in the wrong market needs a new link, which is a
+  click on the deal.
+
+The link itself is issued from `DealDetail` — `openCheckoutSession` is
+idempotent, so the button hands back the live one rather than minting a second.
+
+## The launch gate (spec §16, §17)
+
+`src/api/mock/launch.ts` mirrors `20260807000015_launch_gate.sql` — the same
+items in the same order, the same blocked-cannot-be-signed rule, the same
+append-only history.
+
+**`connectProvider` refuses `mode: 'live'` while a required item is
+outstanding**, and refuses it *before* the credential fields are checked, the
+same way the real endpoint does. The mock enforces this rather than merely
+allowing it, for the reason it already refuses a live secret key submitted as
+"test": a dashboard that looked like it accepted something the real API rejects
+is teaching the wrong thing.
+
+The list ships with nothing signed, and the seed does not sign anything — a
+fixture signature would make a demo teach that live keys are one click away.
+Two items ship **blocked** and cannot be signed at all: `operator_screens`
+(this phase's Resolution Center and reconciliation screens) and
+`email_confirmation`. Clearing one is a change to the item, made by whoever does
+the work.
+
+`signOffLaunchItem(code, signedBy, evidence, signed?)` takes the name as an
+argument here and reads it from the session in the real endpoint — the same
+split `verifySeller` has, and for the same reason: a caller that can name its
+own approver can forge one.
+
+**There is no screen yet**, deliberately. This is PayHold staff's list rather
+than a tenant's — the real endpoint refuses an API key and wants a
+`platform_admins` session, which the dashboard's own sign-in does not produce —
+so the contract and the engine are here and the page that reads them is not part
+of the tenant dashboard.
+
+`launch.test.ts` is the acceptance spec, and its §17 half asks a question only
+this side can: not "is there a constraint" but "is there a **method**". A screen
+cannot call what does not exist, so `markPayoutPaid`, `settlePayout`,
+`writeLedger` and `adjustBalance` being absent from `PayHoldClient` is the form
+"no manual mark as paid control" takes at this seam.
+
+## The Resolution Center (spec §8)
+
+`src/api/mock/resolution.ts` mirrors
+`payhold-backend/supabase/migrations/20260807000017_resolution_center.sql`,
+function for function and refusal for refusal.
+
+**Silence lapses a request; it never accepts one.** §8's 48 hours end with the
+offer `expired` and the dispute still open — a clock that refunded a buyer or
+paid a seller would be a machine deciding, which invariants 9 and 11 forbid.
+§15 phase 4 asks that the *window* resolve without a human, and it does.
+`expired` is a separate status from `declined` because declining is an act, and
+§24.3's labels cannot be backfilled.
+
+**`disputed_amount` bounds the resolution rather than splitting the payout.**
+One payout row exists per deal, so paying the undisputed share now would leave
+nothing to send the rest with if the dispute later went the seller's way.
+`resolveDispute` refuses a full refund when only part was disputed, and a split
+larger than that part.
+
+**Conflict of interest is enforced on who acted.** We store no buyer PII and a
+seller has no login, so there is no identity to join a deciding administrator
+to. What is recorded is who did what: whoever raised the dispute, made a request
+or answered one cannot be named as its decider. `both-parties` is the reserved
+name for an agreement between the two sides, and it is the one actor allowed to
+have acted.
+
+Two shapes to know:
+
+- `db.dispute_offers` is its own table rather than an array on the dispute,
+  because "one open request per **order**" has to be asked across disputes.
+- `respondDisputeOffer` takes the resolve function as an argument rather than
+  importing it. The backend gets that separation for free — its
+  `respond_dispute_offer` calls `resolve_dispute` under one lock — and passing
+  it in is how the mock keeps the request path from depending on the money path.
+
+`resolution.test.ts` mirrors `payhold-backend/tests/resolution-center.test.ts`
+case for case.
+
+## The capability matrix (spec §9, §12)
+
+`platformProviderCapabilities()` and `db.payment_markets` in `routing.ts` mirror
+`20260807000011_capability_matrix.sql`. Two tables, two different questions:
+
+- **`provider_capabilities`** — §9's eight flags plus `implemented` and
+  `enabled`. Separate because they fail differently: an unbuilt adapter is a
+  roadmap item, a disabled one is an outage. `routeEvaluation` reads them, so
+  switching one off blocks exactly its own rails and nobody else's.
+- **`payment_markets`** — §12's country switch, an **overlay**. A country with
+  no row behaves as `lib/countries.ts` says; a row is a deliberate departure
+  with a required reason. `collect` and `payout` close independently, and a
+  tenant row replaces the platform's in both directions.
+
+**Three adapters are declared and unbuilt** — `paypal`, `cash_app_pay`,
+`china_wallet_partner`. `Provider` names an **adapter**, `PayoutProvider` names
+a **rail**, and one adapter carries several: Venmo rides PayPal's API and both
+Chinese wallets ride one partner. `provider_unavailable` and `provider_disabled`
+are separate reason codes for that reason — same sentence to the seller,
+different next action for us.
+
+The registry stays generated and says what is *possible*; the matrix says what
+is *on*. Spec §29.11.
+
 ## Payment rails
 
 `src/lib/rails.ts` is the routing table: which provider handles which payment
@@ -508,8 +721,16 @@ Two rules are structural rather than configurable:
 
 - **Refunds take an optional amount** (§7.1). `refundDeal(id, reason, amount?,
   lineItems?)` — omitted means everything still refundable. A partial refund
-  does **not** change the deal's status (§29.8); `computeDealAmounts(...).refunded`
-  is where "partly refunded" is read from.
+  does **not** change the deal's status (§29.8); `getDealAmounts(id).refunded`
+  is where "partly refunded" is read from. The refund panel derives what is
+  still refundable from `listRefunds` with the same sum the engine guards with,
+  so the form cannot offer more than the call will take.
+- **What was agreed and what happened are two different reads.** `Deal`'s own
+  columns are the agreement, in the settlement currency; `getDealAmounts` is
+  §7's nine figures derived from the ledger, in the presentment currency. Never
+  add the two sets together — `DealDetail`'s breakdown shows one or the other
+  and switches on `buyer_paid !== 0`, because a funded deal showing agreed
+  figures would be describing money that has already moved differently.
 - **Money is integer minor units everywhere.** Only `lib/format.ts` divides by
   100. Forms take major units and convert at the boundary.
 - **Balances have six buckets** (spec §7): `held`, `pending_clearance`,
@@ -534,10 +755,19 @@ Two rules are structural rather than configurable:
   `Payout.status`, which keeps every distinction an operator needs;
   `payoutDisplayStatus` derives §5.1's seven seller-facing states. Public pages
   get the second, the Payouts screen gets the first.
-- Status vocabulary lives in `DEAL_STATUS_META` / `PAYOUT_STATUS_META`. Labels
-  and plain-language hints are defined once, never inline. `DEAL_STATUSES` is in
-  **the Postgres enum's declaration order**, so `order by status` reads as the
-  lifecycle; keep the two in step.
+- Status vocabulary lives in `DEAL_STATUS_META` / `PAYOUT_STATUS_META` /
+  `KYC_STATUS_META`. Labels and plain-language hints are defined once, never
+  inline. `DEAL_STATUSES` is in **the Postgres enum's declaration order**, so
+  `order by status` reads as the lifecycle; keep the two in step.
+- **The lifecycle timeline is eight steps against §6's eighteen states**, and
+  the compression is deliberate: most of the new states are *positions within* a
+  step rather than steps of their own, and a row each would leave six permanently
+  grey on every deal that went smoothly. `clearing` and `released` are the
+  exception and do get separate rows — same money, same place, differing in the
+  one thing a reader cares about, which is whether the payout may go. `REACHED`
+  in `DealDetail.tsx` ranks only the states that are a *sequence*; `disputed`,
+  `refunded`, `expired` and `canceled` take the rank they branched from and
+  render as branches, because a dispute is not further along than a hold.
 - `HOLDING_STATUSES` is money still in the hold; `PAST_HOLD_STATUSES` is
   `clearing | released | payout_pending | paid_out`. Reach for the second
   wherever V1 code said `['released', 'paid_out']` — that question now has four

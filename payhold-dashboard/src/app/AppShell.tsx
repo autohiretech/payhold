@@ -10,6 +10,7 @@ const NAV = [
   { to: '/', label: 'Overview', end: true, icon: IconHome },
   { to: '/deals', label: 'Deals', icon: IconDeals },
   { to: '/payouts', label: 'Payouts', icon: IconPayouts },
+  { to: '/routing', label: 'Routing', icon: IconRouting },
   { to: '/disputes', label: 'Disputes', icon: IconDisputes },
   { to: '/intelligence', label: 'Intelligence', icon: IconIntelligence },
   { to: '/fraud', label: 'Fraud', icon: IconFraud },
@@ -267,6 +268,19 @@ function IconPayouts() {
       <path d="M12 3v14" />
       <path d="m7 12 5 5 5-5" />
       <path d="M4 21h16" />
+    </>,
+  )
+}
+
+/** A junction: one thing arriving, several ways it could leave. */
+function IconRouting() {
+  return icon(
+    <>
+      <path d="M4 12h6" />
+      <path d="M10 12 16 6.5M10 12l6 5.5" />
+      <circle cx="18.5" cy="5.5" r="1.8" />
+      <circle cx="18.5" cy="18.5" r="1.8" />
+      <circle cx="3.5" cy="12" r="1.8" />
     </>,
   )
 }
