@@ -1082,9 +1082,23 @@ re-runnable.
 psql "$SUPABASE_DB_URL" -f scripts/schedule-cron.sql
 ```
 
-Set the secret once with `alter database postgres set payhold.cron_secret = '…'`,
-matching the `CRON_SECRET` function secret. Keep it out of the script and out of
-git.
+Set the secret once in **Vault**, matching the `CRON_SECRET` function secret,
+and keep the value out of the script and out of git:
+
+```sql
+select vault.create_secret('…', 'payhold_cron_secret',
+  'Shared secret the scheduled jobs send as x-cron-secret.');
+```
+
+**Vault rather than a GUC, because a GUC is not available here.** The obvious
+form — `alter database postgres set payhold.cron_secret = '…'` — fails on
+Supabase with `permission denied to set parameter`: the database is owned by
+`supabase_admin`, and the `postgres` role we connect as is not a superuser, so
+it may set the parameter at neither database nor role level. Vault is the
+platform's own mechanism and encrypts the value at rest, which
+`pg_db_role_setting` would not have. The jobs read it with a subquery against
+`vault.decrypted_secrets`, so rotating it is `vault.update_secret` and no
+rescheduling.
 
 The times are staggered, and the order is the point: **reconcile :00 →
 auto-release :10 → payout-dispatch :20.** Reconciliation goes first because
