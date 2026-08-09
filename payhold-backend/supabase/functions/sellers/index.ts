@@ -325,6 +325,71 @@ async function endHold(
 }
 
 /**
+ * `POST /v1/sellers/:id/destinations/:destinationId/promote` — §5.1's move back.
+ *
+ * `POST /destinations` always writes a new row with a new hold, which is right
+ * for a destination nobody has seen and wrong for one this system already
+ * tokenized, verified and held once. A seller whose card destination turned out
+ * to be unroutable had no way back to their old mobile-money line except by
+ * re-registering it and serving the hold again.
+ *
+ * **Refuses an API key**, like its two neighbours. It is a narrower door than
+ * either: `promote_seller_destination` refuses an unverified destination and
+ * one still inside its hold, so it picks between destinations a person has
+ * already checked and cannot reach anything new. A takeover's freshly added row
+ * fails both guards.
+ */
+async function promoteDestination(
+  req: Request,
+  db: SupabaseClient,
+  caller: Caller,
+  id: string,
+  destinationId: string,
+): Promise<Response> {
+  if (caller.kind === 'api_key') {
+    throw new PayHoldError(
+      'policy_violation',
+      "Moving a seller's payout destination is a person's decision and cannot " +
+        'be done with an API key',
+    )
+  }
+
+  await ownSeller(db, caller, id)
+
+  const { data: destination } = await db
+    .from('seller_destinations')
+    .select('id')
+    .eq('id', destinationId)
+    .eq('seller_id', id)
+    .eq('tenant_id', caller.tenant_id)
+    .maybeSingle()
+
+  if (!destination) {
+    throw new PayHoldError('not_found', `Destination ${destinationId} not found`)
+  }
+
+  const { error } = await db.rpc('promote_seller_destination', {
+    p_destination: destinationId,
+    p_tenant: caller.tenant_id,
+    p_actor: caller.actor,
+  })
+  if (error) {
+    // Its refusals are answers, not faults — an unverified destination, one
+    // still inside its hold. Same reading `addDestination` gives them: a 500
+    // would tell the client to retry something that will never succeed.
+    throw new PayHoldError('policy_violation', error.message)
+  }
+
+  const { data } = await db
+    .from('seller_destinations')
+    .select(DESTINATION_COLUMNS)
+    .eq('id', destinationId)
+    .maybeSingle()
+
+  return json(req, data)
+}
+
+/**
  * `POST /v1/sellers/:id/destinations` — §5.1: move where a seller is paid, or
  * give them a backup.
  *
@@ -638,6 +703,13 @@ Deno.serve(handler(async (req) => {
     sub && subAction === 'end-hold'
   ) {
     return await endHold(req, db, caller, id, sub)
+  }
+
+  if (
+    req.method === 'POST' && id && action === 'destinations' &&
+    sub && subAction === 'promote'
+  ) {
+    return await promoteDestination(req, db, caller, id, sub)
   }
 
   if (req.method === 'POST' && id && action === 'destinations') {

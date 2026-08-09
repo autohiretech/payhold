@@ -347,6 +347,7 @@ Auth: `X-Api-Key`, hashed at rest, rate-limited per key.
 | `GET /v1/sellers/:id/destinations` | §5.1's preferred destination and verified backup |
 | `POST /v1/sellers/:id/destinations` | Move where a seller is paid, or give them a backup. The new row is unverified and inside §5.1's security hold — payouts pause until it is checked, and no parameter skips that |
 | `POST /v1/sellers/:id/destinations/:id/end-hold` | §5.1's step-up: somebody confirmed the change with the seller, so the hold ends early. **Refuses an API key** — a client that could end its own holds has deleted the defence rather than satisfied it. Does not verify the destination |
+| `POST /v1/sellers/:id/destinations/:id/promote` | Move back to a destination already checked, without the second hold a re-registration would serve. Refused for an unverified destination and for one still inside its hold, so it reaches nothing new |
 | `GET /v1/sellers/:id/balance` | This seller's wallet — ledger buckets, plus what a withdrawal would move and every reason something is stuck |
 | `GET /v1/sellers/wallets` | Every seller's wallet in one query |
 | `POST /v1/sellers/:id/withdraw` | Ask for the cleared money. Stamps and dispatches; screens, routes and books exactly as the cron does |
@@ -580,6 +581,17 @@ destination, withdraw" is the shape this protects against and a client ending
 its own holds would be the second step granting itself the third. It ends the
 hold and nothing else — the destination is still unverified afterwards, which is
 a separate attestation and a separate stop.
+
+**`add_seller_destination` always inserts, and moving back needed something
+narrower.** A seller whose new destination turns out to be unroutable — a card
+in a market Stripe cannot pay into, which is the case that found this — could
+only get their old line back by re-registering it, which minted a second token
+and served a second hold for a destination already tokenized, verified and held
+once. `promote_seller_destination` (`20260809000003`) is the move back: it swaps
+which row is primary and writes no new row. It is a **narrower** door than
+ending a hold, not a wider one — refused for an unverified destination and for
+one still inside its hold, so it can only pick between destinations a person has
+already attested to. A takeover's freshly added row fails both guards.
 
 That change also made one hold read as one. `seller_capabilities` and
 `route_payout` read `seller_destinations.security_hold_until`; `screen_payout`

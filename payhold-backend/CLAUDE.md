@@ -1090,7 +1090,38 @@ was shown one reason on their own screen while the payout was stopped here by
 another, which is the failure returning every reason at once exists to prevent.
 
 The stamp now wins wherever it exists, and both readers emit the identical
-sentence. **The fallback is not a transitional kindness**:
+sentence.
+
+## Moving back — migration `20260809000003`
+
+`add_seller_destination` always **inserts**, which is right for a destination
+nobody has seen and wrong for one already tokenized, verified and held once. So
+a seller whose new destination turned out to be unroutable — a card in a market
+Stripe cannot pay into, which is the case that found this — could only reach
+their old line by re-registering it: a second token, a second hold, and the
+verified row sitting right beside it unreachable by any endpoint. The header of
+`20260809000001` already said that should not happen.
+
+`promote_seller_destination` swaps which row is primary and writes no new row.
+Two things keep it from being a way around the hold, and both are re-read under
+the seller's lock rather than trusted from the endpoint:
+
+- **it refuses an unverified destination** — you cannot promote past a check
+- **it refuses one still inside its hold** — nor past the clock
+
+So it is a **narrower** door than `end_destination_hold` next door, which a
+person can open on a destination nobody has checked. Promotion opens nothing; it
+picks between destinations already checked, and a takeover's freshly added row
+fails both guards.
+
+**It stamps `security_hold_until = coalesce(security_hold_until, now())` on the
+way through, and `20260809000002` is what makes that expressible.**
+`sync_primary_destination` sets `sellers.destination_changed_at = now()` whenever
+the primary's token moves — correctly, it did move — and `screen_payout` reads
+that as a hold. Without the stamp a promotion would arm a fresh 24 hours against
+the destination that just passed the test for needing none. A row seeded by
+`sellers_seed_primary_destination` carries no stamp at all, which is exactly the
+row this is for. **The fallback is not a transitional kindness**:
 `sellers_seed_primary_destination` writes no expiry, so a seller whose primary
 was seeded at registration has only `destination_changed_at` to go on and must
 keep exactly the protection it gives them. `create or replace` with an identical

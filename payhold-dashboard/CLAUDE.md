@@ -519,10 +519,24 @@ forge one — and each is refused an API key at the endpoint.
   attested to is that the confirmation came from *outside* the session that made
   the change — the hold exists because "get in, move the destination, withdraw"
   is what a takeover looks like.
+- **Make primary** (`promoteSellerDestination`, on a non-primary row) is the
+  move back, and it is offered only where it can succeed: verified, out of its
+  hold, not already primary. A disabled control that says why is a smaller
+  surprise than a call the endpoint will refuse.
 
 They stay separate acts with separate audit rows, and ending a hold leaves the
 destination unverified — the row still says so afterwards, which is correct and
 not a stale render.
+
+**Only "End the hold" has a confirm step, and the asymmetry is deliberate.**
+Verifying is one click with its sentence rendered beside the button rather than
+behind it: the attestation is not weakened by dropping a second click, it is
+weakened by being made where nobody can see what is claimed, so the sentence
+moved out from behind the click instead of being deleted. Promoting has no
+confirm because it reaches nothing new — both guards are on the endpoint, so a
+stray click moves a seller between two destinations somebody already attested to.
+Ending a hold is the one that overrides a live security control on a destination
+nobody has checked, and that one keeps its panel.
 
 The onboarding card renders `getSellerCapabilities`, which returns **every**
 reason rather than the first. The two lists stay visually apart because they are

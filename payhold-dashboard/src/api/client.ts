@@ -221,6 +221,16 @@ export interface PayHoldClient {
     sellerId: string,
     destinationId: string,
   ): Promise<SellerDestination>
+  /**
+   * §5.1's move back: make an already-verified destination primary again,
+   * without the second hold `POST /destinations` would impose on a row this
+   * system has already checked. Refused for an unverified destination and for
+   * one still inside its hold, so it reaches nothing new.
+   */
+  promoteSellerDestination(
+    sellerId: string,
+    destinationId: string,
+  ): Promise<SellerDestination>
 
   // -- Money ---------------------------------------------------------------
   getBalance(): Promise<Balance[]>

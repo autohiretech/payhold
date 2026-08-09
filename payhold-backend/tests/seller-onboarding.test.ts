@@ -736,3 +736,160 @@ describe('§5.1 ending a security hold', () => {
     expect(rows[0].allowed).toBe(false)
   })
 })
+
+// ---------------------------------------------------------------------------
+
+/**
+ * §5.1's missing move: back to a destination already checked.
+ *
+ * `add_seller_destination` always inserts, so the only way back to a demoted
+ * destination was a new row with a new hold — for something already tokenized,
+ * verified and held once. The header of `20260809000001` said that should not
+ * happen and nothing implemented it.
+ *
+ * The two refusals below are what stop this being a way around the hold.
+ */
+describe('§5.1 moving back to a checked destination', () => {
+  const promote = (destination: string, actor = 'ops@payhold.test') =>
+    h.db.query(`select * from promote_seller_destination($1, $2, $3)`,
+      [destination, tenant, actor])
+
+  /** A seller whose primary has been moved away, leaving a verified one behind. */
+  async function movedAway(name: string) {
+    const seller = await newSeller(name)
+    await h.db.query(`select verify_seller($1, 'ops@payhold.test', true)`, [seller])
+
+    const { rows: [old] } = await h.db.query<{ id: string }>(
+      `select id from seller_destinations where seller_id = $1 and is_primary`, [seller],
+    )
+    // The move that demoted it — a card destination, as in the real case.
+    const { rows: [fresh] } = await h.db.query<{ id: string }>(
+      `select id from add_seller_destination($1, $2, 'RW', 'RWF', 'stripe_connect',
+                                             'tok_card', 'Card •••• 5757', 'Card',
+                                             'primary', 'api')`,
+      [seller, tenant],
+    )
+    return { seller, old: old.id, fresh: fresh.id }
+  }
+
+  /**
+   * A destination that is neither primary nor checked — the row a takeover
+   * adds. The guards are only reachable from here: promoting the row that is
+   * already primary returns early, which is what the last test asserts.
+   */
+  async function addUnchecked(seller: string) {
+    const { rows: [b] } = await h.db.query<{ id: string }>(
+      `select id from add_seller_destination($1, $2, 'RW', 'RWF', 'flutterwave_momo',
+                                             'tok_theirs', 'MTN •••• 9999', 'Theirs',
+                                             'backup', 'api')`,
+      [seller, tenant],
+    )
+    return b.id
+  }
+
+  test('it refuses an unverified destination', async () => {
+    const { seller } = await movedAway('Cannot promote an unchecked one')
+    const theirs = await addUnchecked(seller)
+
+    // Refused before the hold is even considered: promotion picks between
+    // destinations a person has already attested to, and reaches nothing new.
+    await rejects(() => promote(theirs), /only a verified destination/)
+  })
+
+  test('it refuses one still inside its security hold', async () => {
+    const { seller } = await movedAway('Verified but still held')
+    const theirs = await addUnchecked(seller)
+    // Verified, and still held. The second guard has to stand on its own, or
+    // verifying a destination would be enough to skip its hold.
+    await h.db.query(
+      `update seller_destinations set verified_at = now() where id = $1`, [theirs],
+    )
+
+    await rejects(() => promote(theirs), /still inside its security hold/)
+
+    // And nothing moved on the way out.
+    const { rows: [p] } = await h.db.query<{ masked: string }>(
+      `select masked_destination as masked from sellers where id = $1`, [seller],
+    )
+    expect(p.masked).toBe('Card •••• 5757')
+  })
+
+  test('it moves back without serving a second hold', async () => {
+    const { seller, old } = await movedAway('Back to mobile money')
+
+    await promote(old)
+
+    const { rows: [d] } = await h.db.query<{ primary: boolean; lapsed: boolean }>(
+      `select is_primary as primary,
+              security_hold_until <= now() as lapsed
+         from seller_destinations where id = $1`, [old],
+    )
+    expect(d.primary).toBe(true)
+    // The seeded row carried no stamp; it acquires a lapsed one here so the
+    // trigger's fresh `destination_changed_at` cannot arm a hold behind it.
+    expect(d.lapsed).toBe(true)
+
+    // Which is the whole point: the payout is not held for a destination this
+    // system already checked.
+    const c = await capabilities(seller)
+    expect(c.reasons).toEqual([])
+    expect(await screen(await payoutFor(seller))).toBe(false)
+  })
+
+  test('the old primary is demoted, not deleted', async () => {
+    const { seller, old, fresh } = await movedAway('Both rows survive')
+    await promote(old)
+
+    // A paid payout still has to be able to say where it went.
+    const { rows } = await h.db.query<{ id: string; is_primary: boolean }>(
+      `select id, is_primary from seller_destinations where seller_id = $1`, [seller],
+    )
+    expect(rows).toHaveLength(2)
+    expect(rows.find((r) => r.id === fresh)!.is_primary).toBe(false)
+    expect(rows.find((r) => r.id === old)!.is_primary).toBe(true)
+  })
+
+  test('it records who moved it, and between which destinations', async () => {
+    const { old } = await movedAway('Named move')
+    await promote(old, 'ops@payhold.test')
+
+    const { rows: [log] } = await h.db.query<{ actor: string; details: Record<string, unknown> }>(
+      `select actor, details from audit_log
+        where action = 'seller.destination_promoted'
+          and details ->> 'destination_id' = $1`, [old],
+    )
+    expect(log.actor).toBe('ops@payhold.test')
+    expect(log.details.moved_from).toBe('Card •••• 5757')
+    expect(log.details.moved_to).toBe('MTN •••• 4821')
+  })
+
+  test('promoting the destination that is already primary changes nothing', async () => {
+    const seller = await newSeller('Already there')
+    const { rows: [d] } = await h.db.query<{ id: string }>(
+      `select id from seller_destinations where seller_id = $1 and is_primary`, [seller],
+    )
+
+    await promote(d.id)
+
+    // Idempotent, and silent: nobody moved anything, so no row says they did.
+    const { rows: [n] } = await h.db.query<{ n: number }>(
+      `select count(*)::int as n from audit_log
+        where action = 'seller.destination_promoted'
+          and details ->> 'destination_id' = $1`, [d.id],
+    )
+    expect(n.n).toBe(0)
+  })
+
+  test('it refuses to move a destination without a name', async () => {
+    const { old } = await movedAway('Nameless move')
+    await rejects(() => promote(old, '  '), /must record who moved it/)
+  })
+
+  test('the AI role cannot move a payout destination', async () => {
+    const { rows } = await h.db.query<{ allowed: boolean }>(
+      `select bool_or(has_function_privilege('payhold_ai', p.oid, 'execute')) as allowed
+         from pg_proc p where p.proname = 'promote_seller_destination'`,
+    )
+    expect(rows[0].allowed).toBe(false)
+  })
+})

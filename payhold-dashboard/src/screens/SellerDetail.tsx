@@ -457,7 +457,6 @@ export function SellerDetailPage() {
 function Onboarding({ seller, now }: { seller: Seller; now: Date }) {
   const { account } = useAuth()
   const capabilities = useSellerCapabilities(seller.id)
-  const [confirming, setConfirming] = useState(false)
 
   // Recorded against whoever is signed in, never a name from a form: a caller
   // that can name its own verifier can forge one.
@@ -560,36 +559,26 @@ function Onboarding({ seller, now }: { seller: Seller; now: Date }) {
               Withdraw verification
             </Button>
           </div>
-        ) : confirming ? (
-          <div className="space-y-3">
-            <p className="text-sm leading-relaxed text-fg">
-              You are recording that the identity check, the sanctions screen and the
-              ownership check came back for {seller.name}. It is written against{' '}
-              <strong className="font-semibold">{actor}</strong> and it is what makes
-              their payouts payable.
-            </p>
-            <div className="flex gap-2">
-              <Button
-                size="sm"
-                variant="primary"
-                disabled={verify.isPending || !actor}
-                onClick={() => verify.mutate(true)}
-              >
-                {verify.isPending ? 'Recording…' : 'Yes, they came back'}
-              </Button>
-              <Button size="sm" variant="ghost" onClick={() => setConfirming(false)}>
-                Cancel
-              </Button>
-            </div>
-          </div>
         ) : (
+          // One click, not two. The attestation is not weakened by dropping the
+          // confirm step — it is weakened by being made where nobody can see
+          // what is being claimed, so the sentence moved out from behind the
+          // click rather than being deleted. It names the checks, the seller and
+          // the person, and it is on screen before the button can be pressed.
           <div className="flex flex-wrap items-center gap-3">
             <p className="flex-1 text-xs leading-relaxed text-fg-muted">
-              PayHold does not run these checks. Verifying records that you did, and
-              your name goes on it.
+              PayHold does not run these checks. This records that the identity
+              check, the sanctions screen and the ownership check came back for{' '}
+              {seller.name}, against{' '}
+              <strong className="font-semibold text-fg">{actor}</strong>.
             </p>
-            <Button size="sm" variant="primary" onClick={() => setConfirming(true)}>
-              Verify this seller
+            <Button
+              size="sm"
+              variant="primary"
+              disabled={verify.isPending || !actor}
+              onClick={() => verify.mutate(true)}
+            >
+              {verify.isPending ? 'Recording…' : 'Verify this seller'}
             </Button>
           </div>
         )}
@@ -632,6 +621,13 @@ function Destinations({ sellerId, now }: { sellerId: string; now: Date }) {
   const actor = account?.full_name ?? account?.email ?? ''
   const endHold = useMoneyMutation((destinationId: string) =>
     api.endDestinationHold(sellerId, destinationId),
+  )
+  // No confirm step: this one reaches nothing new. The endpoint refuses an
+  // unverified destination and one still inside its hold, so the worst a stray
+  // click does is move a seller between two destinations a person has already
+  // attested to — and the audit row names both.
+  const promote = useMoneyMutation((destinationId: string) =>
+    api.promoteSellerDestination(sellerId, destinationId),
   )
 
   if (destinations.isPending) {
@@ -706,16 +702,36 @@ function Destinations({ sellerId, now }: { sellerId: string; now: Date }) {
                     End the hold
                   </Button>
                 )}
+                {/* §5.1's move back. Only offered where it can succeed —
+                    already checked, out of its hold, and not already primary —
+                    because a disabled control that says why is a smaller
+                    surprise than a call the endpoint will refuse. */}
+                {!d.is_primary && d.verified_at && !onHold && (
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className="mt-1.5"
+                    disabled={promote.isPending || !actor}
+                    onClick={() => promote.mutate(d.id)}
+                  >
+                    {promote.isPending ? 'Moving…' : 'Make primary'}
+                  </Button>
+                )}
               </Td>
             </tr>
           )
         })}
       </tbody>
-      {confirming && (
+      {(confirming || promote.isError) && (
         <tfoot>
           <tr>
             <Td colSpan={6}>
               <div className="space-y-3 py-1 text-left">
+                {/* Outside the confirm block: promoting has no confirm step, so
+                    its refusal has nowhere else to land. */}
+                {promote.isError && <ErrorNote message={promote.error.message} />}
+                {confirming && (
+                <>
                 <p className="text-sm leading-relaxed text-fg">
                   End the security hold on{' '}
                   <Mono>
@@ -756,6 +772,8 @@ function Destinations({ sellerId, now }: { sellerId: string; now: Date }) {
                   </Button>
                 </div>
                 {endHold.isError && <ErrorNote message={endHold.error.message} />}
+                </>
+                )}
               </div>
             </Td>
           </tr>
