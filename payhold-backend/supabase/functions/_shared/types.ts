@@ -681,6 +681,24 @@ export interface CreateSellerInput {
   external_user_id?: string
 }
 
+/**
+ * §5.1: a further destination for a seller who already has one.
+ *
+ * Country and currency are optional because a seller changing rails has not
+ * changed country — omitted, they are taken from the seller's own row rather
+ * than restated by a caller who could restate them wrongly.
+ */
+export interface AddDestinationInput {
+  payout_provider: PayoutProvider
+  /** Raw destination — tokenized immediately, never stored. */
+  destination: string
+  country?: Country
+  payout_currency?: Currency
+  label?: string
+  /** 'primary' moves where the money goes. Defaults to primary. */
+  role?: 'primary' | 'backup'
+}
+
 export type PayHoldErrorCode =
   | 'not_found'
   | 'invalid_state'

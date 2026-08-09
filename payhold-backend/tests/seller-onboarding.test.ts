@@ -386,6 +386,137 @@ describe('§5.1 change protection', () => {
   })
 })
 
+describe('§5.1 moving a destination', () => {
+  /** What `POST /v1/sellers/:id/destinations` calls, with the token already minted. */
+  const add = (
+    seller: string,
+    token: string,
+    opts: { role?: string; provider?: string; masked?: string; label?: string } = {},
+  ) =>
+    h.db.query<{ id: string; is_primary: boolean; is_backup: boolean; hold: string | null }>(
+      `select id, is_primary, is_backup, security_hold_until as hold
+         from add_seller_destination($1, $2, 'RW', 'RWF', $3, $4, $5, $6, $7, 'api')`,
+      [
+        seller,
+        tenant,
+        opts.provider ?? 'flutterwave_bank',
+        token,
+        opts.masked ?? 'BK •••• 7788',
+        opts.label ?? null,
+        opts.role ?? 'primary',
+      ],
+    )
+
+  test('the new destination becomes primary and the old one steps down', async () => {
+    const seller = await newSeller('Moving house')
+    const { rows: [before] } = await h.db.query<{ id: string }>(
+      `select id from seller_destinations where seller_id = $1 and is_primary`, [seller],
+    )
+
+    const { rows: [added] } = await add(seller, 'tok_new_bank')
+    expect(added.is_primary).toBe(true)
+
+    // Demoted, not deleted: a paid payout still has to be able to say where it
+    // went, and a seller moving back finds it already verified.
+    const { rows } = await h.db.query<{ id: string; is_primary: boolean }>(
+      `select id, is_primary from seller_destinations where seller_id = $1
+        order by created_at`,
+      [seller],
+    )
+    expect(rows).toHaveLength(2)
+    expect(rows.find((r) => r.id === before.id)!.is_primary).toBe(false)
+
+    // The seller row follows, through the same trigger that seeds it.
+    const { rows: [s] } = await h.db.query<{ token: string }>(
+      `select beneficiary_token as token from sellers where id = $1`, [seller],
+    )
+    expect(s.token).toBe('tok_new_bank')
+  })
+
+  test('the new destination arrives unverified and inside its hold', async () => {
+    // §5.1's change protection, and the reason this is not `POST /sellers`
+    // again. Both conditions are independently enough to refuse a payout.
+    const seller = await newSeller('Held after moving')
+    await h.db.query(`select verify_seller($1, 'compliance@payhold')`, [seller])
+    expect((await capabilities(seller)).can).toBe(true)
+
+    await add(seller, 'tok_moved')
+
+    const c = await capabilities(seller)
+    expect(c.can).toBe(false)
+    expect(c.reasons.join(' ')).toMatch(/not been verified/)
+    expect(c.reasons.join(' ')).toMatch(/security hold/)
+    expect(await screen(await payoutFor(seller))).toBe(true)
+  })
+
+  test('a backup leaves the primary where it is', async () => {
+    const seller = await newSeller('Adding a backup')
+    const { rows: [s0] } = await h.db.query<{ token: string }>(
+      `select beneficiary_token as token from sellers where id = $1`, [seller],
+    )
+
+    const { rows: [added] } = await add(seller, 'tok_backup', { role: 'backup' })
+    expect(added.is_backup).toBe(true)
+
+    const { rows: [s1] } = await h.db.query<{ token: string }>(
+      `select beneficiary_token as token from sellers where id = $1`, [seller],
+    )
+    expect(s1.token).toBe(s0.token)
+  })
+
+  test('a second backup replaces the first rather than colliding with it', async () => {
+    // `seller_destinations_one_backup` would refuse the overlap, and a caller
+    // reading an index name is a caller who cannot tell a conflict from a bug.
+    const seller = await newSeller('Two backups')
+    await add(seller, 'tok_backup_1', { role: 'backup' })
+    await add(seller, 'tok_backup_2', { role: 'backup' })
+
+    const { rows } = await h.db.query<{ token: string }>(
+      `select beneficiary_token as token from seller_destinations
+        where seller_id = $1 and is_backup`,
+      [seller],
+    )
+    expect(rows).toHaveLength(1)
+    expect(rows[0].token).toBe('tok_backup_2')
+  })
+
+  test('the change is on the audit log, as a mask', async () => {
+    const seller = await newSeller('Audited move')
+    await add(seller, 'tok_audited', { masked: 'BK •••• 4444' })
+
+    const { rows: [entry] } = await h.db.query<{ details: Record<string, string> }>(
+      `select details from audit_log
+        where action = 'seller.destination_added' and details ->> 'seller_id' = $1`,
+      [seller],
+    )
+    expect(entry.details.destination).toBe('BK •••• 4444')
+    // §19: the token is the thing money moves against, and an audit log is
+    // where one would survive longest.
+    expect(JSON.stringify(entry.details)).not.toContain('tok_audited')
+  })
+
+  test('another tenant’s seller does not exist', async () => {
+    const { rows: [other] } = await h.db.query<{ id: string }>(
+      `insert into tenants (name, slug) values ('Someone Else', 'someone-else') returning id`,
+    )
+    const seller = await newSeller('Not yours')
+
+    await rejects(
+      () => h.db.query(
+        `select add_seller_destination($1, $2, 'RW', 'RWF', 'flutterwave_bank',
+                                       'tok_theirs', 'BK •••• 0000', null, 'primary', 'api')`,
+        [seller, other.id],
+      ),
+      /does not exist/,
+    )
+  })
+
+  test('a role that is not a role is refused', async () => {
+    const seller = await newSeller('Bad role')
+    await rejects(() => add(seller, 'tok_bad_role', { role: 'preferred' }), /primary or backup/)
+  })
+})
+
 describe('§11 external user id — the client’s own handle', () => {
   const withHandle = (name: string, handle: string | null) =>
     h.db.query(

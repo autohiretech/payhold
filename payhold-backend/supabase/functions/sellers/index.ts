@@ -24,6 +24,7 @@ import { loadProvider } from '../_shared/load-provider.ts'
 import { countryInfo, payoutRoute } from '../_shared/rails.ts'
 import {
   PayHoldError,
+  type AddDestinationInput,
   type CreateSellerInput,
   type Payout,
   type Seller,
@@ -242,6 +243,104 @@ async function verify(
 }
 
 /**
+ * `POST /v1/sellers/:id/destinations` — §5.1: move where a seller is paid, or
+ * give them a backup.
+ *
+ * The other half of `POST /sellers`, and the reason that one is allowed to
+ * refuse a handle it already knows. A registration carries the *first*
+ * destination; every one after it comes through here, where the security hold
+ * is, and a client with a seller whose MoMo line was cut off finally has
+ * something to call.
+ *
+ * Three things happen in an order that matters. The corridor is checked first,
+ * so a destination PayHold could never pay is refused before a provider is
+ * asked for anything. Then the raw destination is tokenized — used exactly once
+ * and dropped, §19, the same as at registration. Only then does
+ * `add_seller_destination` swap the primary over inside one transaction, which
+ * is where the demote-and-insert has to happen: `seller_destinations_one_primary`
+ * refuses the overlap, and doing it in two statements leaves a window in which
+ * the seller has no primary destination and is unpayable.
+ *
+ * The new row comes back unverified and inside its hold. That is §5.1's change
+ * protection and there is no parameter to turn it off: a takeover's whole play
+ * is to move the destination and withdraw, and the hold is what puts a person
+ * between those two steps. A client should tell its seller that payouts pause
+ * until the new account is verified, because they will.
+ */
+async function addDestination(
+  req: Request,
+  db: SupabaseClient,
+  caller: Caller,
+  id: string,
+): Promise<Response> {
+  const { data } = await db
+    .from('sellers')
+    .select('id, country, payout_currency')
+    .eq('id', id)
+    .eq('tenant_id', caller.tenant_id)
+    .maybeSingle()
+
+  if (!data) throw new PayHoldError('not_found', `Seller ${id} not found`)
+  const seller = data as unknown as Pick<Seller, 'country' | 'payout_currency'>
+
+  const body = await readJson<AddDestinationInput>(req)
+  required(body as unknown as Record<string, unknown>, 'payout_provider', 'destination')
+
+  const role = body.role ?? 'primary'
+  if (role !== 'primary' && role !== 'backup') {
+    throw new PayHoldError(
+      'policy_violation',
+      `A destination is primary or backup, not ${role}`,
+    )
+  }
+
+  // Defaulting to the seller's own country and currency rather than requiring
+  // them: a seller who moves from MoMo to a bank account has not moved country,
+  // and a client that had to restate it could get it wrong. A stated country
+  // brings its own currency with it, because the pair has to agree — a
+  // destination in Kenya paid in RWF is a corridor, not a preference.
+  const country = body.country ?? seller.country
+  const payoutCurrency = body.payout_currency ??
+    (body.country ? countryInfo(body.country).currency : seller.payout_currency)
+
+  const route = payoutRoute(country, payoutCurrency)
+  if (route.blocked) throw new PayHoldError('policy_violation', route.reason)
+
+  const { provider } = await loadProvider(db, caller.tenant_id, route.provider!)
+  const token = await provider.tokenize({
+    destination: body.destination,
+    currency: payoutCurrency,
+    country,
+  })
+
+  const { data: added, error } = await db.rpc('add_seller_destination', {
+    p_seller: id,
+    p_tenant: caller.tenant_id,
+    p_country: country,
+    p_currency: payoutCurrency,
+    p_provider: body.payout_provider,
+    p_token: token.beneficiary_token,
+    p_masked: token.masked_destination,
+    p_label: body.label ?? null,
+    p_role: role,
+    p_actor: caller.actor,
+  })
+
+  if (error) {
+    // The function's own refusals are answers, not faults — an unknown seller,
+    // a role that is not a role. A 500 would tell the client to retry them.
+    throw new PayHoldError('policy_violation', error.message)
+  }
+
+  // `beneficiary_token` is on the returned row and must not go out: it is the
+  // provider-side handle money moves against, and the whole point of returning
+  // a mask is that this never leaves.
+  const { beneficiary_token: _token, ...destination } = added as Record<string, unknown>
+
+  return json(req, { destination, payout_route: route }, 201)
+}
+
+/**
  * Confirm a seller belongs to the calling tenant, or 404.
  *
  * A 403 would confirm the row exists, which invariant 8 forbids: a response
@@ -446,6 +545,14 @@ Deno.serve(handler(async (req) => {
 
   if (req.method === 'GET' && id && action === 'balance') {
     return await readWallet(req, db, caller, id)
+  }
+
+  // §5.1's change protection lives behind this, which is why moving a
+  // destination is not `POST /sellers` again: that one refuses a handle it
+  // already knows precisely so a re-registration cannot become a silent
+  // destination change that skipped the hold.
+  if (req.method === 'POST' && id && action === 'destinations') {
+    return await addDestination(req, db, caller, id)
   }
 
   if (req.method === 'POST' && id && action === 'withdraw') {

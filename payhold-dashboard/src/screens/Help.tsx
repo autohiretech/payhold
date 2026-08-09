@@ -519,6 +519,11 @@ await post(\`/disputes/\${dispute.id}/evidence\`, {
         <Endpoint method="GET" path="/sellers/:id/destinations">
           Preferred destination and verified backup.
         </Endpoint>
+        <Endpoint method="POST" path="/sellers/:id/destinations">
+          Move where a seller is paid, or add a backup. The new destination arrives
+          unverified and inside its security hold, so payouts pause until it has been
+          checked — that pause is the protection, and there is no flag to skip it.
+        </Endpoint>
         <Endpoint method="GET" path="/sellers/:id/balance">
           Their wallet — buckets, and every reason something is stuck.
         </Endpoint>

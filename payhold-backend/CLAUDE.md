@@ -980,6 +980,32 @@ reason `approve_payout_review` does.
 `seller_capabilities(seller)` is the read-only counterpart — the same questions,
 asked ahead of time, returning **every** reason rather than the first.
 
+**`add_seller_destination` (migration `20260809000001`) is the writer §5.1
+assumed and the table did not have.** `seller_destinations` had exactly two
+writers — the seeding trigger and `verify_seller` stamping a verification — so
+every reader could cope with a seller who had several destinations and nothing
+could give them one. A seller whose MoMo line was cut off had no way through the
+API to say so. `POST /v1/sellers/:id/destinations` is this function's only
+caller.
+
+It is SQL because moving the primary is a *swap*: `seller_destinations_one_primary`
+refuses the overlap, so the demote and the insert have to be one transaction,
+and the window between two statements is a seller with no primary destination at
+all — which every reader correctly reads as unpayable. The provider call stays
+in the Edge Function; Postgres does not make HTTP requests, and a transaction
+held open across a provider round trip is a lock held across someone else's
+outage.
+
+The new row is written **unverified and inside its security hold**, and no
+argument turns either off. Each condition independently stops a payout,
+`screen_payout` holds anything already scheduled off `destination_changed_at`,
+and together they are §5.1's change protection: "get in, move the destination,
+withdraw" is the shape of an account takeover, and this is what puts a person
+between the second step and the third. The outgoing destination is demoted and
+never deleted — a paid payout still has to say where it went, and a seller
+moving back to an account PayHold has already verified should not serve a second
+hold for it.
+
 ## Payout routing — §5.1, migrations `20260807000008` and `20260807000009`
 
 Same two-file split as the lifecycle and the six buckets, same reason: Postgres

@@ -345,6 +345,7 @@ Auth: `X-Api-Key`, hashed at rest, rate-limited per key.
 | `GET /v1/sellers/:id/capabilities` | Can this seller be paid, and if not, every reason. Two lists, kept apart |
 | `POST /v1/sellers/:id/verify` | Record the attestation. **Refuses an API key** — it is a person's decision |
 | `GET /v1/sellers/:id/destinations` | §5.1's preferred destination and verified backup |
+| `POST /v1/sellers/:id/destinations` | Move where a seller is paid, or give them a backup. The new row is unverified and inside §5.1's security hold — payouts pause until it is checked, and no parameter skips that |
 | `GET /v1/sellers/:id/balance` | This seller's wallet — ledger buckets, plus what a withdrawal would move and every reason something is stuck |
 | `GET /v1/sellers/wallets` | Every seller's wallet in one query |
 | `POST /v1/sellers/:id/withdraw` | Ask for the cleared money. Stamps and dispatches; screens, routes and books exactly as the cron does |
