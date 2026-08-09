@@ -35,7 +35,7 @@
  * signature and re-fetched the transaction. §15 phase 2.
  */
 
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useParams } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { api, type PaymentMethod } from '@/api'
@@ -44,9 +44,13 @@ import { MethodIcon, ProviderChip } from '@/components/rails'
 import { formatMoney } from '@/lib/format'
 import { METHOD_BLURB, METHOD_LABEL } from '@/lib/rails'
 import { useMoneyAction } from '@/lib/queries'
+import { postToParent, reportHeight } from '@/lib/embed'
 
 export function CheckoutPage() {
   const { token = '' } = useParams()
+  // Only does anything when a tenant has framed this page. Outside a frame
+  // every call in `@/lib/embed` is a no-op.
+  useEffect(reportHeight, [])
   const checkout = useQuery({
     queryKey: ['public-checkout', token],
     queryFn: () => api.getPublicCheckout(token),
@@ -60,12 +64,29 @@ export function CheckoutPage() {
 
   const pay = useMoneyAction(async () => {
     if (!method) return
-    const result = await api.payCheckout(token, {
-      method,
-      network: network ?? undefined,
-    })
+    let result
+    try {
+      result = await api.payCheckout(token, {
+        method,
+        network: network ?? undefined,
+      })
+    } catch (err) {
+      // A refusal before the buyer ever reaches the provider — a method we
+      // switched off, an expired session. The parent would otherwise sit on a
+      // spinner, because nothing navigated and nothing will.
+      postToParent('payment_failed', { deal_id: checkout.data?.deal.id })
+      throw err
+    }
     // In production this is the provider's own hosted page. The buyer leaves
     // for Flutterwave or Stripe here and comes back when the charge settles.
+    //
+    // **Note for anyone embedding this:** the frame navigates to the provider
+    // at this point, and whether that works is the provider's decision, not
+    // ours — their pages set their own `frame-ancestors`, and Stripe Checkout
+    // in particular refuses to be framed. A parent must keep the redirect
+    // fallback for exactly this reason. There is no outcome event here because
+    // this page is no longer the one that knows: the buyer comes back to
+    // `/status/:id`, which is where the result is reported from.
     if (result.payment_link) location.assign(result.payment_link)
   })
 

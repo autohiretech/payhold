@@ -82,8 +82,44 @@ reach a backend fails loudly instead of rendering invented numbers.
 
 `public/_redirects` is what makes client-side routing work: without it a buyer
 opening `/pay/:token` from an email gets Cloudflare's 404, because there is no
-file at that path. `public/_headers` denies framing — a payment page inside
-someone else's iframe is the setup for a clickjacked confirmation.
+file at that path.
+
+**`public/_headers` allows framing from an allowlist, and used to deny it
+outright.** The original reason still holds — a payment page inside someone
+else's iframe is the setup for a clickjacked confirmation — and what changed is
+who "someone else" is: an allowlisted origin is the tenant whose deal this is,
+who already chose the amount and the seller. Never `*`. `X-Frame-Options` was
+removed rather than relaxed, because it has no allowlist form and browsers
+honour the stricter of the two headers, so leaving `DENY` would have silently
+cancelled the CSP.
+
+**It is a static file, and that is a known limit rather than a design.** Each
+origin is a redeploy of this site, so a second tenant embedding checkout is a
+PayHold deploy — the opposite of how every other per-tenant capability works
+here, where markets, rails and routes are rows precisely so a corridor changes
+without one. When a second tenant asks, this becomes a `frame_ancestors` tenant
+setting served from a Pages Function on `/pay/*`.
+
+`src/lib/embed.ts` is the other half: a framed page has no navigation for its
+parent to observe, so it reports what happened. Three things about it are
+load-bearing. It **never posts to `"*"`** — a wildcard hands the deal id to
+whatever site framed us, which is what the allowlist exists to prevent. Its
+`ALLOWED_PARENTS` **must match the `frame-ancestors` line**, and the two are
+the same list written twice, which diverges silently. And **none of it is
+authorization**: the messages are a UI hint, so a parent that created an order
+off `payment_succeeded` would have built a way to get goods without paying —
+the booking comes from the signed `order.funded_held` webhook, as it always did.
+
+The outcome is reported from `/status/:id` and not from `/pay/:token`, because
+the checkout page hands the buyer to the provider and stops being the page that
+knows. `OUTCOME` there maps §6's statuses, and the three before funding are
+deliberately absent: `created`, `checkout_started` and `payment_pending` all
+mean "still waiting", and an async rail sits in the last one for minutes.
+
+**Whether the provider's own page can be framed is not our decision.** The
+frame navigates to Flutterwave or Stripe at handoff and they set their own
+`frame-ancestors` — Stripe Checkout refuses framing outright — so an embedding
+parent has to keep the redirect as a fallback.
 
 **What ships is the real thing.** `src/api/index.ts` constructs `HttpClient`
 against the project named in the build environment, and the sign-in in front of

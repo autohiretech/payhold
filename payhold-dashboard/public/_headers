@@ -4,11 +4,27 @@
 # headers matter more than they would on a brochure site.
 
 /*
-  # No other origin may frame this. A payment page inside someone else's
-  # iframe is the setup for a clickjacked confirmation.
-  X-Frame-Options: DENY
-  # Same rule, the modern spelling. Both, because older browsers only read one.
-  Content-Security-Policy: frame-ancestors 'none'
+  # Framing is allowed for named origins only, so a tenant can host the
+  # checkout in its own booking page instead of navigating the buyer away.
+  #
+  # This used to be `frame-ancestors 'none'` plus `X-Frame-Options: DENY`, and
+  # the reason is still true: a payment page inside someone else's iframe is
+  # the setup for a clickjacked confirmation. What changed is who "someone
+  # else" is — an allowlisted origin is the tenant whose deal this is, and who
+  # already chose the amount and the seller. Never `*`, which would put a
+  # payment page in any site that asked.
+  #
+  # `X-Frame-Options` is gone rather than relaxed: it has no allowlist form,
+  # and where both headers are present browsers honour the stricter one, so
+  # leaving DENY here would silently cancel the line below.
+  #
+  # KNOWN LIMIT, deliberate for now: this is a static file, so each origin is
+  # a redeploy of this site. Tenant #2 embedding checkout is a PayHold deploy,
+  # which is the opposite of how every other per-tenant capability works here
+  # — markets, rails and routes are rows precisely so a corridor changes
+  # without one. When a second tenant asks, this becomes a `frame_ancestors`
+  # tenant setting served from a Pages Function on /pay/*, not a longer line.
+  Content-Security-Policy: frame-ancestors 'self' https://autohiretech.pages.dev
   # Do not let a browser second-guess a response's type.
   X-Content-Type-Options: nosniff
   # A deal id in a path is not something to hand to a third-party site the

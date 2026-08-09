@@ -384,6 +384,17 @@ The dashboard is behind that gate in full. The hosted buyer and seller pages
 (`/pay/:token`, `/status/:id`) are not, and must never be — someone opening a
 payment link from an email has no PayHold account.
 
+**Those two pages may be framed by an allowlisted tenant origin**, so a client
+can host checkout in its own booking page instead of navigating the buyer away.
+The allowlist is `frame-ancestors` in `payhold-dashboard/public/_headers` and
+never `*`. A framed page reports its outcome to the parent by `postMessage`
+(`src/lib/embed.ts`), and **that message is a UI hint and nothing more** — a
+parent that created an order from it would have built a way to get goods
+without paying. The booking still comes from the signed `order.funded_held`
+webhook. AutoHire is currently the only origin on that list, which is the one
+place it has something no other tenant has; it is a static file today and
+becomes a per-tenant setting when a second tenant asks.
+
 **A client site must never hardcode a payment method.** Which wallets exist in
 Uganda, whether Nigerian cards take Verve, which markets can be paid into and
 which can only be collected from — all of it changes when provider coverage

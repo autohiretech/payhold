@@ -724,6 +724,23 @@ Deno.serve(handler(async (req) => {
     return await verify(req, db, caller, id)
   }
 
+  // An unmatched path under a seller is a 404, and until this guard it was the
+  // collection. Everything above is a route on one seller; everything below is
+  // a route on the set, and a request naming a seller that matched none of the
+  // former fell through to the latter — so `GET /sellers/:id/anything` answered
+  // with every seller this tenant has, names and masked destinations included.
+  //
+  // Tenant-scoped throughout, so it was never a cross-tenant leak. What it was
+  // is a typo that returns a data dump, and a silent success for calls to
+  // routes that do not exist yet — a client polling an endpoint we have not
+  // built would parse the list and conclude the feature works.
+  if (id) {
+    throw new PayHoldError(
+      'not_found',
+      `${req.method} /sellers/${id}${action ? `/${action}` : ''} is not a route`,
+    )
+  }
+
   switch (req.method) {
     case 'POST':
       return await create(req, db, caller)

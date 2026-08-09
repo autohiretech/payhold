@@ -7,13 +7,50 @@
  * client site would make itself. Small clients can skip building their own.
  */
 
+import { useEffect } from 'react'
 import { useSearchParams, useParams } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
-import { api, type ConfirmSide, type Deal } from '@/api'
+import { api, type ConfirmSide, type Deal, type DealStatus } from '@/api'
 import { Badge, Button, Card, Dot, ErrorNote, Skeleton, cx } from '@/components/ui'
 import { DEAL_STATUS_META, formatDate, formatMoney } from '@/lib/format'
 import { useMoneyAction } from '@/lib/queries'
+import { postToParent, reportHeight, type EmbedEvent } from '@/lib/embed'
 import { PublicFrame } from './Checkout'
+
+/**
+ * What an embedding parent is told, per §6 status.
+ *
+ * This is the page the buyer lands on coming back from the provider, so it is
+ * the one that knows how the payment went — the checkout page handed off and
+ * stopped being able to say.
+ *
+ * **The three states before funding are deliberately absent.** `created`,
+ * `checkout_started` and `payment_pending` are all "we are still waiting", and
+ * an async rail can sit in the last one for minutes; reporting anything there
+ * would tell a parent the payment resolved when it has not. No entry means no
+ * message, and the parent keeps waiting — which is the truth.
+ *
+ * Everything from `funded_held` on is a success, including the states past it:
+ * a buyer refreshing this page a week later, with the deal already released,
+ * still arrived by paying.
+ */
+const OUTCOME: Partial<Record<DealStatus, EmbedEvent>> = {
+  funded_held: 'payment_succeeded',
+  in_progress: 'payment_succeeded',
+  revision_requested: 'payment_succeeded',
+  confirmed_buyer: 'payment_succeeded',
+  confirmed_seller: 'payment_succeeded',
+  clearing: 'payment_succeeded',
+  released: 'payment_succeeded',
+  payout_pending: 'payment_succeeded',
+  paid_out: 'payment_succeeded',
+  disputed: 'payment_succeeded',
+  refunded: 'payment_succeeded',
+  partially_refunded: 'payment_succeeded',
+  payment_failed: 'payment_failed',
+  canceled: 'payment_cancelled',
+  expired: 'payment_cancelled',
+}
 
 export function DealStatusPage() {
   const { id = '' } = useParams()
@@ -25,6 +62,22 @@ export function DealStatusPage() {
 
   const deal = useQuery({ queryKey: ['public-deal', id], queryFn: () => api.getDeal(id) })
   const confirm = useMoneyAction(() => api.confirmDeal(id, side))
+
+  // Only does anything when a tenant has framed this page.
+  useEffect(reportHeight, [])
+
+  // Report the outcome once the deal is readable, and once per status rather
+  // than once per render — a confirmation changes the status and the parent
+  // should hear that the payment still stands, but a refetch returning the
+  // same status is not news.
+  const status = deal.data?.status
+  useEffect(() => {
+    if (!status) return
+    const event = OUTCOME[status]
+    // A status with no entry is one still in flight. Saying nothing is the
+    // honest report, and the parent keeps its spinner.
+    if (event) postToParent(event, { deal_id: id })
+  }, [status, id])
 
   if (deal.isPending) {
     return (
