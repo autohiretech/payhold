@@ -463,6 +463,15 @@ deal_outcomes(id, tenant_id, deal_id, outcome, reason_code, notes,
 risk_signals(id, tenant_id, deal_id, seller_id, signal, value jsonb, created_at)
 ```
 
+**Demo mode with zero keys works here too**, the same rule `FakeProvider` keeps
+for the rails. With no `ANTHROPIC_API_KEY`, `askClaude` answers from
+`_shared/ai-demo.ts` — a deterministic rule over the real case file, validated
+by the same validator a model's answer goes through, written with
+`model = 'demo-stand-in'` and `cost_usd = 0` so no row ever claims a model
+produced it. It advises exactly as the model does, and a person still approves.
+The one secret with no stand-in is `SUPABASE_JWT_SECRET`: a Postgres role cannot
+be faked, and the only fallback would be the service role.
+
 **Built** — `payhold-backend/supabase/migrations/20260806000004_intelligence.sql`
 and `functions/ai-*`. Invariant 9 is enforced by a Postgres role rather than by
 convention: the drafting functions connect as `payhold_ai`, which holds no

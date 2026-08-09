@@ -226,6 +226,24 @@ reach by setting it on the Settings screen rather than by switching to a fixture
 tenant — the §12.5 claim is that every money path behaves identically either
 way, and that is checkable on any account.
 
+**Off has three causes and one sentence each.** `aiOffReason` in
+`components/ai.tsx` is the only place that is decided, shared by `AiUnavailable`
+and the assistant panel so the two cannot disagree. `configured: false` means
+the *deployment* cannot reach the read-only AI role — `SUPABASE_JWT_SECRET` is
+unset — and no toggle on Settings can help; `enabled: false` with
+`configured: true` is the company's own switch; `over_budget` is the third. They
+used to collapse into one, and the sentence the unconfigured case got — "turn it
+on in Settings" — sent people to flip a switch that was already on.
+
+**A missing model key is not one of those causes.** `demo: true` means drafts
+work and come from `_shared/ai-demo.ts`'s deterministic stand-in rather than
+from a model, which is `FakeProvider`'s bargain applied to §12. `AiDemoNote`
+sits above the queue and above the assistant transcript whenever it is set, and
+is deliberately not styled as an error: demo mode working is the point of it.
+What the note exists to prevent is a fixed rule's output passing for a model's
+reading of a case — which is also why every demo answer labels itself in its own
+text and every row records `model: 'demo-stand-in'`.
+
 The one rule everything is arranged around is invariant 9 — **it advises, a
 person decides**:
 

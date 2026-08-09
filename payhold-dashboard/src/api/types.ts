@@ -1499,6 +1499,19 @@ export interface DealOutcome {
 
 /** Spend against budget, and how much labelled history has accumulated. */
 export interface AiUsage {
+  /**
+   * Can the *deployment* run §12 at all — i.e. can it reach the read-only AI
+   * role? False means no toggle on the Settings screen can help, which is
+   * exactly what a reader has to be able to tell apart from the company having
+   * switched the feature off.
+   */
+  configured: boolean
+  /**
+   * True when there is no model key and answers come from the deterministic
+   * stand-in. Drafts work; they are a fixed rule over the case file rather than
+   * a model's reading of it, and any screen showing one has to say so.
+   */
+  demo: boolean
   enabled: boolean
   /** This calendar month's spend, USD minor units. */
   spend_usd: Money

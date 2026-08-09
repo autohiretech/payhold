@@ -309,19 +309,67 @@ export function DecidedSuggestion({ suggestion }: { suggestion: AiSuggestion }) 
 
 // ---------------------------------------------------------------------------
 
-/** Shown wherever a draft would be, when Intelligence is off or out of budget. */
-export function AiUnavailable({ usage }: { usage: AiUsage }) {
+/**
+ * Shown wherever a draft would be, when Intelligence is off or out of budget.
+ *
+ * **Three states, not two.** An unconfigured deployment used to read as "off —
+ * turn it on in Settings", which is a cure that cannot work: the switch is
+ * already on, and what is missing is a function secret nobody can set from a
+ * browser. `aiOffReason` is the one place that distinction is drawn, so the
+ * panel and this card cannot tell different stories about the same account.
+ */
+export function aiOffReason(usage: AiUsage): { title: string; fix: string } {
+  if (!usage.configured) {
+    return {
+      title: 'Intelligence cannot run on this deployment.',
+      fix: 'Nothing in Settings changes this — the backend is missing the secret ' +
+        'that reaches the read-only AI role.',
+    }
+  }
+  if (!usage.enabled) {
+    return {
+      title: 'Intelligence is off for this company.',
+      fix: 'Turn it on in Settings for drafts and answers.',
+    }
+  }
+  return {
+    title: "This month's AI budget is spent.",
+    fix: 'Drafts and answers resume next month, or raise the budget in Settings.',
+  }
+}
+
+/**
+ * Shown wherever a draft can be produced but no model is behind it.
+ *
+ * This is not an error state and is deliberately not styled as one — demo mode
+ * works end to end, which is the point of it. What it must not do is let a
+ * fixed rule's output pass for a model's reading of a case: every draft made
+ * this way is labelled in its own text and recorded as `demo-stand-in`, and
+ * this is the standing reminder above them.
+ */
+export function AiDemoNote() {
   return (
     <div className="rounded-xl border border-line bg-surface-2/50 px-4 py-3">
       <p className="text-sm text-fg">
-        <span className="font-semibold">
-          {usage.enabled ? "This month's AI budget is spent." : 'Intelligence is off.'}
-        </span>{' '}
+        <span className="font-semibold">Demo mode — no model is connected.</span>{' '}
         <span className="text-fg-muted">
-          {usage.enabled
-            ? 'Drafts and answers resume next month, or raise the budget in Settings.'
-            : 'Turn it on in Settings for drafts and answers.'}{' '}
-          Deals, releases, refunds and payouts are unaffected.
+          Drafts and answers come from a fixed rule over your own records, so the
+          whole path works and nothing here is a model's judgement. Set a model
+          key on the backend for real drafts.
+        </span>
+      </p>
+    </div>
+  )
+}
+
+export function AiUnavailable({ usage }: { usage: AiUsage }) {
+  const { title, fix } = aiOffReason(usage)
+  return (
+    <div className="rounded-xl border border-line bg-surface-2/50 px-4 py-3">
+      <p className="text-sm text-fg">
+        <span className="font-semibold">{title}</span>{' '}
+        <span className="text-fg-muted">
+          {fix} Deals, releases, refunds and payouts are unaffected.
         </span>
       </p>
     </div>

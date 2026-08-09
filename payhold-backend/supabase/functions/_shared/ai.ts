@@ -36,6 +36,28 @@ export interface AiSettings {
 }
 
 export interface AiUsage extends AiSettings {
+  /**
+   * Can this deployment answer at all?
+   *
+   * That is `SUPABASE_JWT_SECRET` and nothing else. A missing model key is no
+   * longer a blocker — `askClaude` serves `ai-demo.ts`'s stand-in — but the
+   * `payhold_ai` role has no stand-in and must not get one: minting that token
+   * is what keeps invariant 9 a grant list rather than a convention, and the
+   * only "fallback" available would be the service role.
+   *
+   * Separate from `ai_enabled` for the reason `implemented` and `enabled` are
+   * separate columns on `provider_capabilities`: the two fail differently and
+   * have different remedies. A tenant switch is a field on the Settings screen;
+   * an unset function secret is not, and a screen that offers the first as the
+   * cure for the second sends somebody to toggle a switch that cannot help.
+   */
+  configured: boolean
+  /**
+   * True when there is no `ANTHROPIC_API_KEY` and answers come from the
+   * stand-in. Drafts work; they are a fixed rule over the case file rather than
+   * a model's reading of it, and every screen showing one has to say so.
+   */
+  demo: boolean
   enabled: boolean
   spend_usd: Money
   budget_usd: Money
@@ -111,12 +133,17 @@ export async function aiUsage(
     .select('id', { count: 'exact', head: true })
     .eq('tenant_id', tenantId)
 
+  const configured = aiDbConfigured()
+
   return {
     ...settings,
+    configured,
+    demo: !aiConfigured(),
     // "Enabled" to a caller means the whole path works, not just that a switch
-    // is on. A tenant with the feature enabled on a deployment with no API key
-    // is not enabled in any sense the dashboard should show as green.
-    enabled: settings.ai_enabled && aiConfigured() && aiDbConfigured(),
+    // is on. A tenant with the feature switched on, on a deployment that cannot
+    // mint a `payhold_ai` token, is not enabled in any sense a dashboard should
+    // show as green.
+    enabled: settings.ai_enabled && configured,
     spend_usd: spend,
     budget_usd: settings.ai_monthly_budget_usd,
     over_budget: spend >= settings.ai_monthly_budget_usd,
@@ -139,10 +166,16 @@ export async function assertAiAvailable(
   tenantId: string,
   feature?: AiFeature,
 ): Promise<AiUsage> {
-  if (!aiConfigured() || !aiDbConfigured()) {
+  // A missing model key is *not* checked here any more: `askClaude` answers
+  // from the stand-in, which is what makes §12 demonstrable with zero keys. A
+  // missing `SUPABASE_JWT_SECRET` still refuses, and always will — there is no
+  // stand-in for a Postgres role, and the only fallback on offer would be the
+  // service role, which is precisely what invariant 9 exists to deny this path.
+  if (!aiDbConfigured()) {
     throw new PayHoldError(
       'policy_violation',
-      'Intelligence is not configured on this deployment. Money paths are unaffected.',
+      'Intelligence cannot run on this deployment: SUPABASE_JWT_SECRET is not ' +
+        'set, so the read-only AI role cannot be reached. Money paths are unaffected.',
     )
   }
 

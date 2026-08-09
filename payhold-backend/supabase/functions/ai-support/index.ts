@@ -21,6 +21,7 @@ import { aiReadClient } from '../_shared/ai-db.ts'
 import { assertAiAvailable, inputHash } from '../_shared/ai.ts'
 import { retrieve } from '../_shared/ai-docs.ts'
 import { askClaude, trusted, untrusted } from '../_shared/anthropic.ts'
+import { demoSupportAnswer } from '../_shared/ai-demo.ts'
 import { handler, json, readJson, required } from '../_shared/http.ts'
 import { PayHoldError } from '../_shared/types.ts'
 
@@ -151,6 +152,7 @@ Deno.serve(handler(async (req) => {
     {
       system: SYSTEM,
       schema: SCHEMA,
+      demo: () => demoSupportAnswer(question, passages),
       // A short answer over four passages. Reaching for more thinking here buys
       // nothing and shows up as latency in a chat panel someone is watching.
       effort: 'low',

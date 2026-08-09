@@ -23,7 +23,13 @@ import {
 } from 'react'
 import { Link } from 'react-router-dom'
 import { api, type AiChatAttachment, type AiChatMessage, type Deal } from '@/api'
-import { AiSuggestionCard, DisputeStatements, SparkIcon } from '@/components/ai'
+import {
+  AiDemoNote,
+  AiSuggestionCard,
+  DisputeStatements,
+  SparkIcon,
+  aiOffReason,
+} from '@/components/ai'
 import { Badge, ErrorNote, Input, Mono, cx } from '@/components/ui'
 import { DEAL_STATUS_META, formatMoney } from '@/lib/format'
 import {
@@ -177,11 +183,10 @@ function AssistantModal({ onClose }: { onClose: () => void }) {
         </header>
 
         <div className="min-h-0 flex-1 space-y-3 overflow-y-auto px-4 py-4">
+          {!off && usage.data?.demo && <AiDemoNote />}
           {off && usage.data ? (
             <p className="text-sm leading-relaxed text-fg-muted">
-              {usage.data.enabled
-                ? "This month's AI budget is spent, so the assistant is off until next month."
-                : 'Intelligence is switched off for this company.'}{' '}
+              {aiOffReason(usage.data).title} {aiOffReason(usage.data).fix}{' '}
               Deals, releases, refunds and payouts are unaffected.
             </p>
           ) : messages.length === 0 ? (

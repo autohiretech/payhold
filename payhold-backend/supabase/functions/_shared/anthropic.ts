@@ -26,6 +26,7 @@
  */
 
 import Anthropic from 'npm:@anthropic-ai/sdk@^0.115.0'
+import { DEMO_MODEL } from './ai-demo.ts'
 import { PayHoldError } from './types.ts'
 
 /**
@@ -91,6 +92,16 @@ export interface ClaudeCall {
    */
   effort?: Effort
   maxTokens?: number
+  /**
+   * The deterministic answer to give when this deployment has no model key.
+   *
+   * **Required, not optional.** §12 promises demo mode with zero keys works end
+   * to end, and an optional field is one a new AI endpoint forgets — which would
+   * bring back the refusal this replaced, on that one path only. Build it from
+   * the case file already in hand: a stand-in that answers about invented data
+   * demonstrates the screen rather than the system. See `ai-demo.ts`.
+   */
+  demo: () => unknown
 }
 
 export interface ClaudeResult<T> {
@@ -108,9 +119,12 @@ export function aiConfigured(): boolean {
 function client(): Anthropic {
   const apiKey = Deno.env.get('ANTHROPIC_API_KEY')
   if (!apiKey) {
-    // A 422 rather than a 500. An unconfigured Intelligence layer is a
-    // deployment that has not switched the feature on, not a fault — and §12.5
-    // requires every money path to be unaffected either way.
+    // Unreachable through `askClaude`, which serves the stand-in before it gets
+    // here. Kept because this function is what anything talking to the model
+    // must go through, and the next caller should fail loudly rather than
+    // construct a client with no key. A 422 rather than a 500: an unconfigured
+    // Intelligence layer is a deployment choice, not a fault, and §12.5 wants
+    // every money path unaffected either way.
     throw new PayHoldError(
       'policy_violation',
       'Intelligence is not configured on this deployment. Money paths are unaffected.',
@@ -176,6 +190,14 @@ export async function askClaude<T>(
   call: ClaudeCall,
   validate: (value: unknown) => T,
 ): Promise<ClaudeResult<T>> {
+  // Demo mode. The stand-in goes through the *same* validator as a model
+  // answer, so an unresolvable citation or a split past §7.1's ceiling is
+  // discarded here exactly as a hallucinated one would be — and `model` says
+  // plainly that no model was asked.
+  if (!aiConfigured()) {
+    return { value: validate(call.demo()), cost_usd: 0, model: DEMO_MODEL }
+  }
+
   const response = await client().messages.create({
     model: MODEL,
     // Room for adaptive thinking *and* the answer — the cap covers both, and a

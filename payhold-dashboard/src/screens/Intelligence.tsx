@@ -1,5 +1,6 @@
 import { api } from '@/api'
 import {
+  AiDemoNote,
   AiSuggestionCard,
   AiUnavailable,
   DecidedSuggestion,
@@ -56,6 +57,12 @@ export function IntelligencePage() {
       {off && usage.data && (
         <div className="mb-6">
           <AiUnavailable usage={usage.data} />
+        </div>
+      )}
+
+      {!off && usage.data?.demo && (
+        <div className="mb-6">
+          <AiDemoNote />
         </div>
       )}
 

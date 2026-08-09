@@ -297,8 +297,8 @@ never tries to run a `Deno.test` file.
 | `DASHBOARD_ORIGIN` | comma-separated origins allowed to call the API from a browser |
 | `PUBLIC_URL` | where buyers are sent to pay |
 | `CRON_SECRET` | sent by pg_cron as `x-cron-secret`. The scheduled jobs are not tenant-scoped, so no API key may trigger them. Unset means they refuse every caller. |
-| `ANTHROPIC_API_KEY` | the Intelligence layer's model key. Unset switches §12 off cleanly — the AI endpoints answer 422 and every money path is untouched. |
-| `SUPABASE_JWT_SECRET` | the project's JWT secret, used to mint the short-lived `payhold_ai` token in `_shared/ai-db.ts`. Also required for §12, and for the same reason it has no fallback: falling back would mean running the AI layer with the service role. |
+| `ANTHROPIC_API_KEY` | the Intelligence layer's model key. **Unset is demo mode, not off** — `askClaude` answers from `_shared/ai-demo.ts`'s stand-in, so §12 works end to end with zero keys. |
+| `SUPABASE_JWT_SECRET` | the project's JWT secret, used to mint the short-lived `payhold_ai` token in `_shared/ai-db.ts`. **The one secret §12 cannot do without**, and for the reason it has no fallback: falling back would mean running the AI layer with the service role. |
 
 Set with `npx supabase secrets set NAME=value`. Generate the master key with
 `openssl rand -base64 32`. Nothing falls back to a default — a missing
@@ -352,6 +352,51 @@ as a convention survives until someone adds a line to a file whose header they
 did not read; as a grant, Postgres refuses it. `tests/intelligence.test.ts`
 asserts the refusal for all nine money functions, and that the role cannot read
 an API key hash or a provider credential.
+
+**`aiUsage` reports `configured`, `demo` and `enabled` separately**, for the
+reason `provider_capabilities` splits `implemented` and `enabled`: they fail
+differently and have different remedies. `configured` is whether this deployment
+can reach the `payhold_ai` role at all; `demo` is whether a model is behind the
+answers; `ai_enabled` is the tenant's switch; `enabled` is the switch and
+`configured` together. One flag meant an unconfigured deployment reported the
+same state as a company that had switched the feature off, and the dashboard told
+the reader to turn it on in Settings — where the switch was already on and could
+not have helped.
+
+### Demo mode is a stand-in model, not a switched-off layer
+
+`_shared/ai-demo.ts` is `FakeProvider`'s counterpart for §12, and the product
+rule is the same one: **demo mode with zero keys must work end to end.** With no
+`ANTHROPIC_API_KEY`, `askClaude` returns a deterministic answer built from the
+real case file the endpoint already assembled, rather than refusing.
+
+Four properties are what make that safe, and all four are load-bearing:
+
+- **The stand-in goes through the same validator.** `askClaude` calls
+  `validate(call.demo())`, so a demo citation that does not resolve is dropped
+  by `resolvable` exactly as a hallucinated one is, and a demo split past §7.1's
+  ceiling is refused exactly as the model's would be.
+- **`model` is `demo-stand-in` and `cost_usd` is 0.** No `ai_suggestions` row
+  ever implies a model produced it. That column is what keeps §24.4's eventual
+  training set filterable — canned rows mixed indistinguishably into a corpus
+  that cannot be rebuilt is the one irreversible thing this could have done.
+- **`demo` is a required field on `ClaudeCall`,** not an optional one. A new AI
+  endpoint that forgot it would bring the refusal back on that one path only.
+- **Invariant 9 is untouched.** The stand-in advises, a named person approves,
+  and `decide_ai_suggestion` is still the only bridge across. `ai-demo.ts` has
+  no database handle.
+
+The dispute stand-in leans to whichever side filed evidence when exactly one
+did, splits at `disputed_amount` when only part was disputed — because
+`resolve_dispute` refuses a full refund in that case, and a draft nobody can
+approve demonstrates nothing — and otherwise `escalate`s, which is the honest
+output of a rule that cannot weigh anything. Confidence is 0, and every answer
+names itself a stand-in in its own text.
+
+**`SUPABASE_JWT_SECRET` has no equivalent and must never get one.** There is no
+stand-in for a Postgres role: the only fallback available is the service role,
+which is exactly what invariant 9's grant list exists to deny this path. So
+`assertAiAvailable` still refuses without it, and says which secret is missing.
 
 `decide_ai_suggestion` is the single bridge across. It locks the suggestion
 `for update`, requires a `decided_by`, and only reaches `resolve_dispute` for an

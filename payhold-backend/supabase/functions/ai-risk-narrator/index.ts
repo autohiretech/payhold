@@ -38,6 +38,7 @@ import {
 } from '../_shared/ai.ts'
 import { riskCaseFile } from '../_shared/ai-context.ts'
 import { askClaude, trusted } from '../_shared/anthropic.ts'
+import { demoRiskBrief } from '../_shared/ai-demo.ts'
 import { validateRiskBrief } from '../_shared/ai-validate.ts'
 import { handler, json, readJson, required } from '../_shared/http.ts'
 import { PayHoldError } from '../_shared/types.ts'
@@ -140,6 +141,7 @@ Deno.serve(handler(async (req) => {
     {
       system: SYSTEM,
       schema: SCHEMA,
+      demo: () => demoRiskBrief(file),
       // Cheaper and quicker than the dispute draft, and rightly so: this is
       // summarising a file, not weighing a contested question.
       effort: 'low',

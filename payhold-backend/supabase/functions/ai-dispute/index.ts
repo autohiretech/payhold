@@ -31,6 +31,7 @@ import {
 } from '../_shared/ai.ts'
 import { disputeCaseFile } from '../_shared/ai-context.ts'
 import { askClaude, trusted, untrusted } from '../_shared/anthropic.ts'
+import { demoDisputeDraft } from '../_shared/ai-demo.ts'
 import { validateDisputeDraft } from '../_shared/ai-validate.ts'
 import { handler, json, readJson, required } from '../_shared/http.ts'
 import { PayHoldError } from '../_shared/types.ts'
@@ -184,6 +185,7 @@ Deno.serve(handler(async (req) => {
     {
       system: SYSTEM,
       schema: SCHEMA,
+      demo: () => demoDisputeDraft(file),
       user: [
         // Our own records. Every field a party wrote is stripped here and handed
         // over below instead — the descriptions with the evidence, the opening
