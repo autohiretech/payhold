@@ -70,6 +70,49 @@ function CodeBlock({ code, label }: { code: string; label?: string }) {
   )
 }
 
+/**
+ * One row of the endpoint reference.
+ *
+ * The method is a chip rather than part of the path string because scanning
+ * for "the POST that resolves a dispute" is how this table is actually read.
+ */
+function Endpoint({
+  method,
+  path,
+  children,
+}: {
+  method: 'GET' | 'POST'
+  path: string
+  children: React.ReactNode
+}) {
+  return (
+    <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1 border-t border-line px-6 py-3 first:border-t-0">
+      <span
+        className={cx(
+          'w-11 shrink-0 rounded px-1.5 py-0.5 text-center text-[0.625rem] font-bold tracking-wide',
+          method === 'GET'
+            ? 'bg-held-soft text-held'
+            : 'bg-brand-soft text-brand',
+        )}
+      >
+        {method}
+      </span>
+      <code className="font-mono text-xs text-fg">{path}</code>
+      <span className="w-full text-sm leading-relaxed text-fg-muted sm:w-auto sm:flex-1">
+        {children}
+      </span>
+    </div>
+  )
+}
+
+function GroupLabel({ children }: { children: React.ReactNode }) {
+  return (
+    <p className="border-t border-line bg-surface-2 px-6 py-2 text-[0.6875rem] font-semibold uppercase tracking-[0.08em] text-fg-subtle">
+      {children}
+    </p>
+  )
+}
+
 function Step({
   n,
   title,
@@ -317,26 +360,327 @@ if (event.event === 'order.funded_held') markOrderPaid(event.data.metadata.order
         </div>
       </Card>
 
+      {/* --- Disputes ------------------------------------------------------ */}
+      <Card className="mb-6">
+        <CardHeader
+          title="Disputes — the Resolution Center"
+          subtitle="Either side can ask for something. The other has 48 hours. Nothing moves on a clock."
+        />
+
+        <div className="space-y-4 px-6 py-5">
+          <p className="text-sm leading-relaxed text-fg-muted">
+            Opening a dispute <strong className="text-fg">freezes the payout</strong>{' '}
+            for that order. Either party may then request an update, an
+            extension, a cancellation, a partial refund or a full refund — one
+            open request per order at a time — and the other side accepts or
+            declines it.
+          </p>
+
+          <div className="rounded-lg bg-surface-2 px-4 py-3">
+            <p className="text-sm font-semibold text-fg">
+              Silence lapses a request. It never accepts one.
+            </p>
+            <p className="mt-1 text-sm leading-relaxed text-fg-muted">
+              At 48 hours the offer becomes <code className="font-mono text-xs">expired</code>{' '}
+              and the dispute stays open. Nothing is refunded and nobody is paid,
+              because a clock deciding either would be a machine deciding. Handle{' '}
+              <code className="font-mono text-xs">dispute.offer_expired</code> as
+              distinct from <code className="font-mono text-xs">offer_declined</code> —
+              declining is somebody's act, and reconciling your own records needs
+              to tell an answer from a silence.
+            </p>
+          </div>
+
+          <CodeBlock
+            label="Open a dispute, then request a partial refund"
+            code={`// Freezes the payout on this deal.
+const { dispute } = await post('/disputes', {
+  deal_id: dealId,
+  reason_code: 'not_as_described',
+  statement: buyerMessage,
+  disputed_amount: 20000,       // optional — bounds any resolution
+  raised_by: 'buyer',
+})
+
+// Either side may ask for something. The other has 48 hours.
+await post(\`/disputes/\${dispute.id}/offers\`, {
+  kind: 'partial_refund',       // update | extension | cancellation |
+  amount: 20000,                //   partial_refund | full_refund
+  side: 'seller',
+  message: 'Offering 200.00 back for the scratch.',
+})
+
+// Evidence is a description and a reference — never the file itself.
+await post(\`/disputes/\${dispute.id}/evidence\`, {
+  kind: 'photo',
+  description: 'Front bumper at handover',
+  url: 'https://yoursite.com/evidence/1042-a.jpg',
+  captured_at: '2026-08-09T08:15:00Z',
+})`}
+          />
+
+          <div className="rounded-lg bg-pending-soft px-4 py-3">
+            <p className="text-sm font-semibold text-pending">
+              Resolving refuses an API key, and refuses anyone who acted.
+            </p>
+            <p className="mt-1 text-sm leading-relaxed text-pending">
+              A decision needs a named person, so{' '}
+              <code className="font-mono text-xs">POST /disputes/:id/resolve</code>{' '}
+              is a dashboard action rather than something your server calls.
+              Whoever raised the dispute, made a request or answered one cannot
+              be its decider — which means the operator who writes down a
+              request a party made over the phone has just disqualified
+              themselves from ruling on it. Decide these on{' '}
+              <Link to="/disputes" className="font-semibold underline">
+                Resolution
+              </Link>
+              .
+            </p>
+          </div>
+
+          <p className="text-sm leading-relaxed text-fg-muted">
+            <code className="font-mono text-xs">GET /disputes/:id/export</code>{' '}
+            returns the whole case as one ordered timeline — statements, offers,
+            responses and evidence — which is what a chargeback response or a
+            regulator asks for.
+          </p>
+        </div>
+      </Card>
+
+      {/* --- Full reference ------------------------------------------------- */}
+      <Card className="mb-6">
+        <CardHeader
+          title="Every endpoint"
+          subtitle={`All relative to ${API_BASE}. Authenticate with X-Api-Key unless a row says otherwise.`}
+        />
+
+        <GroupLabel>Deals</GroupLabel>
+        <Endpoint method="POST" path="/deals">
+          Create the hold. Returns the deal and a payment link.
+        </Endpoint>
+        <Endpoint method="GET" path="/deals">
+          List, this company only.
+        </Endpoint>
+        <Endpoint method="GET" path="/deals/:id">
+          Status, timestamps, and the amount breakdown.
+        </Endpoint>
+        <Endpoint method="GET" path="/deals/:id/refunds">
+          The refund records. A refund has a lifetime, not a moment.
+        </Endpoint>
+        <Endpoint method="POST" path="/deals/:id/pay">
+          Start the charge on the rail the buyer's method implies.
+        </Endpoint>
+        <Endpoint method="POST" path="/deals/:id/confirm">
+          <code className="font-mono text-xs">side=buyer|seller</code>. Both → release.
+        </Endpoint>
+        <Endpoint method="POST" path="/deals/:id/refund">
+          Full, partial or line-item. Policy-checked.
+        </Endpoint>
+        <Endpoint method="POST" path="/deals/:id/deposit">
+          Open a card pre-authorisation for a security deposit.
+        </Endpoint>
+        <Endpoint method="POST" path="/deals/:id/capture">
+          Take some or all of that deposit.
+        </Endpoint>
+        <Endpoint method="POST" path="/deals/:id/release-deposit">
+          Give all of it back.
+        </Endpoint>
+
+        <GroupLabel>Hosted checkout</GroupLabel>
+        <Endpoint method="POST" path="/checkout/sessions">
+          Issue a payment link. Idempotent — one live session per deal.
+        </Endpoint>
+        <Endpoint method="GET" path="/checkout/sessions/:id">
+          Its status.
+        </Endpoint>
+        <Endpoint method="POST" path="/checkout/sessions/:id/cancel">
+          Withdraw the link.
+        </Endpoint>
+        <Endpoint method="GET" path="/checkout/public/:token">
+          What the buyer sees. <strong>No credential</strong> — the token is the credential.
+        </Endpoint>
+        <Endpoint method="POST" path="/checkout/public/:token/pay">
+          The buyer picks a method and is handed to the provider.
+        </Endpoint>
+
+        <GroupLabel>Sellers</GroupLabel>
+        <Endpoint method="POST" path="/sellers">
+          Register a payout destination. Tokenized immediately; we never store the number.
+        </Endpoint>
+        <Endpoint method="GET" path="/sellers">
+          List, with each one's state.
+        </Endpoint>
+        <Endpoint method="GET" path="/sellers/:id/capabilities">
+          Can this seller be paid, and if not, <em>every</em> reason.
+        </Endpoint>
+        <Endpoint method="GET" path="/sellers/:id/destinations">
+          Preferred destination and verified backup.
+        </Endpoint>
+        <Endpoint method="GET" path="/sellers/:id/balance">
+          Their wallet — buckets, and every reason something is stuck.
+        </Endpoint>
+        <Endpoint method="GET" path="/sellers/wallets">
+          Every seller's wallet in one query.
+        </Endpoint>
+        <Endpoint method="POST" path="/sellers/:id/withdraw">
+          Ask for cleared money. Screens and routes exactly as the nightly job does.
+        </Endpoint>
+        <Endpoint method="POST" path="/sellers/:id/verify">
+          Record the KYC attestation. <strong>Refuses an API key</strong> — a person's decision.
+        </Endpoint>
+
+        <GroupLabel>Payouts</GroupLabel>
+        <Endpoint method="GET" path="/payouts">
+          List, newest first.
+        </Endpoint>
+        <Endpoint method="GET" path="/payouts/:id">
+          One, with the signals that stopped it and the routing decision.
+        </Endpoint>
+        <Endpoint method="POST" path="/payouts/:id/hold">
+          Stop one, with a reason. <strong>Person only</strong>, audited against them.
+        </Endpoint>
+        <Endpoint method="POST" path="/payouts/:id/approve-review">
+          Clear a hold. <strong>Person only.</strong>
+        </Endpoint>
+        <Endpoint method="POST" path="/payouts/:id/retry">
+          One more attempt after a provider refused it.
+        </Endpoint>
+        <Endpoint method="GET" path="/payout-routes">
+          Which rails reach where, and which are switched on.
+        </Endpoint>
+
+        <GroupLabel>Disputes</GroupLabel>
+        <Endpoint method="POST" path="/disputes">
+          Open one. Freezes the payout.
+        </Endpoint>
+        <Endpoint method="GET" path="/disputes">
+          List, newest first.
+        </Endpoint>
+        <Endpoint method="GET" path="/disputes/:id">
+          One, with its offers, evidence and timeline.
+        </Endpoint>
+        <Endpoint method="POST" path="/disputes/:id/offers">
+          Request an update, extension, cancellation or refund.
+        </Endpoint>
+        <Endpoint method="POST" path="/disputes/:id/offers/:offer/respond">
+          Accept or decline. The other side only, inside 48 hours.
+        </Endpoint>
+        <Endpoint method="POST" path="/disputes/:id/offers/:offer/withdraw">
+          Take a request back.
+        </Endpoint>
+        <Endpoint method="POST" path="/disputes/:id/evidence">
+          A description and a reference — never the file.
+        </Endpoint>
+        <Endpoint method="GET" path="/disputes/:id/export">
+          The whole case, for a chargeback response or a regulator.
+        </Endpoint>
+        <Endpoint method="POST" path="/disputes/:id/resolve">
+          Decide it. <strong>Refuses an API key</strong>, and refuses anyone who acted for a side.
+        </Endpoint>
+
+        <GroupLabel>Money reads</GroupLabel>
+        <Endpoint method="GET" path="/balance">
+          Held, pending clearance, available, paid out. Add{' '}
+          <code className="font-mono text-xs">?by=rail</code> to split per provider.
+        </Endpoint>
+        <Endpoint method="GET" path="/ledger">
+          The entries behind those buckets. No writer, on any method.
+        </Endpoint>
+        <Endpoint method="GET" path="/audit-log">
+          Who did what, including every act that moved no money.
+        </Endpoint>
+        <Endpoint method="GET" path="/risk-signals">
+          What the deterministic rules noticed.
+        </Endpoint>
+
+        <GroupLabel>Catalogue and notifications</GroupLabel>
+        <Endpoint method="GET" path="/payment-options">
+          What a buyer in a market can pay with. <strong>Never hardcode this</strong> —
+          coverage changes and a site with it baked in is wrong the day it does.
+        </Endpoint>
+        <Endpoint method="POST" path="/webhook-endpoints">
+          Register a URL. The signing secret is returned exactly once.
+        </Endpoint>
+        <Endpoint method="GET" path="/webhook-endpoints?deliveries=1">
+          Every attempt, with status and signature — the answer to "did you tell us?"
+        </Endpoint>
+
+        <GroupLabel>Settings and credentials</GroupLabel>
+        <Endpoint method="GET" path="/settings">
+          Fee rate, clearance days, currencies, risk and payout policy.
+        </Endpoint>
+        <Endpoint method="POST" path="/provider-accounts">
+          Connect your own provider keys. Validated before stored, and the one
+          door live credentials come through.
+        </Endpoint>
+      </Card>
+
       {/* --- Events -------------------------------------------------------- */}
       <Card className="mb-6">
         <CardHeader
-          title="The events worth handling"
-          subtitle="Every registered endpoint gets every event — there is no per-event subscription."
+          title="Every event"
+          subtitle="One per transition. Every registered endpoint gets all of them — there is no per-event subscription."
         />
-        <div className="space-y-3 px-6 py-5 text-sm leading-relaxed">
+        <div className="px-6 py-5">
           {[
-            ['order.funded_held', 'Money is held. The only proof a buyer paid.'],
-            ['order.delivered', 'The seller says the work is done.'],
-            ['order.accepted', 'The buyer agrees. Both sides in — the hold releases.'],
-            ['order.clearing_started', 'Released, inside the clearance window.'],
-            ['order.released', 'Past the window. The payout may now go.'],
-            ['payout.paid', 'The seller has been sent their money.'],
-            ['refund.succeeded', 'A refund completed.'],
-            ['dispute.opened', 'Somebody raised a case. The payout is frozen.'],
-          ].map(([name, what]) => (
-            <div key={name} className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
-              <code className="font-mono text-xs text-brand">{name}</code>
-              <span className="text-fg-muted">{what}</span>
+            ['Order', [
+              ['order.payment_pending', 'A charge was started. Not money.'],
+              ['order.funded_held', 'Money is held. The only proof a buyer paid.'],
+              ['order.delivered', 'The seller says the work is done.'],
+              ['order.accepted', 'The buyer agrees. Both sides in — the hold releases.'],
+              ['order.clearing_started', 'Released, inside the clearance window.'],
+              ['order.released', 'Past the window. The payout may now go.'],
+              ['order.canceled', 'Called off before it was funded.'],
+              ['order.expired', 'Nobody paid in time.'],
+            ]],
+            ['Checkout', [
+              ['checkout.opened', 'A payment link was issued.'],
+              ['checkout.completed', 'The buyer finished with our page. Not the funding event.'],
+              ['checkout.canceled', 'The link was withdrawn.'],
+            ]],
+            ['Refunds', [
+              ['refund.succeeded', 'A refund completed.'],
+              ['refund.receivable_raised', 'Refunded after payout — the seller now owes it back.'],
+            ]],
+            ['Payouts', [
+              ['payout.pending', 'Scheduled.'],
+              ['payout.eligible', 'Cleared every check.'],
+              ['payout.processing', 'With the provider, not yet settled.'],
+              ['payout.paid', 'The seller has been sent their money.'],
+              ['payout.failed', 'The rail refused it. It will be retried.'],
+              ['payout.retry_requested', 'A person asked for one more attempt.'],
+              ['payout.retries_exhausted', 'The budget is spent. No machine will try again.'],
+              ['payout.blocked', 'No route, or the deal is disputed.'],
+              ['payout.held_for_review', 'A risk rule stopped it.'],
+              ['payout.held_by_person', 'Somebody stopped it, with a reason.'],
+              ['payout.needs_verification', 'The seller has not been verified.'],
+              ['payout.review_approved', 'A named person cleared the hold.'],
+              ['payout.route_changed', 'It moved to the verified backup destination.'],
+              ['payout.frozen', 'The whole account is stopped by reconciliation.'],
+            ]],
+            ['Disputes', [
+              ['dispute.opened', 'A case was raised. The payout is frozen.'],
+              ['dispute.offer_made', 'Somebody requested something.'],
+              ['dispute.offer_accepted', 'The other side agreed.'],
+              ['dispute.offer_declined', 'The other side said no. An act.'],
+              ['dispute.offer_expired', '48 hours passed. A silence, not an answer.'],
+              ['dispute.offer_withdrawn', 'The asker took it back.'],
+              ['dispute.evidence_added', 'A photo, document or check-in was filed.'],
+              ['dispute.resolved', 'A named person decided it.'],
+            ]],
+          ].map(([group, rows]) => (
+            <div key={group as string} className="mb-5 last:mb-0">
+              <p className="mb-2 text-[0.6875rem] font-semibold uppercase tracking-[0.08em] text-fg-subtle">
+                {group as string}
+              </p>
+              <div className="space-y-1.5">
+                {(rows as string[][]).map(([name, what]) => (
+                  <div key={name} className="flex flex-wrap items-baseline gap-x-3 gap-y-0.5">
+                    <code className="font-mono text-xs text-brand">{name}</code>
+                    <span className="text-sm leading-relaxed text-fg-muted">{what}</span>
+                  </div>
+                ))}
+              </div>
             </div>
           ))}
         </div>
