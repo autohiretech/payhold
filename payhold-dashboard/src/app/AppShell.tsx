@@ -21,6 +21,10 @@ const NAV_ADMIN = [
   { to: '/settings', label: 'Settings', icon: IconSettings },
   { to: '/api-keys', label: 'API keys', icon: IconKey },
   { to: '/audit', label: 'Audit trail', icon: IconAudit },
+  // Last, and in this group rather than the operational one above: it is a
+  // setup task, done once, by whoever holds the API key — not something an
+  // operator returns to while working a queue.
+  { to: '/help', label: 'Integrate', icon: IconHelp },
 ]
 
 export function AppShell() {
@@ -342,6 +346,17 @@ function IconAdmin() {
     <>
       <path d="M12 3 4 6.2V11c0 4.6 3.2 8.7 8 10 4.8-1.3 8-5.4 8-10V6.2Z" />
       <path d="m9.2 12 2 2 3.6-3.8" />
+    </>,
+  )
+}
+
+/** A question mark in a circle — the setup guide. */
+function IconHelp() {
+  return icon(
+    <>
+      <circle cx="12" cy="12" r="8.5" />
+      <path d="M9.6 9.4a2.5 2.5 0 1 1 3 2.45V13" />
+      <path d="M12.6 16.2h-.01" />
     </>,
   )
 }

@@ -17,6 +17,7 @@ import { RoutingPage } from '@/screens/Routing'
 import { SettingsPage } from '@/screens/Settings'
 import { ApiKeysPage } from '@/screens/ApiKeys'
 import { AuditPage } from '@/screens/Audit'
+import { HelpPage } from '@/screens/Help'
 import { AdminPage } from '@/screens/Admin'
 import { CheckoutPage } from '@/screens/public/Checkout'
 import { DealStatusPage } from '@/screens/public/DealStatus'
@@ -54,6 +55,11 @@ export const routes: RouteObject[] = [
       { path: 'settings', element: <SettingsPage /> },
       { path: 'api-keys', element: <ApiKeysPage /> },
       { path: 'audit', element: <AuditPage /> },
+      // Inside the gate, deliberately. It reads the account's own keys,
+      // endpoints and rails to say where the integration actually stands, and
+      // the base URL it prints is this deployment's — none of which a logged-out
+      // reader has. Public documentation is a different artefact.
+      { path: 'help', element: <HelpPage /> },
       { path: 'admin', element: <AdminPage /> },
     ],
   },

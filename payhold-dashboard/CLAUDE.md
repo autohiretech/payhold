@@ -730,6 +730,31 @@ different next action for us.
 The registry stays generated and says what is *possible*; the matrix says what
 is *on*. Spec §29.11.
 
+## The Integrate screen
+
+`src/screens/Help.tsx`, at `/help`, last in the Account group. It is the only
+screen that answers "what do I type" rather than "what happened", which is why
+it reads like documentation.
+
+**It is generated from the deployment, not written about it.** The base URL it
+prints comes from `@/config`, and the readiness card reads the account's real
+API keys, webhook endpoints and rail statuses. A guide with either hardcoded
+would go stale the first time somebody deployed it elsewhere and the reader
+would have no way to tell — which is precisely what happens to a copied code
+sample, and why the copyable blocks interpolate the live base URL.
+
+Two rules it keeps:
+
+- **It mutates nothing.** Every fix is a link to the screen that owns it. A
+  second place to issue a key or connect a rail is a second place to get it
+  wrong.
+- **`fake` does not count as a connected rail.** Counting it would report an
+  account as ready to take money when demo mode is all that is behind it.
+
+It is inside the auth gate deliberately: it reads this account's state and this
+deployment's URL, neither of which a logged-out reader has. Public
+documentation is a different artefact and should not be this file.
+
 ## Payment rails
 
 `src/lib/rails.ts` is the routing table: which provider handles which payment
