@@ -613,9 +613,26 @@ function Onboarding({ seller, now }: { seller: Seller; now: Date }) {
  * failed primary, `payout_primary_attempts` attempts, an explicit policy check,
  * and its own verification and security hold. A button that could pick it would
  * be the silent redirection §5.1 forbids.
+ *
+ * **The one action is ending a security hold**, and it is the second half of a
+ * §5.1 sentence the table used to only implement the first half of: a new
+ * destination enters a hold *and may require step-up verification before use*.
+ * The hold could previously only expire, so somebody who confirmed the change
+ * with the seller by phone had nothing to write that down with. It is a
+ * separate act from verifying, records a separate audit row, and leaves the
+ * destination unverified — which is why the row can still say so afterwards.
  */
 function Destinations({ sellerId, now }: { sellerId: string; now: Date }) {
   const destinations = useSellerDestinations(sellerId)
+  const { account } = useAuth()
+  const [confirming, setConfirming] = useState<string | null>(null)
+
+  // Recorded against whoever is signed in. The endpoint takes the actor from
+  // the session and refuses an API key outright, so there is no form field.
+  const actor = account?.full_name ?? account?.email ?? ''
+  const endHold = useMoneyMutation((destinationId: string) =>
+    api.endDestinationHold(sellerId, destinationId),
+  )
 
   if (destinations.isPending) {
     return (
@@ -679,11 +696,71 @@ function Destinations({ sellerId, now }: { sellerId: string; now: Date }) {
                     In its security hold until {formatDateTime(d.security_hold_until)}
                   </span>
                 )}
+                {onHold && confirming !== d.id && (
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className="mt-1.5"
+                    onClick={() => setConfirming(d.id)}
+                  >
+                    End the hold
+                  </Button>
+                )}
               </Td>
             </tr>
           )
         })}
       </tbody>
+      {confirming && (
+        <tfoot>
+          <tr>
+            <Td colSpan={6}>
+              <div className="space-y-3 py-1 text-left">
+                <p className="text-sm leading-relaxed text-fg">
+                  End the security hold on{' '}
+                  <Mono>
+                    {destinations.data.find((d) => d.id === confirming)
+                      ?.masked_destination}
+                  </Mono>
+                  ? You are recording that you confirmed this change with the
+                  seller themselves — a phone call, a step-up check, something
+                  that was not the same session that made the change. It is
+                  written against{' '}
+                  <strong className="font-semibold">{actor}</strong>.
+                </p>
+                <p className="text-xs leading-relaxed text-fg-muted">
+                  The hold exists because moving a destination and withdrawing is
+                  what an account takeover looks like. It does not verify the
+                  destination — that is a separate attestation and stays
+                  outstanding.
+                </p>
+                <div className="flex gap-2">
+                  <Button
+                    size="sm"
+                    variant="primary"
+                    disabled={endHold.isPending || !actor}
+                    onClick={() =>
+                      endHold.mutate(confirming, {
+                        onSuccess: () => setConfirming(null),
+                      })
+                    }
+                  >
+                    {endHold.isPending ? 'Recording…' : 'Yes, I confirmed it'}
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => setConfirming(null)}
+                  >
+                    Cancel
+                  </Button>
+                </div>
+                {endHold.isError && <ErrorNote message={endHold.error.message} />}
+              </div>
+            </Td>
+          </tr>
+        </tfoot>
+      )}
     </Table>
   )
 }

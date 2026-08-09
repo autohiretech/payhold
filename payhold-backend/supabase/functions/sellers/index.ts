@@ -35,6 +35,16 @@ const SELLER_COLUMNS =
   'beneficiary_token, masked_destination, kyc_status, external_user_id, ' +
   'sanctions_checked_at, destination_changed_at, created_at'
 
+/**
+ * **`beneficiary_token` is not in this list and must not join it.** It is the
+ * provider-side handle money moves against; a screen needs the mask, and a
+ * read that returns several rows at once is exactly where one would leak.
+ */
+const DESTINATION_COLUMNS =
+  'id, seller_id, label, country, payout_currency, payout_provider, ' +
+  'masked_destination, is_primary, is_backup, verified_at, ' +
+  'security_hold_until, created_at'
+
 async function create(
   req: Request,
   db: SupabaseClient,
@@ -237,6 +247,78 @@ async function verify(
     .from('sellers')
     .select(SELLER_COLUMNS)
     .eq('id', id)
+    .maybeSingle()
+
+  return json(req, data)
+}
+
+/**
+ * `POST /v1/sellers/:id/destinations/:destinationId/end-hold` — §5.1's step-up.
+ *
+ * The section asks for two things and the table only had one of them. A new
+ * destination "enters a short security hold **and may require re-authentication
+ * or step-up verification before use**" — `add_seller_destination` writes the
+ * hold, and until this endpoint there was nothing to record the step-up with.
+ * The hold could only expire, so a seller who rang in, answered the questions
+ * and had the change confirmed still waited out a timer.
+ *
+ * **Refuses an API key**, for the reason `/verify` does and more sharply. The
+ * hold exists because "get in, move the destination, withdraw" is the shape of
+ * an account takeover; a client that could end its own holds from its own
+ * server would have deleted the defence rather than satisfied it.
+ *
+ * **It does not verify the destination**, and the two must stay apart. Each
+ * stops a payout on its own and §5.1 wants both — `verify_seller` is the other,
+ * and it attests to a different thing: that the identity, sanctions and
+ * ownership checks came back, rather than that this particular change was the
+ * seller's own act.
+ */
+async function endHold(
+  req: Request,
+  db: SupabaseClient,
+  caller: Caller,
+  id: string,
+  destinationId: string,
+): Promise<Response> {
+  if (caller.kind === 'api_key') {
+    throw new PayHoldError(
+      'policy_violation',
+      "Ending a destination's security hold is a person's decision and cannot " +
+        'be done with an API key',
+    )
+  }
+
+  await ownSeller(db, caller, id)
+
+  // Scoped to the seller as well as the tenant. A destination id belonging to
+  // another of this account's sellers would otherwise be endable through
+  // whichever seller page the caller happened to be on, and the audit row would
+  // name the wrong one.
+  const { data: destination } = await db
+    .from('seller_destinations')
+    .select('id')
+    .eq('id', destinationId)
+    .eq('seller_id', id)
+    .eq('tenant_id', caller.tenant_id)
+    .maybeSingle()
+
+  if (!destination) {
+    throw new PayHoldError('not_found', `Destination ${destinationId} not found`)
+  }
+
+  const { error } = await db.rpc('end_destination_hold', {
+    p_destination: destinationId,
+    p_tenant: caller.tenant_id,
+    // From the session, never the request body — a caller that can name its own
+    // actor can forge one.
+    p_actor: caller.actor,
+  })
+  if (error) throw new Error(`end_destination_hold failed: ${error.message}`)
+
+  const { data } = await db
+    .from('seller_destinations')
+    .select(DESTINATION_COLUMNS)
+    .eq('id', destinationId)
     .maybeSingle()
 
   return json(req, data)
@@ -509,6 +591,10 @@ Deno.serve(handler(async (req) => {
   const base = segments.indexOf('sellers')
   const id = segments[base + 1]
   const action = segments[base + 2]
+  // §5.1's step-up hangs off a destination, which hangs off a seller. The only
+  // two-deep route here, and the reason the parse goes past `action`.
+  const sub = segments[base + 3]
+  const subAction = segments[base + 4]
 
   // Ahead of the `:id` routes: `wallets` is a collection, not a seller, and a
   // uuid column would refuse it anyway — with a 500 rather than a 404.
@@ -523,18 +609,12 @@ Deno.serve(handler(async (req) => {
   // §5.1's preferred destination and verified backup — which one pair of
   // columns on the seller could not express, and which the payout path now
   // reads instead of `sellers.beneficiary_token`.
-  //
-  // `beneficiary_token` is **not** selected. It is the provider-side handle
-  // money moves against; a screen needs the mask and never the token, and a
-  // list endpoint is exactly where one would leak.
   if (req.method === 'GET' && id && action === 'destinations') {
     await ownSeller(db, caller, id)
 
     const { data } = await db
       .from('seller_destinations')
-      .select('id, seller_id, label, country, payout_currency, payout_provider, ' +
-        'masked_destination, is_primary, is_backup, verified_at, ' +
-        'security_hold_until, created_at')
+      .select(DESTINATION_COLUMNS)
       .eq('seller_id', id)
       .eq('tenant_id', caller.tenant_id)
       .order('is_primary', { ascending: false })
@@ -551,6 +631,15 @@ Deno.serve(handler(async (req) => {
   // destination is not `POST /sellers` again: that one refuses a handle it
   // already knows precisely so a re-registration cannot become a silent
   // destination change that skipped the hold.
+  // Ahead of the bare `destinations` POST, which would otherwise swallow it and
+  // try to register a destination from an empty body.
+  if (
+    req.method === 'POST' && id && action === 'destinations' &&
+    sub && subAction === 'end-hold'
+  ) {
+    return await endHold(req, db, caller, id, sub)
+  }
+
   if (req.method === 'POST' && id && action === 'destinations') {
     return await addDestination(req, db, caller, id)
   }

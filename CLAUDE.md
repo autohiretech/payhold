@@ -346,6 +346,7 @@ Auth: `X-Api-Key`, hashed at rest, rate-limited per key.
 | `POST /v1/sellers/:id/verify` | Record the attestation. **Refuses an API key** — it is a person's decision |
 | `GET /v1/sellers/:id/destinations` | §5.1's preferred destination and verified backup |
 | `POST /v1/sellers/:id/destinations` | Move where a seller is paid, or give them a backup. The new row is unverified and inside §5.1's security hold — payouts pause until it is checked, and no parameter skips that |
+| `POST /v1/sellers/:id/destinations/:id/end-hold` | §5.1's step-up: somebody confirmed the change with the seller, so the hold ends early. **Refuses an API key** — a client that could end its own holds has deleted the defence rather than satisfied it. Does not verify the destination |
 | `GET /v1/sellers/:id/balance` | This seller's wallet — ledger buckets, plus what a withdrawal would move and every reason something is stuck |
 | `GET /v1/sellers/wallets` | Every seller's wallet in one query |
 | `POST /v1/sellers/:id/withdraw` | Ask for the cleared money. Stamps and dispatches; screens, routes and books exactly as the cron does |
@@ -567,6 +568,27 @@ seller to verify themselves again.
 `POST /v1/sellers/:id/verify` records the attestation and **refuses an API
 key** — a client that could verify its own sellers has turned KYC into a field
 it sets.
+
+**A security hold ends by expiring or by somebody ending it**, and until
+`20260809000002` only the first was possible. §5.1 asks for two things — a new
+destination enters a short hold *and may require step-up verification before
+use* — and the table implemented only the first, so a seller who rang in and had
+the change confirmed still waited out a timer.
+`POST /v1/sellers/:id/destinations/:id/end-hold` is the step-up written down: a
+name, an audit row, and an API key refused, because "get in, move the
+destination, withdraw" is the shape this protects against and a client ending
+its own holds would be the second step granting itself the third. It ends the
+hold and nothing else — the destination is still unverified afterwards, which is
+a separate attestation and a separate stop.
+
+That change also made one hold read as one. `seller_capabilities` and
+`route_payout` read `seller_destinations.security_hold_until`; `screen_payout`
+re-derived its own window from `sellers.destination_changed_at` and the current
+`destination_hold_hours`, and nothing kept the three in step — so a seller could
+be shown one reason while their payout was stopped by another. The stamp now
+wins wherever it exists, with the old derivation kept as the fallback for a
+primary seeded at registration, which carries no stamp and would otherwise lose
+the protection entirely.
 
 **Destinations live in `seller_destinations`** (§5.1: a preferred destination
 and a verified backup, which one pair of columns cannot express).

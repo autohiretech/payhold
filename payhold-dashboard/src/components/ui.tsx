@@ -245,13 +245,17 @@ export function Td({
   children,
   align = 'left',
   className,
+  colSpan,
 }: {
   children?: ReactNode
   align?: 'left' | 'right'
   className?: string
+  /** For a panel that belongs to the table rather than to one column. */
+  colSpan?: number
 }) {
   return (
     <td
+      colSpan={colSpan}
       className={cx(
         'border-b border-line px-6 py-3.5 text-fg',
         align === 'right' ? 'text-right' : 'text-left',

@@ -504,12 +504,25 @@ knows about them: onboarding state, destinations and route, every deal, every
 payout, every signal their name is on, and where their buyers paid from. It is a
 record and not a verdict — nothing on it scores anybody.
 
-**It now carries exactly one action, and it is not a payout decision.** Clearing
-a hold still belongs on Payouts, because a hold is a question about one payment.
-Attesting that a seller's identity, sanctions screen and ownership came back is
-a fact about the seller, §12 requires a person to record it, and this is the page
-that person is looking at. `verifySeller` takes the name from the session and
-never from a form — a caller that can name its own verifier can forge one.
+**It carries two actions and neither is a payout decision.** Clearing a payout
+hold still belongs on Payouts, because that is a question about one payment.
+Both of these are facts about the seller, §12 and §5.1 require a person to record
+them, and this is the page that person is looking at. Each takes the name from
+the session and never from a form — a caller that can name its own verifier can
+forge one — and each is refused an API key at the endpoint.
+
+- **Verify** (`verifySeller`, on the Onboarding card) attests that the identity
+  check, the sanctions screen and the ownership check came back.
+- **End the hold** (`endDestinationHold`, on the destinations row that is in
+  one) is §5.1's step-up: somebody confirmed the change with the seller
+  themselves. The confirm panel says so in those words, because the thing being
+  attested to is that the confirmation came from *outside* the session that made
+  the change — the hold exists because "get in, move the destination, withdraw"
+  is what a takeover looks like.
+
+They stay separate acts with separate audit rows, and ending a hold leaves the
+destination unverified — the row still says so afterwards, which is correct and
+not a stale render.
 
 The onboarding card renders `getSellerCapabilities`, which returns **every**
 reason rather than the first. The two lists stay visually apart because they are

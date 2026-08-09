@@ -205,6 +205,22 @@ export interface PayHoldClient {
    * seller to `review_required`, which holds their payouts again.
    */
   verifySeller(sellerId: string, verified: boolean): Promise<Seller>
+  /**
+   * §5.1's step-up: record that a destination change was confirmed with the
+   * seller, ending its security hold early.
+   *
+   * **A person's decision, and the endpoint refuses an API key** — the hold
+   * exists because "get in, move the destination, withdraw" is the shape of an
+   * account takeover, so a client that could end its own holds would have
+   * deleted the defence rather than satisfied it.
+   *
+   * It does **not** verify the destination. Both conditions stop a payout on
+   * their own and §5.1 wants both; `verifySeller` is the other one.
+   */
+  endDestinationHold(
+    sellerId: string,
+    destinationId: string,
+  ): Promise<SellerDestination>
 
   // -- Money ---------------------------------------------------------------
   getBalance(): Promise<Balance[]>

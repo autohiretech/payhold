@@ -573,3 +573,166 @@ describe('§11 external user id — the client’s own handle', () => {
     expect(rows[0].n).toBe(2)
   })
 })
+
+// ---------------------------------------------------------------------------
+
+/**
+ * §5.1's step-up: ending a destination's security hold early, and the
+ * inconsistency that had to be fixed for it to mean anything.
+ *
+ * One hold was being read three ways — `seller_capabilities` and `route_payout`
+ * off `seller_destinations.security_hold_until`, `screen_payout` off
+ * `sellers.destination_changed_at` and the current setting. The first two tests
+ * below are the writer; the rest are the three readers agreeing.
+ */
+describe('§5.1 ending a security hold', () => {
+  /** A destination as `POST /v1/sellers/:id/destinations` writes one: held, unverified. */
+  const addHeld = async (seller: string, token = 'tok_stepup') => {
+    const { rows: [d] } = await h.db.query<{ id: string; hold: string | null }>(
+      `select id, security_hold_until as hold
+         from add_seller_destination($1, $2, 'RW', 'RWF', 'flutterwave_bank',
+                                     $3, 'BK •••• 9910', null, 'primary', 'api')`,
+      [seller, tenant, token],
+    )
+    return d
+  }
+
+  const endHold = (destination: string, actor = 'ops@payhold.test') =>
+    h.db.query(`select * from end_destination_hold($1, $2, $3)`,
+      [destination, tenant, actor])
+
+  test('it refuses to end a hold without a name', async () => {
+    const seller = await newSeller('Nameless step-up')
+    const dest = await addHeld(seller)
+
+    // The same refusal `verify_seller` and `approve_payout_review` make. A
+    // decision without a decider is not a record.
+    await rejects(() => endHold(dest.id, '   '), /must record who ended it/)
+  })
+
+  test('it ends the hold, names the person, and says how much was skipped', async () => {
+    const seller = await newSeller('Rang in and confirmed')
+    const dest = await addHeld(seller)
+    expect(dest.hold).not.toBeNull()
+
+    await endHold(dest.id)
+
+    const { rows: [after] } = await h.db.query<{ lapsed: boolean }>(
+      `select security_hold_until <= now() as lapsed
+         from seller_destinations where id = $1`, [dest.id],
+    )
+    expect(after.lapsed).toBe(true)
+
+    const { rows: [log] } = await h.db.query<{ actor: string; details: Record<string, unknown> }>(
+      `select actor, details from audit_log
+        where action = 'seller.destination_hold_ended'
+          and details ->> 'destination_id' = $1`,
+      [dest.id],
+    )
+    expect(log.actor).toBe('ops@payhold.test')
+    // The original expiry, so "how much of it was skipped" is answerable.
+    expect(log.details.held_until).toBeTruthy()
+    expect(Number(log.details.hours_remaining)).toBeGreaterThan(0)
+    // The mask, never the token (§19).
+    expect(log.details.destination).toBe('BK •••• 9910')
+  })
+
+  test('it is silent rather than wrong on a hold that already lapsed', async () => {
+    const seller = await newSeller('Waited it out')
+    const dest = await addHeld(seller)
+
+    await endHold(dest.id)
+    await endHold(dest.id, 'someone-else@payhold.test')
+
+    // An expired hold is not an error, and a second call must not put a second
+    // person's name against a decision the first one already made.
+    const { rows: [n] } = await h.db.query<{ n: number }>(
+      `select count(*)::int as n from audit_log
+        where action = 'seller.destination_hold_ended'
+          and details ->> 'destination_id' = $1`,
+      [dest.id],
+    )
+    expect(n.n).toBe(1)
+  })
+
+  test('ending the hold does not verify the destination', async () => {
+    const seller = await newSeller('Still unverified')
+    const dest = await addHeld(seller)
+    await endHold(dest.id)
+
+    // Two independent conditions, and §5.1 wants both. Ending one must not
+    // quietly satisfy the other — that is the whole shape of the takeover this
+    // protects against.
+    const c = await capabilities(seller)
+    expect(c.reasons.join(' ')).not.toMatch(/security hold/)
+    expect(c.reasons.join(' ')).toMatch(/not been verified/)
+    expect(await screen(await payoutFor(seller))).toBe(true)
+  })
+
+  test('the gate and the capability read describe one hold the same way', async () => {
+    const seller = await newSeller('One sentence')
+    await h.db.query(`select verify_seller($1, 'ops@payhold.test', true)`, [seller])
+    const dest = await addHeld(seller, 'tok_one_sentence')
+
+    // `screen_payout` used to derive its own window from the seller timestamp,
+    // so the two could — and did — stop a payout for reasons that did not match
+    // what the seller was shown.
+    const payout = await payoutFor(seller)
+    expect(await screen(payout)).toBe(true)
+
+    const { rows: [sig] } = await h.db.query<{ reasons: string[] }>(
+      `select array(select jsonb_array_elements_text(value -> 'reasons')) as reasons
+         from risk_signals
+        where seller_id = $1 and signal = 'not_eligible'
+        order by created_at desc limit 1`,
+      [seller],
+    )
+    const shown = (await capabilities(seller)).reasons
+    expect(sig.reasons).toContain(
+      shown.find((r) => r.includes('security hold')),
+    )
+
+    // And once it is ended, the gate lets go — the payout goes back in the
+    // queue rather than waiting for a pass that would never come.
+    await endHold(dest.id)
+    await h.db.query(`select verify_seller($1, 'ops@payhold.test', true)`, [seller])
+
+    expect(await screen(payout)).toBe(false)
+    const { rows: [p] } = await h.db.query<{ status: string }>(
+      `select status::text from payouts where id = $1`, [payout],
+    )
+    expect(p.status).toBe('scheduled')
+  })
+
+  test('a seeded primary with no stamp keeps the protection it had', async () => {
+    // `sellers_seed_primary_destination` writes no expiry, so these rows have
+    // only `destination_changed_at` to go on. The fallback is not a
+    // transitional kindness — it is the only protection they get.
+    const seller = await newSeller('Seeded, then moved')
+    await h.db.query(`select verify_seller($1, 'ops@payhold.test', true)`, [seller])
+    await h.db.query(
+      `update seller_destinations set security_hold_until = null where seller_id = $1`,
+      [seller],
+    )
+    await h.db.query(
+      `update sellers set destination_changed_at = now() - interval '1 hour' where id = $1`,
+      [seller],
+    )
+
+    const c = await capabilities(seller)
+    expect(c.reasons.join(' ')).not.toMatch(/security hold/)
+
+    // The stamp says nothing, so the seller timestamp still decides.
+    expect(await screen(await payoutFor(seller))).toBe(true)
+  })
+
+  test('the AI role cannot end a security hold', async () => {
+    // Invariant 9 as a grant list. A recreated function is granted to PUBLIC,
+    // which is the trap `refund_deal` and `resolve_dispute` both walked into.
+    const { rows } = await h.db.query<{ allowed: boolean }>(
+      `select bool_or(has_function_privilege('payhold_ai', p.oid, 'execute')) as allowed
+         from pg_proc p where p.proname = 'end_destination_hold'`,
+    )
+    expect(rows[0].allowed).toBe(false)
+  })
+})

@@ -588,6 +588,23 @@ export class HttpClient implements PayHoldClient {
     return await this.#post<Seller>(`/sellers/${sellerId}/verify`, { verified })
   }
 
+  /**
+   * §5.1's step-up. Same shape as `verifySeller` and for the same reasons: the
+   * actor comes from the session and the endpoint refuses an API key.
+   *
+   * The destination is named as well as the seller, because a seller may have
+   * several and only one of them is the one somebody just confirmed.
+   */
+  async endDestinationHold(
+    sellerId: string,
+    destinationId: string,
+  ): Promise<SellerDestination> {
+    return await this.#post<SellerDestination>(
+      `/sellers/${sellerId}/destinations/${destinationId}/end-hold`,
+      {},
+    )
+  }
+
   // -- Disputes: the Resolution Center (§8) --------------------------------
 
   async listDisputes(): Promise<Dispute[]> {

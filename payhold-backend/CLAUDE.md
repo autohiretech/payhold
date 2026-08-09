@@ -72,7 +72,7 @@ environment or a build log.
 | `deals` | create (with §14's `completion_policy`), list, get, `/pay`, `/confirm`, `/refund`, `/deposit`, `/capture`, `/release-deposit` |
 | `checkout` | §10.1's sessions. `/sessions` for the client's server; `/public/:token` for the buyer, with no credential |
 | `payment-options` | what a buyer in a market can pay with; the catalogue a client renders its checkout from |
-| `sellers` | register a tokenized payout destination, list (`?external_user_id=` finds the client's own handle), `/wallets`, `/:id/capabilities`, `/:id/balance`, `/:id/withdraw`, `/:id/verify` (person-only) |
+| `sellers` | register a tokenized payout destination, list (`?external_user_id=` finds the client's own handle), `/wallets`, `/:id/capabilities`, `/:id/balance`, `/:id/withdraw`, `/:id/verify` (person-only), `/:id/destinations` and `/:id/destinations/:id/end-hold` (person-only) |
 | `balance` | four buckets per currency, or `?by=rail` |
 | `ledger` | the entries behind those buckets, filterable by deal. No writer, on any method |
 | `audit-log` | who did what, including every act that moved no money |
@@ -1050,6 +1050,52 @@ between the second step and the third. The outgoing destination is demoted and
 never deleted — a paid payout still has to say where it went, and a seller
 moving back to an account PayHold has already verified should not serve a second
 hold for it.
+
+## Ending a hold, and three readers of one fact — migration `20260809000002`
+
+`end_destination_hold` is the other half of §5.1's sentence. The section asks
+for a hold **and** for step-up verification "before use"; the table had the
+first and no way to record the second, so the hold could only expire. A seller
+who rang in, answered the questions and had the change confirmed still waited
+out a timer, and the operator watching had nothing to write it down with.
+
+Shaped like every other attestation here: it takes a name, refuses a blank one,
+audits against that person, and `POST /v1/sellers/:id/destinations/:id/end-hold`
+**refuses an API key**. That refusal is sharper than `/verify`'s — the hold is
+what stands between a takeover's second step and its third, so a client ending
+its own holds would have deleted the defence rather than passed it.
+
+Three smaller decisions:
+
+- **`security_hold_until` is set to `now()`, never null.** Null means "this
+  destination never had a hold" to every reader, and this one did. An ended hold
+  and an expired one are the same fact going forward; the row should not claim
+  the stronger thing. The original expiry and the hours skipped go in the audit
+  row, which is where "how much, and by whom" is answered.
+- **Idempotent and silent on a lapsed hold.** A hold that already ended is not
+  an error, and a second call must not put a second person's name against a
+  decision the first one made — so there is no audit row for a no-op.
+- **It does not verify the destination.** Both conditions stop a payout on their
+  own and §5.1 wants both. Ending one quietly satisfying the other is precisely
+  the shape being defended against.
+
+**The reason `screen_payout` is in this migration is that one hold was read
+three ways.** `seller_capabilities` and `route_payout` read
+`seller_destinations.security_hold_until`; `screen_payout` re-derived a window
+from `sellers.destination_changed_at` and `destination_hold_hours` as it stands
+*now*. Nothing kept them in step, and they disagreed in both directions —
+lowering the setting released the gate while the stamped expiry still blocked
+the route, and ending a hold on the row would have done the reverse. A seller
+was shown one reason on their own screen while the payout was stopped here by
+another, which is the failure returning every reason at once exists to prevent.
+
+The stamp now wins wherever it exists, and both readers emit the identical
+sentence. **The fallback is not a transitional kindness**:
+`sellers_seed_primary_destination` writes no expiry, so a seller whose primary
+was seeded at registration has only `destination_changed_at` to go on and must
+keep exactly the protection it gives them. `create or replace` with an identical
+signature, so no `drop function` — but the revoke is reissued, because a
+recreated function is granted to PUBLIC again.
 
 ## Payout routing — §5.1, migrations `20260807000008` and `20260807000009`
 
