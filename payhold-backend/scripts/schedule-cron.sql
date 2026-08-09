@@ -15,7 +15,22 @@
 -- Before running, set the shared secret ONCE, matching the CRON_SECRET
 -- function secret (`npx supabase secrets set CRON_SECRET=…`):
 --
---   alter database postgres set payhold.cron_secret = '…';
+--   select vault.create_secret('…', 'payhold_cron_secret',
+--     'Shared secret the scheduled jobs send as x-cron-secret.');
+--
+-- **It goes in Vault rather than in a GUC, because on Supabase a GUC is not
+-- available.** The obvious form — `alter database postgres set
+-- payhold.cron_secret = '…'` — fails with `permission denied to set parameter`:
+-- the database is owned by `supabase_admin` and the `postgres` role we connect
+-- as is not a superuser, so it may set neither a database-level nor a
+-- role-level custom parameter. Vault is the platform's own answer, and it is
+-- the better one anyway: the value is encrypted at rest instead of sitting in
+-- plaintext in `pg_db_role_setting`.
+--
+-- To rotate it, update in place rather than creating a second row:
+--
+--   select vault.update_secret(
+--     (select id from vault.secrets where name = 'payhold_cron_secret'), '…');
 --
 -- Keep the value out of this file and out of git. A job whose secret does not
 -- match the function's gets a 401 from every call — visible within a day in
@@ -45,21 +60,27 @@ create extension if not exists pg_net;
 select cron.schedule('payhold-reconcile', '0 * * * *', $$
   select net.http_post(
     url := 'https://mwnbjjlilqrwdmwutbxr.supabase.co/functions/v1/reconcile',
-    headers := jsonb_build_object('x-cron-secret', current_setting('payhold.cron_secret'))
+    headers := jsonb_build_object('x-cron-secret',
+      (select decrypted_secret from vault.decrypted_secrets
+        where name = 'payhold_cron_secret'))
   );
 $$);
 
 select cron.schedule('payhold-auto-release', '10 * * * *', $$
   select net.http_post(
     url := 'https://mwnbjjlilqrwdmwutbxr.supabase.co/functions/v1/auto-release',
-    headers := jsonb_build_object('x-cron-secret', current_setting('payhold.cron_secret'))
+    headers := jsonb_build_object('x-cron-secret',
+      (select decrypted_secret from vault.decrypted_secrets
+        where name = 'payhold_cron_secret'))
   );
 $$);
 
 select cron.schedule('payhold-payout-dispatch', '20 * * * *', $$
   select net.http_post(
     url := 'https://mwnbjjlilqrwdmwutbxr.supabase.co/functions/v1/payout-dispatch',
-    headers := jsonb_build_object('x-cron-secret', current_setting('payhold.cron_secret'))
+    headers := jsonb_build_object('x-cron-secret',
+      (select decrypted_secret from vault.decrypted_secrets
+        where name = 'payhold_cron_secret'))
   );
 $$);
 
@@ -68,7 +89,9 @@ $$);
 select cron.schedule('payhold-webhooks', '* * * * *', $$
   select net.http_post(
     url := 'https://mwnbjjlilqrwdmwutbxr.supabase.co/functions/v1/webhook-dispatch',
-    headers := jsonb_build_object('x-cron-secret', current_setting('payhold.cron_secret'))
+    headers := jsonb_build_object('x-cron-secret',
+      (select decrypted_secret from vault.decrypted_secrets
+        where name = 'payhold_cron_secret'))
   );
 $$);
 

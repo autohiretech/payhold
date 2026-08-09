@@ -252,8 +252,8 @@ select status, created from cron.job_run_details order by start_time desc limit 
 
 `cron.job_run_details` saying "succeeded" means the request was **queued**.
 The status codes are in `net._http_response` — check there for 200s, and for
-401s, which mean `payhold.cron_secret` and the `CRON_SECRET` function secret
-disagree.
+401s, which mean the `payhold_cron_secret` Vault secret and the `CRON_SECRET`
+function secret disagree.
 
 ---
 
