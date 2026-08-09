@@ -341,6 +341,7 @@ Auth: `X-Api-Key`, hashed at rest, rate-limited per key.
 | `POST /v1/deals/:id/deposit` `/capture` `/release` | Card pre-auth deposit lifecycle |
 | `GET /v1/payment-options` | What a buyer in a market can pay with — methods, wallets, card schemes, currencies |
 | `POST /v1/sellers` | Register payout destination → tokenized beneficiary. Takes the client's own `external_user_id`, unique per tenant, so their system can find this seller again |
+| `GET /v1/sellers` | This tenant's sellers, or `?external_user_id=` to find the one registered against the client's own handle. No match is an empty list, not a 404 — that is the question a get-or-create asks |
 | `GET /v1/sellers/:id/capabilities` | Can this seller be paid, and if not, every reason. Two lists, kept apart |
 | `POST /v1/sellers/:id/verify` | Record the attestation. **Refuses an API key** — it is a person's decision |
 | `GET /v1/sellers/:id/destinations` | §5.1's preferred destination and verified backup |

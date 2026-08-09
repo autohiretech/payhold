@@ -2,7 +2,8 @@
  * Sellers — a payout destination, tokenized.
  *
  *   POST /sellers   register a destination → returns the seller, never the number
- *   GET  /sellers   list this tenant's sellers
+ *   GET  /sellers   list this tenant's sellers, or `?external_user_id=` to find
+ *                   the one registered against the client's own handle
  *
  * The raw MoMo number or bank account is used exactly once, to ask the
  * provider for a token, and is then dropped. It is never written to a column,
@@ -459,11 +460,36 @@ Deno.serve(handler(async (req) => {
     case 'POST':
       return await create(req, db, caller)
     case 'GET': {
-      const { data } = await db
+      // §11's handle as a lookup — "which seller is this user of mine". PayHold
+      // mints no seller identity, so a client registers its own users and this
+      // is how it finds one again without keeping our id beside its own. It is
+      // also the missing half of a get-or-create: `POST /sellers` refuses a
+      // handle it already knows, and a caller has to be able to ask first.
+      //
+      // No match is an empty list rather than a 404. "This user is not
+      // registered yet" is the answer the caller is asking for, not a failure.
+      const handle = url.searchParams.get('external_user_id')
+
+      // Blank is refused rather than ignored: answering `?external_user_id=`
+      // with the whole list would be a filter that silently did nothing, and
+      // the caller would read the first row as their seller.
+      if (handle !== null && !handle.trim()) {
+        throw new PayHoldError(
+          'policy_violation',
+          'external_user_id cannot be blank',
+        )
+      }
+
+      let query = db
         .from('sellers')
         .select(SELLER_COLUMNS)
         .eq('tenant_id', caller.tenant_id)
-        .order('created_at', { ascending: false })
+
+      // Trimmed the same way `create` trims it before storing, or a handle
+      // carrying a stray space would register fine and then never be found.
+      if (handle !== null) query = query.eq('external_user_id', handle.trim())
+
+      const { data } = await query.order('created_at', { ascending: false })
 
       return json(req, { sellers: data ?? [] })
     }

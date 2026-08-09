@@ -508,7 +508,10 @@ await post(\`/disputes/\${dispute.id}/evidence\`, {
           Register a payout destination. Tokenized immediately; we never store the number.
         </Endpoint>
         <Endpoint method="GET" path="/sellers">
-          List, with each one's state.
+          List, with each one's state.{' '}
+          <code className="font-mono text-xs">?external_user_id=</code> finds the one
+          registered against your own identifier for that person — no match is an
+          empty list, not an error.
         </Endpoint>
         <Endpoint method="GET" path="/sellers/:id/capabilities">
           Can this seller be paid, and if not, <em>every</em> reason.

@@ -72,7 +72,7 @@ environment or a build log.
 | `deals` | create (with §14's `completion_policy`), list, get, `/pay`, `/confirm`, `/refund`, `/deposit`, `/capture`, `/release-deposit` |
 | `checkout` | §10.1's sessions. `/sessions` for the client's server; `/public/:token` for the buyer, with no credential |
 | `payment-options` | what a buyer in a market can pay with; the catalogue a client renders its checkout from |
-| `sellers` | register a tokenized payout destination, list, `/wallets`, `/:id/capabilities`, `/:id/balance`, `/:id/withdraw`, `/:id/verify` (person-only) |
+| `sellers` | register a tokenized payout destination, list (`?external_user_id=` finds the client's own handle), `/wallets`, `/:id/capabilities`, `/:id/balance`, `/:id/withdraw`, `/:id/verify` (person-only) |
 | `balance` | four buckets per currency, or `?by=rail` |
 | `ledger` | the entries behind those buckets, filterable by deal. No writer, on any method |
 | `audit-log` | who did what, including every act that moved no money |
@@ -958,6 +958,18 @@ retried registration does not mint a beneficiary token nobody will use, and it
 destination, and quietly ignoring it would let a re-registration read as an
 accepted destination change — which is `seller_destinations` and §5.1's security
 hold, the path a takeover would want to skip.
+
+**`GET /v1/sellers?external_user_id=` is the other half of that refusal.** A
+client cannot get-or-create against an endpoint that refuses a handle it already
+knows unless it can ask first, and until this filter existed the only way to
+look one up was pulling the tenant's whole seller list and matching in the
+client. The handle is trimmed on the way in exactly as `create` trims it before
+storing, or a handle carrying a stray space would register fine and then never
+be found. A **blank** one is refused rather than ignored — answering
+`?external_user_id=` with every seller the tenant has would be a filter that
+silently did nothing, and the caller would read the first row as their user's.
+No match is an empty list and not a 404: "this user is not registered yet" is
+the answer the caller wanted, not a failure.
 
 `verify_seller(seller, actor, verified)` is one function rather than three
 column updates because the three travel together: a seller marked verified with
