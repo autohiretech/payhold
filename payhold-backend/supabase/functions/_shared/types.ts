@@ -673,6 +673,12 @@ export interface CreateSellerInput {
   payout_provider: PayoutProvider
   /** Raw destination — tokenized immediately, never stored. */
   destination: string
+  /**
+   * §11's external user id: the client's own handle for this person, so their
+   * system can find this seller again. Unique per tenant where supplied, which
+   * is what makes a retried registration safe.
+   */
+  external_user_id?: string
 }
 
 export type PayHoldErrorCode =

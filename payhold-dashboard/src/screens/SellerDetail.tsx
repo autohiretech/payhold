@@ -203,6 +203,15 @@ export function SellerDetailPage() {
             hint={route.reason}
           />
           <Detail label="Registered" value={formatDateTime(seller.created_at)} />
+          {/* The client's own handle. Shown because it is how somebody looking
+              at a support ticket from their own system finds this page. */}
+          {seller.external_user_id && (
+            <Detail
+              label="Your id for them"
+              value={<Mono>{seller.external_user_id}</Mono>}
+              hint="This seller's id in your own system. PayHold does not interpret it."
+            />
+          )}
         </dl>
 
         <Destinations sellerId={seller.id} now={now} />

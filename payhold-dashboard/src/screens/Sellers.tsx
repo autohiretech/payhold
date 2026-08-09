@@ -252,6 +252,10 @@ function AddSellerForm({ onClose }: { onClose: () => void }) {
   const [name, setName] = useState('')
   const [country, setCountry] = useState<Country>('RW')
   const [destination, setDestination] = useState('')
+  // The client's own id for this person. Optional here because somebody
+  // registering by hand has nothing to put in it; a server integration should
+  // always send one, or it cannot find this seller again.
+  const [externalUserId, setExternalUserId] = useState('')
 
   // The market decides which payout methods are even possible, so it drives
   // the method list rather than sitting beside it.
@@ -280,6 +284,7 @@ function AddSellerForm({ onClose }: { onClose: () => void }) {
       payout_currency: wanted,
       payout_provider: effective,
       destination,
+      external_user_id: externalUserId.trim() || undefined,
     })
   })
 
@@ -365,6 +370,17 @@ function AddSellerForm({ onClose }: { onClose: () => void }) {
               value={destination}
               onChange={(e) => setDestination(e.target.value)}
               placeholder="0788 123 456"
+            />
+          </Field>
+
+          <Field
+            label="Your id for them"
+            hint="Optional. The id this person has in your own system, so you can find them again."
+          >
+            <Input
+              value={externalUserId}
+              onChange={(e) => setExternalUserId(e.target.value)}
+              placeholder="host_4821"
             />
           </Field>
         </div>

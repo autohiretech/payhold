@@ -945,6 +945,20 @@ endpoint has to remember:
   actually moved** — re-saving an unchanged destination would otherwise hold a
   payout for nothing.
 
+**`external_user_id` got a writer in `20260808000005`, and the gap it left is
+worth knowing.** The column has existed since this migration and nothing ever
+wrote it — `POST /v1/sellers` neither accepted it nor inserted it — so a tenant
+had no way to ask "which seller is this user of mine", which is the only way a
+client can find a seller again given that PayHold mints no seller identity.
+`sellers_external_user_key` makes it unique per tenant where present, partial
+because null is not a handle and a seller registered by hand from the dashboard
+supplies none. The endpoint checks for the handle **before** it tokenizes, so a
+retried registration does not mint a beneficiary token nobody will use, and it
+**refuses** rather than returning the existing seller: this request carries a
+destination, and quietly ignoring it would let a re-registration read as an
+accepted destination change — which is `seller_destinations` and §5.1's security
+hold, the path a takeover would want to skip.
+
 `verify_seller(seller, actor, verified)` is one function rather than three
 column updates because the three travel together: a seller marked verified with
 no sanctions date, or with an unverified destination, is still unpayable, and a

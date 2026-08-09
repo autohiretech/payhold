@@ -56,6 +56,33 @@ async function create(
     throw new PayHoldError('policy_violation', route.reason)
   }
 
+  // §11's external user id: the client's own handle for this person. Checked
+  // before the provider is asked for anything, so a retried registration does
+  // not mint a beneficiary token nobody will use.
+  //
+  // It refuses rather than returning the existing seller, because the two
+  // requests are not the same request: this one carries a destination, and
+  // silently ignoring it would turn a re-registration into a no-op that looks
+  // like a destination change was accepted. Moving a destination is
+  // `seller_destinations` and §5.1's security hold, which is the path that
+  // holds the next payout — exactly what a takeover would want to skip.
+  const externalUserId = body.external_user_id?.trim() || null
+  if (externalUserId) {
+    const { data: existing } = await db
+      .from('sellers')
+      .select('id')
+      .eq('tenant_id', caller.tenant_id)
+      .eq('external_user_id', externalUserId)
+      .maybeSingle()
+
+    if (existing) {
+      throw new PayHoldError(
+        'policy_violation',
+        `${externalUserId} is already registered as seller ${existing.id}`,
+      )
+    }
+  }
+
   // Tokenize on the rail that will actually carry the payout, not on whichever
   // rail happens to be connected: a Rwandan seller is paid by Flutterwave even
   // when the buyer's card was charged by Stripe.
@@ -76,11 +103,22 @@ async function create(
       payout_provider: body.payout_provider,
       beneficiary_token: token.beneficiary_token,
       masked_destination: token.masked_destination,
+      external_user_id: externalUserId,
     })
     .select(SELLER_COLUMNS)
     .single()
 
   if (error || !data) {
+    // The lookup above is not a lock, so two concurrent registrations of one
+    // handle both reach here and `sellers_external_user_key` refuses the
+    // second. Say which it was — the caller is a retry loop, and "could not
+    // register that seller" is not something it can act on.
+    if (error?.message?.includes('sellers_external_user_key')) {
+      throw new PayHoldError(
+        'policy_violation',
+        `${externalUserId} is already registered as a seller`,
+      )
+    }
     throw new PayHoldError('policy_violation', 'Could not register that seller')
   }
 
@@ -97,6 +135,7 @@ async function create(
       seller_id: seller.id,
       name: seller.name,
       destination: seller.masked_destination,
+      external_user_id: seller.external_user_id,
     },
   })
 

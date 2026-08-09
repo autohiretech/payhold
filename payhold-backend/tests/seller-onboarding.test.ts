@@ -385,3 +385,60 @@ describe('§5.1 change protection', () => {
     expect(await screen(await payoutFor(seller))).toBe(true)
   })
 })
+
+describe('§11 external user id — the client’s own handle', () => {
+  const withHandle = (name: string, handle: string | null) =>
+    h.db.query(
+      `insert into sellers (tenant_id, name, country, payout_currency, payout_provider,
+                            beneficiary_token, masked_destination, external_user_id)
+       values ($1, $2, 'RW', 'RWF', 'flutterwave_momo',
+               'tok_' || gen_random_uuid(), 'MTN •••• 4821', $3)`,
+      [tenant, name, handle],
+    )
+
+  test('one seller per handle, per tenant', async () => {
+    // The constraint the mapping is worthless without. A client retrying a
+    // registration that timed out would otherwise get a second seller for the
+    // same person, with a second beneficiary token, and nothing afterwards
+    // could say which of the two a payout should go to.
+    await withHandle('Host A', 'host_4821')
+    await rejects(
+      () => withHandle('Host A again', 'host_4821'),
+      /sellers_external_user_key/,
+    )
+  })
+
+  test('any number of sellers may have no handle', async () => {
+    // Null is not a handle. Somebody registering by hand from the dashboard
+    // supplies nothing here, and those rows must stay legal.
+    await withHandle('Unmapped one', null)
+    await withHandle('Unmapped two', null)
+
+    const { rows } = await h.db.query<{ n: number }>(
+      `select count(*)::int as n from sellers
+        where tenant_id = $1 and external_user_id is null`,
+      [tenant],
+    )
+    expect(rows[0].n).toBeGreaterThanOrEqual(2)
+  })
+
+  test('two tenants may number their own users from the same handle', async () => {
+    const { rows: [other] } = await h.db.query<{ id: string }>(
+      `insert into tenants (name, slug) values ('Other Co', 'other-co') returning id`,
+    )
+    await h.db.query(
+      `insert into sellers (tenant_id, name, country, payout_currency, payout_provider,
+                            beneficiary_token, masked_destination, external_user_id)
+       values ($1, 'Their host', 'RW', 'RWF', 'flutterwave_momo',
+               'tok_other', 'MTN •••• 0001', 'host_4821')`,
+      [other.id],
+    )
+
+    // Two clients numbering their users from 1 is the expected case, not a
+    // collision — which is why the index is scoped to the tenant.
+    const { rows } = await h.db.query<{ n: number }>(
+      `select count(*)::int as n from sellers where external_user_id = 'host_4821'`,
+    )
+    expect(rows[0].n).toBe(2)
+  })
+})
