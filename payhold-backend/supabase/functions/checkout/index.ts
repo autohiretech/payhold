@@ -5,8 +5,9 @@
  *   GET  /checkout/sessions/:id           its status, for the client's server
  *   POST /checkout/sessions/:id/cancel    withdraw the link
  *
- *   GET  /checkout/public/:token          what the buyer sees. No credential
- *   POST /checkout/public/:token/pay      the buyer chooses and is handed over
+ *   GET  /checkout/public/:token           what the buyer sees. No credential
+ *   POST /checkout/public/:token/pay       the buyer chooses; a charge starts
+ *   POST /checkout/public/:token/validate  the buyer answers a code the rail sent
  *
  * **The two halves are separated by an explicit path segment**, not by a plural
  * or a header. `public` is there so nobody reviewing a change has to work out
@@ -30,11 +31,11 @@
 
 import type { SupabaseClient } from 'npm:@supabase/supabase-js@2'
 import { resolveCaller, serviceClient, type Caller } from '../_shared/auth.ts'
-import { availableMethods, startCharge } from '../_shared/checkout.ts'
+import { availableMethods, startCharge, validateCharge } from '../_shared/checkout.ts'
 import { handler, json, readJson, required } from '../_shared/http.ts'
 import { normaliseIp, payContext, recordContext } from '../_shared/request-context.ts'
 import { loadSettings } from '../_shared/settings.ts'
-import { PayHoldError, type Deal, type PaymentMethod } from '../_shared/types.ts'
+import { PayHoldError, type Deal, type PaymentMethod, type Provider } from '../_shared/types.ts'
 
 interface CheckoutSession {
   id: string
@@ -45,13 +46,27 @@ interface CheckoutSession {
   return_url: string | null
   method: PaymentMethod | null
   network: string | null
-  provider: string | null
+  /**
+   * The rail the charge actually started on. Typed as the enum rather than
+   * `string` because it is routed on after the fact — a code the buyer answers
+   * has to go back to the rail that issued it.
+   */
+  provider: Provider | null
   provider_ref: string | null
   payment_link: string | null
   expires_at: string
   completed_at: string | null
   created_at: string
 }
+
+/**
+ * Session states a buyer may still read and act on.
+ *
+ * `completed` means they chose a method and a charge started — not that they
+ * finished. Everything after that moment happens against this same token, so
+ * excluding it would end the payment at the point it actually begins.
+ */
+const READABLE = ['open', 'completed'] as const
 
 function hostedUrl(token: string): string {
   const base = Deno.env.get('PUBLIC_URL') ?? 'https://app.payhold.local'
@@ -179,10 +194,23 @@ async function cancel(
  * The refusal is the same for a token that never existed, one that expired and
  * one that was withdrawn. A buyer needs to know it will not work; distinguishing
  * the three would let somebody probe for real tokens.
+ *
+ * `open` alone was right while paying was a handoff — the buyer left, and the
+ * token had no work left to do. It is wrong now that a charge can be finished
+ * in the client's own page: `pay` completes the session, and everything that
+ * follows it — the code the rail asked for, and the polling that watches the
+ * deal move — happens *after* that. A buyer who is still paying would have been
+ * told their own payment link had already been used.
+ *
+ * So the states are named per route rather than assumed. Starting a charge is
+ * still `open` only, which is what stops a completed session being charged
+ * twice; reading and validating accept `completed` as well, because that is the
+ * state a buyer mid-payment is actually in.
  */
 async function bySession(
   db: SupabaseClient,
   token: string,
+  allow: readonly string[] = ['open'],
 ): Promise<{ session: CheckoutSession; deal: Deal }> {
   if (!token || token.length < 20) {
     throw new PayHoldError('not_found', 'This payment link is not valid')
@@ -196,7 +224,7 @@ async function bySession(
 
   const session = data as unknown as CheckoutSession | null
 
-  if (!session || state(session) !== 'open') {
+  if (!session || !allow.includes(state(session))) {
     throw new PayHoldError(
       'not_found',
       'This payment link has expired or has already been used',
@@ -228,7 +256,7 @@ async function publicView(
   db: SupabaseClient,
   token: string,
 ): Promise<Response> {
-  const { session, deal } = await bySession(db, token)
+  const { session, deal } = await bySession(db, token, READABLE)
 
   const { data: seller } = await db
     .from('sellers')
@@ -248,11 +276,25 @@ async function publicView(
     },
     seller: { name: seller?.name ?? null },
     methods: await availableMethods(db, deal.tenant_id, deal),
+    /**
+     * What has already been chosen on this session, so a client that reloads
+     * mid-payment can pick the thread up rather than start the buyer again.
+     * Null on a session nobody has paid on yet, which is the common case.
+     */
+    payment: session.method
+      ? { method: session.method, network: session.network, provider: session.provider }
+      : null,
   })
 }
 
 /**
- * The buyer chooses, and we hand them to the provider.
+ * The buyer chooses, and a charge starts.
+ *
+ * "And we hand them to the provider" is what this used to say, and it was the
+ * whole shape of the route: every method ended at somebody's hosted page
+ * because `payment_link` was the only thing a charge could return. It is now
+ * one of four answers — see `ChargeNextAction`. A wallet number typed in the
+ * client's page is charged directly and needs no page at all.
  *
  * The provider call happens before any state write, for the reason `/pay` does
  * the same: a charge that threw never started, and a deal left in
@@ -266,6 +308,12 @@ async function payPublic(
   const body = await readJson<{
     method: PaymentMethod
     network?: string
+    /**
+     * The buyer's wallet number. Passed to the rail and stored by nobody — see
+     * `ChargeRequest.phone`. Its presence is what makes a mobile money charge
+     * direct instead of a handoff.
+     */
+    phone?: string
     buyer_ip?: string
   }>(req)
   required(body as unknown as Record<string, unknown>, 'method')
@@ -275,6 +323,7 @@ async function payPublic(
   const charge = await startCharge(db, deal.tenant_id, deal, {
     method: body.method,
     network: body.network,
+    phone: typeof body.phone === 'string' ? body.phone.trim() : undefined,
     returnUrl: session.return_url,
   })
 
@@ -308,9 +357,75 @@ async function payPublic(
 
   return json(req, {
     status: state(completed),
-    // Where to send the buyer next. The only field the page actually acts on.
+    // Where to send the buyer next. Kept, and kept first, because it is what
+    // every existing integration reads — including our own hosted page.
     payment_link: completed.payment_link,
+    /**
+     * The same answer with its shape intact.
+     *
+     * `payment_link` can only say "go here", so a client reading it alone has
+     * no way to finish a payment in its own page and no way to tell "approve
+     * this on your handset" from "we need a code from you". This says which.
+     */
+    next_action: charge.next_action,
   })
+}
+
+/**
+ * The buyer answers a code the rail asked for.
+ *
+ * Nothing here can fund a deal either — §15 phase 2 holds across this route
+ * exactly as it holds across `/pay`. A validated code means the rail accepted
+ * the buyer's authorisation, not that money moved; the hold is still written by
+ * the provider webhook after it re-fetches the transaction. So this writes no
+ * state at all: it forwards a code and reports what the rail said next.
+ *
+ * The `reference` comes back from the client rather than out of a column, and
+ * that is a deliberate reading of what it is. It is the rail's handle for a
+ * half-finished charge, it is useless without the session token that reaches
+ * this route, and whoever holds that token could have started the charge
+ * themselves. Storing it would add a column that grants nothing the caller does
+ * not already hold.
+ */
+async function validatePublic(
+  req: Request,
+  db: SupabaseClient,
+  token: string,
+): Promise<Response> {
+  const body = await readJson<{ reference: string; otp: string }>(req)
+  required(body as unknown as Record<string, unknown>, 'reference', 'otp')
+
+  // `completed` is the expected state here, not an edge case: a code can only
+  // be asked for by a charge that has already started.
+  const { session, deal } = await bySession(db, token, READABLE)
+
+  if (!session.provider || !session.method) {
+    throw new PayHoldError(
+      'invalid_state',
+      'No payment has been started on this checkout yet',
+    )
+  }
+
+  const { next_action } = await validateCharge(db, deal.tenant_id, session.provider, {
+    reference: body.reference,
+    otp: body.otp,
+    method: session.method,
+  })
+
+  // No `buyer_ip` is read from this body — an attested address belongs to the
+  // moment a client starts a payment, and this request is the buyer's own.
+  const context = payContext(req, {})
+
+  await recordContext(db, {
+    deal_id: deal.id,
+    source: 'hosted_page',
+    event: 'pay_validated',
+    ip: context.observed ?? normaliseIp(''),
+    ip_country: null,
+    user_agent: context.userAgent,
+  })
+
+  return json(req, { status: state(session), next_action })
 }
 
 /** The same mechanical mapping the other functions use on a SQL failure. */
@@ -345,6 +460,9 @@ Deno.serve(handler(async (req) => {
 
     if (req.method === 'GET' && !action) return await publicView(req, db, key)
     if (req.method === 'POST' && action === 'pay') return await payPublic(req, db, key)
+    if (req.method === 'POST' && action === 'validate') {
+      return await validatePublic(req, db, key)
+    }
 
     throw new PayHoldError('not_found', `No such action "${action ?? ''}"`)
   }

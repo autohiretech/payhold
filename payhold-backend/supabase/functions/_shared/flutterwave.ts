@@ -22,6 +22,7 @@ import type {
   ProviderCapabilities,
   RefundRequest,
   TokenizeRequest,
+  ValidateChargeRequest,
   TokenizeResult,
   VerifiedTransaction,
 } from './provider.ts'
@@ -56,6 +57,67 @@ export function toMajor(minor: Money, currency: Currency): number {
 
 export function toMinor(major: number, currency: Currency): Money {
   return Math.round(ZERO_DECIMAL.has(currency) ? major : major * 100)
+}
+
+/**
+ * Their response envelope.
+ *
+ * `meta` is a sibling of `data`, not a field inside it, and on a direct charge
+ * it is the half that matters: `data` says a charge exists, `meta.authorization`
+ * says what the buyer now has to do about it.
+ */
+interface FlutterwaveEnvelope<T> {
+  status?: string
+  message?: string
+  data?: T
+  meta?: {
+    authorization?: {
+      /** `redirect` | `otp` | `callback` | `pin` | `avs_noauth`. */
+      mode?: string
+      redirect?: string
+      /** Their wording for the buyer. Preferred over ours when present. */
+      instruction?: string
+      validate_instructions?: string
+      note?: string
+    }
+  }
+}
+
+/**
+ * Which direct mobile money endpoint takes this currency.
+ *
+ * Flutterwave splits mobile money by country rather than by method, and the
+ * split is not cosmetic — the endpoints take different fields and answer with
+ * different authorization modes. Keyed on currency because that is what a
+ * charge carries; the country is the deal's and does not reach an adapter.
+ *
+ * A currency missing from here has no direct rail, which is a refusal rather
+ * than a fallback: charging it through the hosted page instead would silently
+ * put the buyer back on somebody else's checkout, which is the one outcome the
+ * direct path exists to avoid.
+ */
+const MOMO_ENDPOINT: Record<string, string> = {
+  RWF: 'mobile_money_rwanda',
+  UGX: 'mobile_money_uganda',
+  ZMW: 'mobile_money_zambia',
+  GHS: 'mobile_money_ghana',
+  KES: 'mpesa',
+  TZS: 'mobile_money_tanzania',
+  XOF: 'mobile_money_franco',
+  XAF: 'mobile_money_franco',
+}
+
+/**
+ * Our network label in Flutterwave's vocabulary.
+ *
+ * The rails table names wallets the way a buyer would recognise them — "MTN
+ * MoMo", "Airtel Money" — and Flutterwave wants the carrier alone, uppercased.
+ * Taking the first word is what separates the two, and it is enough for every
+ * network in the registry.
+ */
+function toNetwork(network: string | undefined): string | undefined {
+  if (!network) return undefined
+  return network.trim().split(/\s+/)[0].toUpperCase()
 }
 
 /** Their payment_type vocabulary, mapped to ours. */
@@ -101,10 +163,19 @@ export class FlutterwaveProvider implements PaymentProvider {
   // Transport
   // -------------------------------------------------------------------------
 
-  private async call<T>(
+  /**
+   * The whole response, not just its `data`.
+   *
+   * Every call in this adapter but one wants `data` and says so by using
+   * `call`. The direct-charge endpoints are the exception: what the buyer must
+   * do next lives in `meta.authorization`, a sibling of `data` rather than a
+   * field inside it, and a helper that unwrapped it would throw that away
+   * before the caller could see it.
+   */
+  private async envelope<T>(
     path: string,
     init: RequestInit & { idempotencyKey?: string } = {},
-  ): Promise<T> {
+  ): Promise<FlutterwaveEnvelope<T>> {
     const headers: Record<string, string> = {
       authorization: `Bearer ${this.creds.secret_key}`,
       'content-type': 'application/json',
@@ -125,6 +196,14 @@ export class FlutterwaveProvider implements PaymentProvider {
       )
     }
 
+    return body as FlutterwaveEnvelope<T>
+  }
+
+  private async call<T>(
+    path: string,
+    init: RequestInit & { idempotencyKey?: string } = {},
+  ): Promise<T> {
+    const body = await this.envelope<T>(path, init)
     return body.data as T
   }
 
@@ -133,6 +212,14 @@ export class FlutterwaveProvider implements PaymentProvider {
   // -------------------------------------------------------------------------
 
   async charge(req: ChargeRequest): Promise<ChargeResult> {
+    // Mobile money is charged directly, because it can be: the only thing the
+    // rail needs is a wallet number, and a wallet number is not card data. The
+    // buyer approves on their handset, so there is no page anyone has to be
+    // sent to and no reason to send them to one.
+    if (req.method === 'mobile_money' && req.phone) {
+      return await this.chargeMobileMoney(req)
+    }
+
     // A hosted payment link rather than a direct charge: it keeps card data
     // entirely off PayHold's infrastructure, which is what lets §6's "never
     // stores raw card numbers" be structurally true rather than a promise.
@@ -158,6 +245,167 @@ export class FlutterwaveProvider implements PaymentProvider {
       // exists after the buyer pays, so it cannot be the reference we store now.
       provider_ref: req.deal_id,
       payment_link: data.link,
+      /**
+       * Card is offered as an element as well as a link, and the two are the
+       * same checkout: Flutterwave's inline script renders the very page
+       * `data.link` opens, in an iframe, in whatever page the client is
+       * already showing. So the buyer types their card into Flutterwave either
+       * way — the difference is only whether the client's own page survives it.
+       *
+       * Both carry `tx_ref = deal_id`, which is deliberate and is why offering
+       * both is safe: they are two doors onto one charge, our webhook matches
+       * on that reference, and Flutterwave refuses a second success against a
+       * `tx_ref` that already has one. At most one of them can ever complete.
+       */
+      next_action: req.method === 'card'
+        ? {
+          type: 'element',
+          provider: 'flutterwave',
+          public_key: this.creds.public_key,
+          reference: req.deal_id,
+          amount: req.amount,
+          currency: req.currency,
+          options: [paymentOptionsFor(req.method)],
+          redirect_url: req.return_url,
+        }
+        : { type: 'redirect', url: data.link },
+    }
+  }
+
+  /**
+   * Charge a wallet directly and report back what the buyer must do.
+   *
+   * Which of the three that is belongs to the rail and not to us, and it
+   * differs by market on the same method: Rwanda answers with a redirect it
+   * wants the buyer to see, Uganda and Ghana answer `pending` and push a
+   * prompt to the handset, and some networks ask for a code. All three are read
+   * off `meta.authorization` rather than assumed, and anything unrecognised is
+   * treated as "approve on your phone" — the outcome that needs nothing from
+   * the client and cannot strand a buyer in front of a field that will not
+   * help them.
+   */
+  private async chargeMobileMoney(req: ChargeRequest): Promise<ChargeResult> {
+    const endpoint = MOMO_ENDPOINT[req.currency]
+    if (!endpoint) {
+      throw new PayHoldError(
+        'policy_violation',
+        `Flutterwave has no direct mobile money rail for ${req.currency}`,
+      )
+    }
+
+    const body = await this.envelope<{ flw_ref?: string; status?: string }>(
+      `/charges?type=${endpoint}`,
+      {
+        method: 'POST',
+        idempotencyKey: req.idempotency_key,
+        body: JSON.stringify({
+          tx_ref: req.deal_id,
+          amount: toMajor(req.amount, req.currency),
+          currency: req.currency,
+          // The same placeholder the hosted path uses. Flutterwave requires an
+          // email and PayHold does not hold the buyer's — a deal has a
+          // `buyer_ref` belonging to the client, never an address of ours.
+          email: `deal-${req.deal_id}@payhold.invalid`,
+          phone_number: req.phone,
+          network: toNetwork(req.network),
+          fullname: 'PayHold buyer',
+          redirect_url: req.return_url,
+          meta: { deal_id: req.deal_id },
+        }),
+      },
+    )
+
+    const auth = body.meta?.authorization ?? {}
+    const flwRef = body.data?.flw_ref ?? ''
+    const instruction = auth.instruction ?? auth.validate_instructions ?? auth.note
+
+    if (auth.mode === 'redirect' && auth.redirect) {
+      return {
+        provider_ref: req.deal_id,
+        payment_link: auth.redirect,
+        next_action: { type: 'redirect', url: auth.redirect },
+      }
+    }
+
+    // An OTP with no reference cannot be answered — `validate-charge` is
+    // addressed by `flw_ref` and there is nothing else to send. Falling through
+    // to the wait state is honest: the charge is real and the webhook will
+    // still settle it, which is more than an OTP box that cannot submit.
+    if (auth.mode === 'otp' && flwRef) {
+      return {
+        provider_ref: req.deal_id,
+        payment_link: '',
+        next_action: {
+          type: 'otp',
+          reference: flwRef,
+          message: instruction ?? 'Enter the code sent to your phone.',
+        },
+      }
+    }
+
+    return {
+      provider_ref: req.deal_id,
+      payment_link: '',
+      next_action: {
+        type: 'wait',
+        message: instruction ?? 'Approve the payment prompt on your phone.',
+      },
+    }
+  }
+
+  /**
+   * Answer a code the rail asked for.
+   *
+   * A correct code is not necessarily the end — Flutterwave may follow it with
+   * a redirect, or with another code — so this reads `meta.authorization` again
+   * exactly as the charge did rather than assuming success. What it never does
+   * is report the money as held: that is the webhook's, after it re-fetches the
+   * transaction (§15 phase 2), and nothing in this file can shortcut it.
+   */
+  async validate(req: ValidateChargeRequest): Promise<ChargeResult> {
+    const body = await this.envelope<{ flw_ref?: string; tx_ref?: string; status?: string }>(
+      '/validate-charge',
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          otp: req.otp,
+          flw_ref: req.reference,
+          type: req.method === 'card' ? 'card' : 'mobile_money',
+        }),
+      },
+    )
+
+    const auth = body.meta?.authorization ?? {}
+    const flwRef = body.data?.flw_ref ?? req.reference
+    const provider_ref = body.data?.tx_ref ?? ''
+
+    if (auth.mode === 'redirect' && auth.redirect) {
+      return {
+        provider_ref,
+        payment_link: auth.redirect,
+        next_action: { type: 'redirect', url: auth.redirect },
+      }
+    }
+
+    if (auth.mode === 'otp' && flwRef) {
+      return {
+        provider_ref,
+        payment_link: '',
+        next_action: {
+          type: 'otp',
+          reference: flwRef,
+          message: auth.instruction ?? 'That code was not accepted. Try the new one.',
+        },
+      }
+    }
+
+    return {
+      provider_ref,
+      payment_link: '',
+      next_action: {
+        type: 'wait',
+        message: body.message ?? 'Payment submitted — waiting for your provider to confirm.',
+      },
     }
   }
 

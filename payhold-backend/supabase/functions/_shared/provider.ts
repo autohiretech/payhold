@@ -35,6 +35,15 @@ export interface ChargeRequest {
   method: PaymentMethod
   /** The specific wallet or scheme, when the buyer has chosen one. */
   network?: string
+  /**
+   * The buyer's mobile money number, when they typed one.
+   *
+   * Only a mobile money rail has any use for it, and only a direct charge —
+   * a hosted page asks for it itself. It is passed to the provider and kept
+   * nowhere: no column on this side stores it, because a wallet number is the
+   * buyer's identity on that rail and PayHold has no reason to remember it.
+   */
+  phone?: string
   /** Where the provider returns the buyer once they have paid. */
   return_url: string
   /**
@@ -45,11 +54,83 @@ export interface ChargeRequest {
   idempotency_key: string
 }
 
+/**
+ * What the buyer has to do next, said precisely enough to be done in a page we
+ * do not own.
+ *
+ * `payment_link` on its own could only ever mean "send them away", so every
+ * rail had to end at somebody's hosted page and every integrator had to hand
+ * the buyer over at the last step. These variants are the same information with
+ * the shape kept: a client that understands them can finish a payment inside
+ * its own checkout, and a client that does not can still read `payment_link`
+ * and redirect exactly as before.
+ *
+ * The variants are ordered by how much they ask of the client.
+ */
+export type ChargeNextAction =
+  /**
+   * Nothing to collect and nothing to show — the buyer approves on their
+   * handset. The client polls until the deal moves.
+   */
+  | { type: 'wait'; message: string }
+  /**
+   * The rail sent a one-time code and wants it back. `reference` is the
+   * provider's handle for this half-finished charge and is what `validate`
+   * must be given; it is the provider's, not ours, and means nothing elsewhere.
+   */
+  | { type: 'otp'; reference: string; message: string }
+  /**
+   * The buyer must be taken to the provider. Framing it is the client's call
+   * and their risk — Stripe Checkout refuses to be framed, Flutterwave does not.
+   */
+  | { type: 'redirect'; url: string }
+  /**
+   * The provider collects the details itself, in the client's own page, from a
+   * script it serves. This is what keeps a PAN out of both our infrastructure
+   * and theirs while still ending inside their checkout: the fields belong to
+   * the provider's iframe, the surrounding page belongs to the client.
+   *
+   * `reference` is the charge reference the widget must use — our deal id — so
+   * the charge the browser creates is the one our webhook is waiting for.
+   */
+  | {
+    type: 'element'
+    provider: Provider
+    /** The provider's publishable key. Public by construction. */
+    public_key: string
+    reference: string
+    amount: Money
+    currency: Currency
+    /** Methods the widget should offer. Already narrowed to the live matrix. */
+    options: string[]
+    redirect_url: string
+  }
+
 export interface ChargeResult {
   /** The provider's own reference. Becomes `deals.provider_ref`. */
   provider_ref: string
-  /** Where to send the buyer to complete payment. */
+  /**
+   * Where to send the buyer to complete payment.
+   *
+   * Empty when `next_action` needs no page — a mobile money charge already
+   * accepted by the rail has nowhere to send anyone. Clients that still treat
+   * this as the whole answer get an empty string rather than a link to nothing.
+   */
   payment_link: string
+  /**
+   * The precise version of `payment_link`. Optional so an adapter that has not
+   * been taught this yet keeps compiling; `startCharge` fills in a `redirect`
+   * for whatever omits it, which is what those adapters always meant.
+   */
+  next_action?: ChargeNextAction
+}
+
+/** The buyer's answer to an `otp` next action. */
+export interface ValidateChargeRequest {
+  /** The `reference` the `otp` action carried. */
+  reference: string
+  otp: string
+  method: PaymentMethod
 }
 
 /**
@@ -158,6 +239,20 @@ export interface PaymentProvider {
 
   /** Collect from the buyer. Returns where to send them to pay. */
   charge(req: ChargeRequest): Promise<ChargeResult>
+
+  /**
+   * Answer an `otp` next action and carry the charge on.
+   *
+   * Optional because issuing a code is a rail's behaviour, not a promise the
+   * interface can make: Stripe never asks for one, and a method on every
+   * adapter that all but one of them throws from would be a worse lie than its
+   * absence. `startCharge`'s caller checks for it before offering the step.
+   *
+   * Returns a `ChargeResult` rather than a boolean because validating is not
+   * always the last step — a rail may answer a correct code with another
+   * action, and collapsing that into "done" would strand the buyer.
+   */
+  validate?(req: ValidateChargeRequest): Promise<ChargeResult>
 
   /**
    * Ask the provider what really happened. Called on every inbound webhook

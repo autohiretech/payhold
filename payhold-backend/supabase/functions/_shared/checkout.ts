@@ -18,6 +18,7 @@ import type { SupabaseClient } from 'npm:@supabase/supabase-js@2'
 import { loadProvider } from './load-provider.ts'
 import { closedMarkets, liveProviders } from './matrix.ts'
 import { collectionRails, countryInfo, METHOD_LABEL } from './rails.ts'
+import type { ChargeNextAction } from './provider.ts'
 import { PayHoldError, type Deal, type PaymentMethod, type Provider } from './types.ts'
 
 export interface StartedCharge {
@@ -25,6 +26,14 @@ export interface StartedCharge {
   rail: Provider
   provider_ref: string
   payment_link: string
+  /**
+   * What the buyer does next, in a form a client's own checkout can act on.
+   *
+   * Never absent from here even though an adapter may omit it: an adapter that
+   * only knows how to return a link meant `redirect` and always did, so this
+   * normalises rather than makes the caller ask twice.
+   */
+  next_action: ChargeNextAction
 }
 
 /**
@@ -70,7 +79,19 @@ export async function startCharge(
   db: SupabaseClient,
   tenantId: string,
   deal: Deal,
-  choice: { method: PaymentMethod; network?: string; returnUrl?: string | null },
+  choice: {
+    method: PaymentMethod
+    network?: string
+    /**
+     * The buyer's wallet number, when they typed one into the client's page.
+     *
+     * Its presence is what turns a mobile money charge from a handoff into a
+     * direct one, so it is genuinely optional: a client that does not collect
+     * it still gets the hosted page it always got.
+     */
+    phone?: string
+    returnUrl?: string | null
+  },
 ): Promise<StartedCharge> {
   const available = await availableMethods(db, tenantId, deal)
   const chosen = available.find((m) => m.method === choice.method)
@@ -94,6 +115,7 @@ export async function startCharge(
     currency: deal.presentment_currency,
     method: choice.method,
     network: choice.network,
+    phone: choice.method === 'mobile_money' ? choice.phone : undefined,
     return_url: choice.returnUrl ?? `${publicUrl}/deals/${deal.id}`,
     // §6: requested on every card charge, never silently downgraded.
     three_d_secure: choice.method === 'card',
@@ -104,5 +126,45 @@ export async function startCharge(
     rail: chosen.provider,
     provider_ref: charge.provider_ref,
     payment_link: charge.payment_link,
+    next_action: charge.next_action ?? { type: 'redirect', url: charge.payment_link },
+  }
+}
+
+/**
+ * Answer a code the rail asked the buyer for.
+ *
+ * Separate from `startCharge` and not a branch inside it, because it is a
+ * different question: that one asks a rail to begin, this one continues one
+ * that already exists. Sharing an entrance would mean a single function whose
+ * arguments contradict each other in half its calls.
+ *
+ * The rail is passed in rather than re-derived. It was decided when the charge
+ * started and written onto the session; re-running the routing here could pick
+ * a different one if the matrix moved in between, and the code the buyer is
+ * holding belongs to the rail that issued it.
+ */
+export async function validateCharge(
+  db: SupabaseClient,
+  tenantId: string,
+  rail: Provider,
+  input: { reference: string; otp: string; method: PaymentMethod },
+): Promise<{ next_action: ChargeNextAction }> {
+  const { provider } = await loadProvider(db, tenantId, rail)
+
+  if (!provider.validate) {
+    throw new PayHoldError(
+      'policy_violation',
+      `${rail} does not ask for a verification code`,
+    )
+  }
+
+  const result = await provider.validate({
+    reference: input.reference,
+    otp: input.otp,
+    method: input.method,
+  })
+
+  return {
+    next_action: result.next_action ?? { type: 'redirect', url: result.payment_link },
   }
 }

@@ -25,8 +25,23 @@ import type { SupabaseClient } from 'npm:@supabase/supabase-js@2'
 
 export type ContextSource = 'provider' | 'hosted_page' | 'client_attested'
 
-/** What was happening when the address was seen. */
-export type ContextEvent = 'pay_started' | 'charge_confirmed' | 'confirmation'
+/**
+ * What was happening when the address was seen.
+ *
+ * `pay_validated` is a second sighting of the same buyer part-way through one
+ * charge — they answered a code the rail sent to their phone. It is kept apart
+ * from `pay_started` rather than folded into it because the two are minutes and
+ * possibly one device apart, and a signal that reads them as one address loses
+ * exactly the discrepancy it exists to notice.
+ *
+ * The column is `text` with no check constraint, so this union is the only
+ * place the vocabulary is written down.
+ */
+export type ContextEvent =
+  | 'pay_started'
+  | 'pay_validated'
+  | 'charge_confirmed'
+  | 'confirmation'
 
 /**
  * The caller's address, as far as the edge can tell.
