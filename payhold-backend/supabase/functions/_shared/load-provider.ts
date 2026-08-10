@@ -165,7 +165,7 @@ export async function connectedRails(
   // The rails a tenant can actually connect today. The declared-but-unbuilt
   // adapters are deliberately absent: offering a "connect" button for something
   // `loadProvider` throws on would be an invitation to a dead end.
-  const real: Provider[] = ['flutterwave', 'stripe']
+  const real: Provider[] = ['flutterwave', 'stripe', 'paypal']
   for (const rail of real) {
     if (!rows.some((r) => r.provider === rail)) {
       rows.push({ provider: rail, mode: 'test', connected: false })

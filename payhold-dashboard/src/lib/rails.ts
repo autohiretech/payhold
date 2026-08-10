@@ -147,6 +147,30 @@ function buildRails(): Rail[] {
       })
     }
 
+    /**
+     * PayPal, everywhere it can collect — which is nearly everywhere.
+     *
+     * `wallet` had a label, a blurb and an adapter and no rail, so
+     * `collectionRails` never returned it and a charge on it was refused for
+     * every buyer on earth. The adapter was unreachable code.
+     *
+     * Collection only. PayPal Payouts is a different agreement and a different
+     * set of corridors from the ones `payoutRoute` models, so claiming
+     * `payout: true` would offer sellers a destination nothing can send to.
+     */
+    if (!info.restricted) {
+      rails.push({
+        method: 'wallet',
+        country: code,
+        currencies: INTERNATIONAL_CURRENCIES,
+        provider: 'paypal',
+        networks: ['PayPal'],
+        collect: true,
+        payout: false,
+        note: 'The buyer approves in their own PayPal account. Collection only.',
+      })
+    }
+
     if (info.stripePayout) {
       rails.push({
         method: 'bank_transfer',
@@ -308,7 +332,14 @@ export const PROVIDER_BLURB: Record<Provider, string> = {
 // Collection
 // ---------------------------------------------------------------------------
 
-const METHOD_ORDER: PaymentMethod[] = ['mobile_money', 'card', 'bank_transfer']
+/**
+ * Every method, in the order to offer them. **All four, deliberately.**
+ *
+ * `wallet` was missing while it had no rail, and `indexOf` answers -1 for an
+ * absent entry — so the moment a wallet rail existed it would have sorted ahead
+ * of mobile money in every market, by accident.
+ */
+const METHOD_ORDER: PaymentMethod[] = ['mobile_money', 'card', 'wallet', 'bank_transfer']
 
 /**
  * What a buyer in this market can pay with, in the order to show them.

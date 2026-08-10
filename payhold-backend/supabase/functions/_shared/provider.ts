@@ -152,6 +152,27 @@ export type ChargeNextAction =
    */
   | { type: 'avs'; message: string; fields: string[] }
   /**
+   * A wallet the buyer signs into, approved in a window the client opens.
+   *
+   * Not `redirect`, though a link exists, and not `payment_element`, though the
+   * provider serves the UI. A wallet is its own shape: the buyer must
+   * authenticate with someone who is not us and never inside our frame — PayPal
+   * refuses to be embedded, and should — but their SDK does it in a popup over
+   * the client's page, so the checkout underneath survives.
+   *
+   * `order` is the provider's reference for the approval, which is what the
+   * SDK's `createOrder` must hand back. `client_id` is publishable.
+   */
+  | {
+    type: 'wallet_approval'
+    provider: Provider
+    client_id: string
+    order: string
+    currency: Currency
+    /** Where to send them if the SDK cannot load at all. */
+    approval_url: string
+  }
+  /**
    * The buyer pays us from their own banking app, into an account the rail
    * generated for this one charge.
    *

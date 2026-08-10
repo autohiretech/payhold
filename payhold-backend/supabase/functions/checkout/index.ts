@@ -9,6 +9,7 @@
  *   POST /checkout/public/:token/pay       the buyer chooses; a charge starts
  *   POST /checkout/public/:token/authorize the buyer answers a PIN or an address
  *   POST /checkout/public/:token/validate  the buyer answers a code the rail sent
+ *   POST /checkout/public/:token/capture   the buyer approved a wallet
  *   POST /checkout/public/:token/confirm   ask the rail whether it landed yet
  *
  * **The two halves are separated by an explicit path segment**, not by a plural
@@ -41,6 +42,7 @@
 import type { SupabaseClient } from 'npm:@supabase/supabase-js@2'
 import { resolveCaller, serviceClient, type Caller } from '../_shared/auth.ts'
 import { availableMethods, startCharge, validateCharge } from '../_shared/checkout.ts'
+import { loadProvider } from '../_shared/load-provider.ts'
 import { handler, json, readJson, required } from '../_shared/http.ts'
 import { normaliseIp, payContext, recordContext } from '../_shared/request-context.ts'
 import { settleDeal, type SettleableDeal } from '../_shared/settle.ts'
@@ -465,6 +467,57 @@ async function authorizePublic(
 }
 
 /**
+ * The buyer approved a wallet, and we ask the rail to take the money.
+ *
+ * A wallet approval is two steps by the provider's design: the buyer says yes
+ * in a window we do not own, and the order is only *captured* afterwards. The
+ * SDK reports the first from the buyer's browser, which is not evidence of
+ * anything — so this does not believe it. It asks the rail to capture, and the
+ * rail refuses if no such approval happened.
+ *
+ * **Capturing is still not funding.** Money moving at PayPal does not move a
+ * deal here; that waits for `paypal-webhook` to verify a signature and re-fetch
+ * the order, exactly as every other rail does. §15 phase 2 is unmoved.
+ */
+async function capturePublic(
+  req: Request,
+  db: SupabaseClient,
+  token: string,
+): Promise<Response> {
+  const body = await readJson<{ order: string }>(req)
+  required(body as unknown as Record<string, unknown>, 'order')
+
+  const { session, deal } = await bySession(db, token, READABLE)
+
+  if (session.provider !== 'paypal') {
+    throw new PayHoldError(
+      'invalid_state',
+      'This checkout is not a wallet payment',
+    )
+  }
+
+  const { provider } = await loadProvider(db, deal.tenant_id, 'paypal')
+  const paypal = provider as unknown as {
+    captureOrder?: (orderId: string, key: string) => Promise<unknown>
+  }
+
+  if (!paypal.captureOrder) {
+    throw new PayHoldError('policy_violation', 'This rail cannot capture an order')
+  }
+
+  await paypal.captureOrder(body.order, `capture:${deal.id}`)
+
+  return json(req, {
+    status: state(session),
+    // Nothing to do next but wait for the webhook to say the money is held.
+    next_action: {
+      type: 'wait',
+      message: 'Payment approved — confirming with your wallet provider.',
+    },
+  })
+}
+
+/**
  * The buyer answers a code the rail asked for.
  *
  * Nothing here can fund a deal either — §15 phase 2 holds across this route
@@ -622,6 +675,9 @@ Deno.serve(handler(async (req) => {
     }
     if (req.method === 'POST' && action === 'authorize') {
       return await authorizePublic(req, db, key)
+    }
+    if (req.method === 'POST' && action === 'capture') {
+      return await capturePublic(req, db, key)
     }
     if (req.method === 'POST' && action === 'confirm') {
       return await confirmPublic(req, db, key)
