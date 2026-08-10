@@ -80,6 +80,13 @@ interface FlutterwaveEnvelope<T> {
       instruction?: string
       validate_instructions?: string
       note?: string
+      /** Bank transfer only: the account they minted for this one charge. */
+      transfer_reference?: string
+      transfer_account?: string
+      transfer_bank?: string
+      transfer_amount?: number | string
+      account_expiration?: string
+      transfer_note?: string
     }
   }
 }
@@ -271,6 +278,25 @@ export class FlutterwaveProvider implements PaymentProvider {
       return await this.chargeCard(req, req.card)
     }
 
+    // Bank transfer needs nothing from the buyer at all, so sending them to a
+    // page to collect nothing was always the wrong shape. The rail mints an
+    // account and the answer is that account number.
+    if (req.method === 'bank_transfer') {
+      return await this.chargeBankTransfer(req)
+    }
+
+    return await this.chargeHostedPage(req)
+  }
+
+  /**
+   * The rail's own page — the fallback, and no longer the way in.
+   *
+   * Every method now has a direct path: a wallet number, a card, or an account
+   * to pay into. This is what remains for the cases those cannot serve — a
+   * currency with no direct rail, a tenant that has not enabled card relay, or
+   * a bank transfer the rail declined to mint an account for.
+   */
+  private async chargeHostedPage(req: ChargeRequest): Promise<ChargeResult> {
     // A hosted payment link rather than a direct charge: it keeps card data
     // entirely off PayHold's infrastructure, which is what lets §6's "never
     // stores raw card numbers" be structurally true rather than a promise.
@@ -500,6 +526,65 @@ export class FlutterwaveProvider implements PaymentProvider {
       next_action: {
         type: 'wait',
         message: instruction ?? 'Payment submitted — waiting for your bank to confirm.',
+      },
+    }
+  }
+
+  /**
+   * Ask the rail for an account the buyer can pay into.
+   *
+   * The one method where a hosted page was pure overhead: there is nothing to
+   * collect and nothing to authorise, so the page existed only to print an
+   * account number that the rail hands us directly. A client that can render
+   * six fields never needs to send anyone anywhere.
+   *
+   * The account is per charge and expires. That expiry is carried through
+   * rather than dropped, because a buyer returning to a stale account would pay
+   * money into a number that no longer maps to their booking.
+   */
+  private async chargeBankTransfer(req: ChargeRequest): Promise<ChargeResult> {
+    const body = await this.envelope<{ flw_ref?: string; status?: string }>(
+      '/charges?type=bank_transfer',
+      {
+        method: 'POST',
+        idempotencyKey: req.idempotency_key,
+        body: JSON.stringify({
+          tx_ref: req.deal_id,
+          amount: toMajor(req.amount, req.currency),
+          currency: req.currency,
+          email: `deal-${req.deal_id}@payhold.invalid`,
+          fullname: 'PayHold buyer',
+          ...(req.phone ? { phone_number: req.phone } : {}),
+          // A fresh account per charge, not a permanent one for the buyer. A
+          // permanent account cannot tell two bookings apart when the same
+          // person pays for both.
+          is_permanent: false,
+        }),
+      },
+    )
+
+    const auth = body.meta?.authorization ?? {}
+
+    // No account means the rail could not mint one — a currency it does not do
+    // transfers in, most often. Falling back to the hosted page is honest here:
+    // it is the only remaining way this buyer can pay by bank.
+    if (!auth.transfer_account || !auth.transfer_bank) {
+      return await this.chargeHostedPage(req)
+    }
+
+    return {
+      provider_ref: req.deal_id,
+      payment_link: '',
+      next_action: {
+        type: 'transfer',
+        account: auth.transfer_account,
+        bank: auth.transfer_bank,
+        // Their figure when they give one — they decide the exact amount, and
+        // a transfer that is a franc out does not match.
+        amount: String(auth.transfer_amount ?? toMajor(req.amount, req.currency)),
+        reference: auth.transfer_reference ?? req.deal_id,
+        expires_at: auth.account_expiration ?? null,
+        note: auth.transfer_note && auth.transfer_note !== 'N/A' ? auth.transfer_note : null,
       },
     }
   }

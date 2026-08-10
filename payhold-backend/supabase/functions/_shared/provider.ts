@@ -152,6 +152,26 @@ export type ChargeNextAction =
    */
   | { type: 'avs'; message: string; fields: string[] }
   /**
+   * The buyer pays us from their own banking app, into an account the rail
+   * generated for this one charge.
+   *
+   * Nothing to collect and nowhere to send them: the account number *is* the
+   * instruction, and a client that can print it needs no page of anybody's.
+   * It expires, which is why `expires_at` is carried rather than left implied —
+   * a buyer who comes back tomorrow must be told the account is stale rather
+   * than paying into a dead one.
+   */
+  | {
+    type: 'transfer'
+    account: string
+    bank: string
+    /** Major units, as the buyer must type it into their banking app. */
+    amount: string
+    reference: string
+    expires_at: string | null
+    note: string | null
+  }
+  /**
    * The buyer must be taken to the provider. Framing it is the client's call
    * and their risk — Stripe Checkout refuses to be framed, Flutterwave does not.
    */

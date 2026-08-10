@@ -485,3 +485,66 @@ Deno.test('a card charge with no card still gets the hosted page', async () => {
     restore()
   }
 })
+
+// ---------------------------------------------------------------------------
+// Bank transfer — the method that never needed a page
+// ---------------------------------------------------------------------------
+
+Deno.test('a bank transfer answers with an account, not a page', async () => {
+  const { seen, restore } = intercept({
+    status: 'success',
+    data: { flw_ref: 'FLW-BT1' },
+    meta: {
+      authorization: {
+        transfer_reference: 'FLW-T-1',
+        transfer_account: '0067100155',
+        transfer_bank: 'Bank of Kigali',
+        transfer_amount: 2_277_000,
+        account_expiration: '2026-08-10 15:48:00',
+        transfer_note: 'N/A',
+      },
+    },
+  })
+
+  try {
+    const result = await new FlutterwaveProvider(CREDS, '').charge({
+      ...CHARGE,
+      method: 'bank_transfer',
+    })
+
+    assert(seen.url?.includes('/charges?type=bank_transfer'), seen.url)
+    // Per charge, not permanent — a permanent account cannot tell two bookings
+    // apart when the same person pays for both.
+    assertEquals(JSON.parse(seen.body ?? '{}').is_permanent, false)
+
+    assertEquals(result.next_action?.type, 'transfer')
+    if (result.next_action?.type !== 'transfer') throw new Error('expected transfer')
+    assertEquals(result.next_action.account, '0067100155')
+    assertEquals(result.next_action.bank, 'Bank of Kigali')
+    // Their figure, not ours — they decide the exact amount and a transfer a
+    // franc out does not match.
+    assertEquals(result.next_action.amount, '2277000')
+    // 'N/A' is not a note, it is the absence of one.
+    assertEquals(result.next_action.note, null)
+    assertEquals(result.payment_link, '')
+  } finally {
+    restore()
+  }
+})
+
+Deno.test('a transfer the rail will not mint an account for falls back to the page', async () => {
+  // No account means no way to pay by bank in the app. The hosted page is the
+  // only remaining route, so taking it beats showing the buyer nothing.
+  const { restore } = intercept({ status: 'success', data: { link: 'https://hosted' } })
+
+  try {
+    const result = await new FlutterwaveProvider(CREDS, '').charge({
+      ...CHARGE,
+      method: 'bank_transfer',
+    })
+    assertEquals(result.next_action?.type, 'redirect')
+    assertEquals(result.payment_link, 'https://hosted')
+  } finally {
+    restore()
+  }
+})
