@@ -242,6 +242,44 @@ async function create(
 
   const publicUrl = Deno.env.get('PUBLIC_URL') ?? 'https://app.payhold.local'
 
+  // **The link carries a session token, not the deal id**, and getting that
+  // wrong is what made every link this endpoint issued a dead one. Phase 10
+  // moved the hosted page from `/pay/:id` to `/pay/:token` — a stranger opening
+  // a payment link has no credential, so the token has to *be* the credential —
+  // and this line was left interpolating `deal.id`. The buyer landed on a page
+  // that looked up a token, found none, and told them the link was no longer
+  // valid. It had never been valid.
+  //
+  // `open_checkout_session` is idempotent, so a client that also calls
+  // `POST /v1/checkout/sessions` gets this same session rather than a second
+  // live link.
+  let paymentLink: string | null = null
+
+  const { data: session, error: sessionError } = await db.rpc('open_checkout_session', {
+    p_deal: deal.id,
+    p_hours: settings.checkout_session_hours,
+    // Not taken from the deal body: `return_url` belongs to a checkout session
+    // rather than to a deal, and a client that wants one calls
+    // `POST /v1/checkout/sessions`, which returns this same session.
+    p_return_url: null,
+  })
+
+  if (sessionError) {
+    // **Deal creation does not depend on checkout being healthy.** The deal is
+    // written, audited and returned either way; a client can open a session
+    // later against the same deal. Failing here would turn one broken
+    // subsystem into an outage on the endpoint everything else starts with —
+    // which is exactly what it would have done during the pgcrypto failure
+    // `20260810000001` fixes.
+    console.error('deal created but no checkout session', {
+      deal_id: deal.id,
+      message: sessionError.message,
+    })
+  } else {
+    const opened = session as unknown as { token: string }
+    paymentLink = `${publicUrl}/pay/${opened.token}`
+  }
+
   return json(
     req,
     {
@@ -249,7 +287,10 @@ async function create(
       // Where the buyer goes to choose a method and pay. The provider's own
       // link is minted at that point, not now — the rail is not fixed until
       // they choose.
-      payment_link: `${publicUrl}/pay/${deal.id}`,
+      //
+      // Null means the link could not be issued and the deal is still fine:
+      // call `POST /v1/checkout/sessions` for one. It is never a dead URL.
+      payment_link: paymentLink,
     },
     201,
   )
@@ -500,7 +541,13 @@ async function openDeposit(
     deal_id: deal.id,
     amount: deal.deposit_amount,
     currency: deal.presentment_currency,
-    return_url: `${publicUrl}/pay/${deal.id}`,
+    // Where the provider sends the buyer after they authorise the deposit.
+    // `/status/:id` and not `/pay/:id` — the latter has not been a route since
+    // Phase 10 moved the hosted page to `/pay/:token`, so this was returning a
+    // buyer who had just authorised money to a dead page. The status page is
+    // the right destination anyway: the deposit is authorised, and what they
+    // want next is the state of the deal, not another payment form.
+    return_url: `${publicUrl}/status/${deal.id}`,
     idempotency_key: `deposit:${deal.id}`,
   })
 
