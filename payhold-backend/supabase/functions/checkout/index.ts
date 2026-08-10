@@ -9,6 +9,7 @@
  *   POST /checkout/public/:token/pay       the buyer chooses; a charge starts
  *   POST /checkout/public/:token/authorize the buyer answers a PIN or an address
  *   POST /checkout/public/:token/validate  the buyer answers a code the rail sent
+ *   POST /checkout/public/:token/confirm   ask the rail whether it landed yet
  *
  * **The two halves are separated by an explicit path segment**, not by a plural
  * or a header. `public` is there so nobody reviewing a change has to work out
@@ -16,11 +17,18 @@
  *
  * ─────────────────────────────────────────────────────────────────────────────
  * §15 phase 2: *"test payments cannot be marked successful without verified
- * provider events."* Nothing in this file can fund a deal. The furthest a
- * session goes is `payment_pending`, which means a charge is with a rail; the
- * hold is written by `flutterwave-webhook` / `stripe-webhook` after they check
- * a signature **and** re-fetch the transaction. A session is a way for a buyer
- * to choose a payment method without holding an API key, and it is nothing else.
+ * provider events."* **Nothing a buyer sends through this file can fund a
+ * deal**, and that is the clause read exactly. What they choose, type, and
+ * answer takes a session as far as `payment_pending` and no further.
+ *
+ * `/confirm` funds, and does not weaken that. It never reads the request for an
+ * outcome: it re-fetches the transaction from the provider over our own
+ * authenticated connection — the identical `verify` the webhooks make in their
+ * step 4 — and hands the result to the identical `fund_deal`. The evidence is
+ * the provider's answer either way. The webhook and this route differ only in
+ * what prompted the question, and a system that could only ask when prompted
+ * from outside was one undelivered POST away from a debited buyer, a frozen
+ * deal, and a seller who never learned they had sold anything.
  * ─────────────────────────────────────────────────────────────────────────────
  *
  * The public routes are the second thing in this system with no caller to
@@ -35,6 +43,7 @@ import { resolveCaller, serviceClient, type Caller } from '../_shared/auth.ts'
 import { availableMethods, startCharge, validateCharge } from '../_shared/checkout.ts'
 import { handler, json, readJson, required } from '../_shared/http.ts'
 import { normaliseIp, payContext, recordContext } from '../_shared/request-context.ts'
+import { settleDeal, type SettleableDeal } from '../_shared/settle.ts'
 import { loadSettings } from '../_shared/settings.ts'
 import { PayHoldError, type Deal, type PaymentMethod, type Provider } from '../_shared/types.ts'
 
@@ -248,10 +257,14 @@ async function bySession(
     )
   }
 
+  // `currency`, `provider` and `provider_ref` are here for `/confirm`, which
+  // settles against the rail and needs all three. They widen the *query*, not
+  // the response: `publicView` names every field it returns by hand, which is
+  // exactly why adding a column here cannot leak one.
   const { data: deal } = await db
     .from('deals')
-    .select('id, tenant_id, description, presentment_amount, presentment_currency, ' +
-      'buyer_country, status, seller_id')
+    .select('id, tenant_id, description, currency, presentment_amount, ' +
+      'presentment_currency, buyer_country, status, seller_id, provider, provider_ref')
     .eq('id', session.deal_id)
     .maybeSingle()
 
@@ -508,6 +521,70 @@ async function validatePublic(
   return json(req, { status: state(session), next_action })
 }
 
+/**
+ * "Has it landed yet?" — asked of the rail, not of our own table.
+ *
+ * The route that closes the gap between a buyer being debited and a deal being
+ * funded. Everything up to here is honest about the money being with the
+ * provider and not yet with us; what was missing was any way to find that out
+ * except an inbound webhook nobody controls. A client polling `GET` reads our
+ * `deals` row, which is precisely the row that stays wrong when the doorbell
+ * never rings — so a payment that succeeded at the rail could be watched
+ * forever without ever being noticed.
+ *
+ * This asks the provider directly and books the hold if the answer is yes. It
+ * is not a shortcut past §15 phase 2, it is that clause's own step 4 reached by
+ * polling: the same `verify` call, over the same authenticated connection,
+ * feeding the same `fund_deal`. Nothing a buyer sends can make it say yes.
+ *
+ * `POST` rather than folding it into the `GET`, for two reasons that point the
+ * same way: it writes when the answer is yes, and it costs a provider round
+ * trip every time. A `GET` doing either would mean any page load — a prefetch,
+ * a retry, a bot with a token — spends a call at Flutterwave and may move
+ * money. The URL should say that something happens here.
+ *
+ * The shape deliberately mirrors the part of `publicView` a waiting client
+ * actually reads, so polling this instead of that is a one-word change.
+ */
+async function confirmPublic(
+  req: Request,
+  db: SupabaseClient,
+  token: string,
+): Promise<Response> {
+  const { session, deal } = await bySession(db, token, READABLE)
+
+  const settle = session.method
+    ? await settleDeal(db, deal as unknown as SettleableDeal, {
+      // The session's rail, not the deal's. The deal carries the rail it was
+      // routed to at creation; the session carries the one that actually took
+      // the charge, and those differ whenever the matrix moved in between.
+      rail: session.provider,
+      // Flutterwave answers to our deal id (`tx_ref`); Stripe answers to the
+      // `pi_…` the charge returned, which lives here until funding writes it
+      // onto the deal. `settleDeal` falls back through both.
+      reference: session.provider_ref,
+      method: session.method,
+      network: session.network,
+    })
+    // No method on the session means nobody has chosen how to pay, so there is
+    // no charge to ask about. Answering from the deal costs the rail nothing.
+    : { status: deal.status, funded: false, reason: 'not_started' as const }
+
+  return json(req, {
+    status: state(session),
+    deal: {
+      id: deal.id,
+      status: settle.status,
+      amount: deal.presentment_amount,
+      currency: deal.presentment_currency,
+    },
+    /** True on the one poll that moved it, and on every poll after. */
+    settled: settle.funded,
+    /** Why not yet — `pending` for as long as the rail is still deciding. */
+    reason: settle.reason,
+  })
+}
+
 /** The same mechanical mapping the other functions use on a SQL failure. */
 function rpcError(error: { message: string }, what: string): PayHoldError {
   const message = error.message
@@ -545,6 +622,9 @@ Deno.serve(handler(async (req) => {
     }
     if (req.method === 'POST' && action === 'authorize') {
       return await authorizePublic(req, db, key)
+    }
+    if (req.method === 'POST' && action === 'confirm') {
+      return await confirmPublic(req, db, key)
     }
 
     throw new PayHoldError('not_found', `No such action "${action ?? ''}"`)

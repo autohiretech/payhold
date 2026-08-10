@@ -55,7 +55,8 @@ create extension if not exists pg_net;
 -- before dispatch only so a deal whose timer fires this hour is not waiting a
 -- full clearance window plus an hour; nothing breaks if that order slips.
 --
--- Webhook delivery runs every minute on its own, independent of all of it.
+-- Webhook delivery runs every minute on its own, independent of all of it, and
+-- settlement every five, for the same reason: both are somebody waiting.
 
 select cron.schedule('payhold-reconcile', '0 * * * *', $$
   select net.http_post(
@@ -78,6 +79,26 @@ $$);
 select cron.schedule('payhold-payout-dispatch', '20 * * * *', $$
   select net.http_post(
     url := 'https://mwnbjjlilqrwdmwutbxr.supabase.co/functions/v1/payout-dispatch',
+    headers := jsonb_build_object('x-cron-secret',
+      (select decrypted_secret from vault.decrypted_secrets
+        where name = 'payhold_cron_secret'))
+  );
+$$);
+
+-- Every five minutes, and deliberately more often than the hourly jobs.
+--
+-- This is the backstop under the inbound provider webhooks: it asks each rail
+-- about charges that started and never landed in our books, and funds the ones
+-- that succeeded. What it is racing is a person — a buyer who paid, closed the
+-- tab, and is now waiting to be told their order went through, and a seller
+-- waiting to learn they sold something. An hour of that is an hour of both
+-- sides believing the payment failed.
+--
+-- It costs one provider call per genuinely-pending charge; deals nobody has
+-- tried to pay for are never probed at all. See `settle-pending`.
+select cron.schedule('payhold-settle-pending', '*/5 * * * *', $$
+  select net.http_post(
+    url := 'https://mwnbjjlilqrwdmwutbxr.supabase.co/functions/v1/settle-pending',
     headers := jsonb_build_object('x-cron-secret',
       (select decrypted_secret from vault.decrypted_secrets
         where name = 'payhold_cron_secret'))

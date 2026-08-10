@@ -20,6 +20,7 @@ npx supabase functions deploy account deals checkout payment-options sellers \
                               payouts risk-signals disputes launch webhook-endpoints \
                               flutterwave-webhook stripe-webhook provider-accounts \
                               webhook-dispatch reconcile auto-release \
+                              settle-pending \
                               payout-dispatch ai-dispute ai-risk-narrator \
                               ai-support ai-decisions
 ```
@@ -89,6 +90,7 @@ environment or a build log.
 | `risk-signals` | what the deterministic rules noticed, filterable; `?context=1` for where payments came from |
 | `disputes` | §8's Resolution Center. Open, list, get with offers/evidence/timeline, `/offers`, `/offers/:id/respond`, `/offers/:id/withdraw`, `/evidence`, `/export`, and `/resolve` (person-only) |
 | `webhook-dispatch`, `reconcile`, `auto-release`, `payout-dispatch` | cron only, `CRON_SECRET` |
+| `settle-pending` | cron only. Asks each rail about charges that started and never landed, and funds the ones that did — the backstop under both inbound webhooks |
 | `ai-dispute`, `ai-risk-narrator`, `ai-support` | draft a resolution, brief a payout, answer a question. These run as `payhold_ai` and never hold the service role |
 | `ai-decisions` | approve or reject a draft; `?usage=1`, `?outcomes=1`. The one AI-adjacent function that *does* hold the service role, because approving is what moves money |
 
@@ -203,6 +205,22 @@ that threw never started, and `/pay` refuses `payment_pending`, so a deal left
 in that state by a rail that rejected it would be unretryable. `payment_failed`
 is accepted back, which is how a declined card is retried without the client
 creating a second deal for the same booking.
+
+**The webhook is the doorbell, not the evidence.** What makes a payment true is
+the re-fetch — `provider.verify`, over our own authenticated connection — and
+that call does not need to be prompted from outside. `_shared/settle.ts` makes
+it on its own, and it has two callers: `POST /checkout/public/:token/confirm`,
+which the buyer's page polls while it waits, and the `settle-pending` sweep, for
+the buyer who closed the tab. Both run the identical verify and the identical
+`fund_deal`, so §15 phase 2 holds exactly as before — no request body can make
+either say the money arrived.
+
+This is not belt-and-braces. When the only writer was an inbound POST, an
+unregistered webhook URL meant a debited buyer, a deal frozen at
+`payment_pending`, no `order.funded_held` ever queued, and a seller who never
+learned they had sold anything — with the money sitting at the rail the whole
+time. That is a delivery failure presenting as a lost sale, and asking is the
+fix for it.
 
 The amount comparison lives in `fund_deal`, not in TypeScript, because
 "mismatch → disputed, never funded_held" is only a guarantee when the

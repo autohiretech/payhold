@@ -566,3 +566,9 @@ verify_jwt = false
 
 [functions.payout-dispatch]
 verify_jwt = false
+
+# The backstop under both inbound webhooks: it asks each rail about charges that
+# started and never landed, and funds the ones that did. Same CRON_SECRET, and
+# unreachable without it.
+[functions.settle-pending]
+verify_jwt = false
