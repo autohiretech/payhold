@@ -449,3 +449,22 @@ Deno.test('the hosted session is still available, and still 3DS', async () => {
     restore()
   }
 })
+
+Deno.test('the intent is pinned to the chosen method, not left to the dashboard', async () => {
+  const { seen, restore } = intercept({ id: 'pi_9', client_secret: 'pi_9_secret_abc' })
+
+  try {
+    await new StripeProvider(CREDS, '').charge(CHARGE)
+    const body = decodeURIComponent(seen.body ?? '')
+
+    // `automatic_payment_methods` hands the choice back to Stripe, and the
+    // Payment Element then draws a tab for everything the dashboard has on —
+    // so a buyer who already picked Card is shown Card, Link, Cash App and
+    // PayPal again, one modal deeper. That is the nested picker this whole
+    // integration exists to remove.
+    assertEquals(body.includes('automatic_payment_methods'), false, body)
+    assertEquals(body.includes('payment_method_types[0]=card'), true, body)
+  } finally {
+    restore()
+  }
+})

@@ -145,6 +145,25 @@ interface StripeCharge {
   balance_transaction?: { fee?: number } | string | null
 }
 
+/**
+ * Our method vocabulary in Stripe's, for pinning an intent to one thing.
+ *
+ * Deliberately narrow. Each entry is a method the rails table can actually
+ * route to Stripe, so a buyer is offered it only where it works; anything
+ * absent never reaches `charge()` because `startCharge` refuses it first.
+ */
+const STRIPE_METHODS: Record<PaymentMethod, string[]> = {
+  card: ['card'],
+  // The wallets Stripe settles. Unreachable until `rails.ts` grows a wallet
+  // rail — see the note there — but named here so that work is a one-line
+  // change rather than a hunt.
+  wallet: ['paypal', 'cashapp', 'alipay', 'wechat_pay'],
+  bank_transfer: ['customer_balance'],
+  // Never routed here: `charge()` refuses it above, because that corridor is
+  // Flutterwave's.
+  mobile_money: [],
+}
+
 export class StripeProvider implements PaymentProvider {
   readonly name = 'stripe' as const
 
@@ -266,9 +285,21 @@ export class StripeProvider implements PaymentProvider {
         amount: req.amount,
         currency: req.currency.toLowerCase(),
         metadata: { deal_id: req.deal_id },
-        // Let the dashboard decide what a buyer in this market may use, which
-        // is what the Session did too. The Element renders whatever comes back.
-        automatic_payment_methods: { enabled: true },
+        /**
+         * Exactly the method the buyer already chose, and nothing else.
+         *
+         * `automatic_payment_methods` was the obvious setting and it is the
+         * wrong one here. It hands the choice back to Stripe, and the Payment
+         * Element then renders a tab for every method the dashboard has
+         * switched on — so a buyer who picked Card in the client's own checkout
+         * was shown Card, Link, Cash App and PayPal again, one modal deeper.
+         * That is the nested picker clients integrate this to be rid of.
+         *
+         * The client's list is the authority. It came from `availableMethods`,
+         * which already answers what this buyer in this market may use, and a
+         * second opinion from the dashboard can only contradict it.
+         */
+        payment_method_types: STRIPE_METHODS[req.method],
         // §6, word for word the Session's rule: 3DS is requested on every card
         // charge and **never silently downgraded**. `any` asks Stripe to apply
         // it even where the issuer would have let the payment through without
