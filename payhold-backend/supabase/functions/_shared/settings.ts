@@ -36,6 +36,22 @@ export interface Settings {
    * opens it the next morning is not sent back to the client.
    */
   checkout_session_hours: number
+  /**
+   * May this tenant hand us a card to relay? Off, and the default is the point.
+   *
+   * §6 says PayHold never handles card numbers, and for every tenant it is
+   * structurally true rather than promised — the hosted page, the framed
+   * checkout and `payment_element` all keep the number inside the provider's
+   * own origin. One rail offers none of those: Flutterwave has a hosted page
+   * and a full-viewport script and nothing in between, so a tenant who wants
+   * its own checkout there has to collect the fields and ask us to pass them on.
+   *
+   * That tenant takes PCI SAQ D on their own side, and this flag is where they
+   * say so out loud. Per tenant precisely so one company's decision cannot
+   * become everybody's: a tenant who never sets it keeps the original posture,
+   * and `startCharge` refuses a card from them outright.
+   */
+  raw_card_relay: boolean
 }
 
 /**
@@ -116,6 +132,9 @@ const SPEC: Record<keyof Omit<FullSettings, 'tenant_id'>, Spec> = {
   destination_hold_hours: { kind: 'count', fallback: 24, min: 0, max: 720 },
   sanctions_max_age_days: { kind: 'count', fallback: 365, min: 1, max: 3_650 },
   checkout_session_hours: { kind: 'count', fallback: 24, min: 1, max: 720 },
+  // False, and it must stay false for anyone who has not deliberately turned
+  // it on — see the note on `Settings.raw_card_relay`.
+  raw_card_relay: { kind: 'flag', fallback: false },
 }
 
 type Key = keyof typeof SPEC
@@ -267,6 +286,7 @@ export async function loadSettings(
     risk_rules_enabled,
     risk_review_threshold_usd,
     checkout_session_hours,
+    raw_card_relay,
   } = await readSettings(db, tenantId)
 
   return {
@@ -279,6 +299,7 @@ export async function loadSettings(
     risk_rules_enabled,
     risk_review_threshold_usd,
     checkout_session_hours,
+    raw_card_relay,
   }
 }
 

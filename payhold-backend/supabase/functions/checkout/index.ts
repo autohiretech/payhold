@@ -7,6 +7,7 @@
  *
  *   GET  /checkout/public/:token           what the buyer sees. No credential
  *   POST /checkout/public/:token/pay       the buyer chooses; a charge starts
+ *   POST /checkout/public/:token/authorize the buyer answers a PIN or an address
  *   POST /checkout/public/:token/validate  the buyer answers a code the rail sent
  *
  * **The two halves are separated by an explicit path segment**, not by a plural
@@ -67,6 +68,22 @@ interface CheckoutSession {
  * excluding it would end the payment at the point it actually begins.
  */
 const READABLE = ['open', 'completed'] as const
+
+/**
+ * A card as a client sends one.
+ *
+ * Only reachable for a tenant with `raw_card_relay` on — `startCharge` refuses
+ * it otherwise — and forwarded straight to the adapter, which encrypts it. It
+ * is never written to a column and never logged.
+ */
+interface CardInput {
+  number: string
+  cvv: string
+  expiry_month: string
+  expiry_year: string
+  name?: string
+  email?: string
+}
 
 function hostedUrl(token: string): string {
   const base = Deno.env.get('PUBLIC_URL') ?? 'https://app.payhold.local'
@@ -314,6 +331,11 @@ async function payPublic(
      * direct instead of a handoff.
      */
     phone?: string
+    /**
+     * Card details, when the tenant collects the fields in its own checkout.
+     * Refused by `startCharge` unless that tenant has `raw_card_relay` on.
+     */
+    card?: CardInput
     buyer_ip?: string
   }>(req)
   required(body as unknown as Record<string, unknown>, 'method')
@@ -324,6 +346,7 @@ async function payPublic(
     method: body.method,
     network: body.network,
     phone: typeof body.phone === 'string' ? body.phone.trim() : undefined,
+    card: body.card,
     returnUrl: session.return_url,
   })
 
@@ -369,6 +392,63 @@ async function payPublic(
      */
     next_action: charge.next_action,
   })
+}
+
+/**
+ * The buyer answers the extra factor a card rail demanded.
+ *
+ * Separate from `/pay` because `/pay` calls `complete_checkout_session`, and
+ * this is a continuation of a charge that route already started — running it
+ * again would try to complete a session that is no longer open and fail on a
+ * buyer who has done nothing wrong.
+ *
+ * The rail wants the whole payload back, extra factor included, so the client
+ * resends what it is holding. That is the reason nothing here stores a card
+ * between the two calls: there is no window in which it would have to.
+ */
+async function authorizePublic(
+  req: Request,
+  db: SupabaseClient,
+  token: string,
+): Promise<Response> {
+  const body = await readJson<{
+    card: CardInput
+    authorization: { mode: 'pin' | 'avs_noauth'; [field: string]: string | undefined }
+    attempt?: number
+  }>(req)
+  required(body as unknown as Record<string, unknown>, 'card', 'authorization')
+
+  const { session, deal } = await bySession(db, token, READABLE)
+
+  if (!session.method) {
+    throw new PayHoldError(
+      'invalid_state',
+      'No payment has been started on this checkout yet',
+    )
+  }
+
+  const charge = await startCharge(db, deal.tenant_id, deal, {
+    method: session.method,
+    network: session.network ?? undefined,
+    card: body.card,
+    authorization: body.authorization,
+    // Anything but 0, so the rail does not replay the first response. The
+    // client counts its own attempts; a number it repeats only costs it a retry.
+    attempt: body.attempt ?? 1,
+    returnUrl: session.return_url,
+  })
+
+  const context = payContext(req, {})
+  await recordContext(db, {
+    deal_id: deal.id,
+    source: 'hosted_page',
+    event: 'pay_validated',
+    ip: context.observed ?? normaliseIp(''),
+    ip_country: null,
+    user_agent: context.userAgent,
+  })
+
+  return json(req, { status: state(session), next_action: charge.next_action })
 }
 
 /**
@@ -462,6 +542,9 @@ Deno.serve(handler(async (req) => {
     if (req.method === 'POST' && action === 'pay') return await payPublic(req, db, key)
     if (req.method === 'POST' && action === 'validate') {
       return await validatePublic(req, db, key)
+    }
+    if (req.method === 'POST' && action === 'authorize') {
+      return await authorizePublic(req, db, key)
     }
 
     throw new PayHoldError('not_found', `No such action "${action ?? ''}"`)

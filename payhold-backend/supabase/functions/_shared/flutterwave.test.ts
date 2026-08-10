@@ -15,7 +15,7 @@ import { PayHoldError } from './types.ts'
 const CREDS: FlutterwaveCredentials = {
   secret_key: 'FLWSECK_TEST-x',
   public_key: 'FLWPUBK_TEST-x',
-  encryption_key: 'enc',
+  encryption_key: 'FLWSECK_TESTe1a2b3c4d5e6',
   webhook_hash: 'super-secret-hash',
 }
 
@@ -79,12 +79,13 @@ Deno.test('a provider with no configured hash accepts nothing', () => {
 
 /** Capture the request without letting it leave. */
 function intercept(response: unknown, status = 200) {
-  const seen: { url?: string; body?: string } = {}
+  const seen: { url?: string; body?: string; idempotencyKey?: string } = {}
   const original = globalThis.fetch
 
   globalThis.fetch = ((url: string | URL | Request, init?: RequestInit) => {
     seen.url = String(url)
     seen.body = init?.body ? String(init.body) : undefined
+    seen.idempotencyKey = new Headers(init?.headers).get('idempotency-key') ?? undefined
     return Promise.resolve(
       new Response(JSON.stringify(response), {
         status,
@@ -309,6 +310,177 @@ Deno.test('a rejected code comes back as another code, not as a dead end', async
     })
 
     assertEquals(result.next_action?.type, 'otp')
+  } finally {
+    restore()
+  }
+})
+
+// ---------------------------------------------------------------------------
+// Direct card — the §6 exception, and what must stay true inside it
+// ---------------------------------------------------------------------------
+
+const CARD = {
+  number: '5531 8866 5214 2950',
+  cvv: '564',
+  expiry_month: '09',
+  expiry_year: '32',
+  name: 'A Renter',
+}
+
+const CARD_CHARGE = { ...CHARGE, method: 'card' as const, three_d_secure: true }
+
+Deno.test('a card never leaves in the clear', async () => {
+  const { seen, restore } = intercept({
+    status: 'success',
+    data: { flw_ref: 'FLW-C1' },
+    meta: { authorization: { mode: 'pin' } },
+  })
+
+  try {
+    await new FlutterwaveProvider(CREDS, '').charge({ ...CARD_CHARGE, card: CARD })
+
+    assert(seen.url?.includes('/charges?type=card'), seen.url)
+
+    const body = JSON.parse(seen.body ?? '{}')
+    // The whole payload is one encrypted string. Anything else in this body
+    // would be a card number in a request log somewhere.
+    assertEquals(Object.keys(body), ['client'])
+    assert(!(seen.body ?? '').includes('5531'), 'the PAN appeared in the body')
+    assert(!(seen.body ?? '').includes('564'), 'the CVV appeared in the body')
+  } finally {
+    restore()
+  }
+})
+
+Deno.test('a PIN demand is its own action, not an OTP', async () => {
+  const { restore } = intercept({
+    status: 'success',
+    data: { flw_ref: 'FLW-C2' },
+    meta: { authorization: { mode: 'pin', instruction: 'Enter your card PIN.' } },
+  })
+
+  try {
+    const result = await new FlutterwaveProvider(CREDS, '').charge({
+      ...CARD_CHARGE,
+      card: CARD,
+    })
+    // A PIN goes back to the charge endpoint with the card; a code goes to
+    // validate-charge. Collapsing the two would post a PIN somewhere useless.
+    assertEquals(result.next_action?.type, 'pin')
+  } finally {
+    restore()
+  }
+})
+
+Deno.test('an address demand names the fields rather than leaving them to guess', async () => {
+  const { restore } = intercept({
+    status: 'success',
+    data: { flw_ref: 'FLW-C3' },
+    meta: { authorization: { mode: 'avs_noauth' } },
+  })
+
+  try {
+    const result = await new FlutterwaveProvider(CREDS, '').charge({
+      ...CARD_CHARGE,
+      card: CARD,
+    })
+    assertEquals(result.next_action?.type, 'avs')
+    if (result.next_action?.type !== 'avs') throw new Error('expected avs')
+    assertEquals(result.next_action.fields.includes('zipcode'), true)
+  } finally {
+    restore()
+  }
+})
+
+Deno.test('the second attempt does not replay the first response', async () => {
+  const first = intercept({ status: 'success', data: {}, meta: { authorization: { mode: 'pin' } } })
+  let firstKey: string | undefined
+  try {
+    await new FlutterwaveProvider(CREDS, '').charge({ ...CARD_CHARGE, card: CARD })
+    firstKey = first.seen.idempotencyKey
+  } finally {
+    first.restore()
+  }
+
+  const second = intercept({ status: 'success', data: { flw_ref: 'r' }, meta: { authorization: { mode: 'otp' } } })
+  try {
+    await new FlutterwaveProvider(CREDS, '').charge({
+      ...CARD_CHARGE,
+      card: CARD,
+      authorization: { mode: 'pin', pin: '3310' },
+      attempt: 1,
+    })
+    // Same tx_ref, different key. Sharing one would make the rail hand back the
+    // PIN demand again, for ever, to a buyer who has already answered it.
+    assert(
+      firstKey !== second.seen.idempotencyKey,
+      `both attempts used ${firstKey}`,
+    )
+  } finally {
+    second.restore()
+  }
+})
+
+Deno.test('3DS is a redirect to the issuer, which is the one correct handoff', async () => {
+  const { restore } = intercept({
+    status: 'success',
+    data: { flw_ref: 'FLW-C4' },
+    meta: { authorization: { mode: 'redirect', redirect: 'https://bank.test/3ds' } },
+  })
+
+  try {
+    const result = await new FlutterwaveProvider(CREDS, '').charge({
+      ...CARD_CHARGE,
+      card: CARD,
+    })
+    assertEquals(result.next_action?.type, 'redirect')
+    assertEquals(result.payment_link, 'https://bank.test/3ds')
+  } finally {
+    restore()
+  }
+})
+
+Deno.test('an account with no encryption key cannot charge a card at all', async () => {
+  const { restore } = intercept({ status: 'success', data: {} })
+  try {
+    await assertRejects(
+      () =>
+        new FlutterwaveProvider({ ...CREDS, encryption_key: '' }, '').charge({
+          ...CARD_CHARGE,
+          card: CARD,
+        }),
+      PayHoldError,
+      'no encryption key',
+    )
+  } finally {
+    restore()
+  }
+})
+
+Deno.test('a mistyped encryption key is a sentence, not a crypto stack trace', async () => {
+  const { restore } = intercept({ status: 'success', data: {} })
+  try {
+    await assertRejects(
+      () =>
+        new FlutterwaveProvider({ ...CREDS, encryption_key: 'too-short' }, '').charge({
+          ...CARD_CHARGE,
+          card: CARD,
+        }),
+      PayHoldError,
+      'wrong length',
+    )
+  } finally {
+    restore()
+  }
+})
+
+Deno.test('a card charge with no card still gets the hosted page', async () => {
+  const { seen, restore } = intercept({ status: 'success', data: { link: 'https://hosted' } })
+  try {
+    // The default posture, and the one every other tenant keeps.
+    const result = await new FlutterwaveProvider(CREDS, '').charge(CARD_CHARGE)
+    assert(seen.url?.endsWith('/payments'), seen.url)
+    assertEquals(result.next_action?.type, 'element')
   } finally {
     restore()
   }

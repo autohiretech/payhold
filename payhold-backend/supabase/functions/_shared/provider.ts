@@ -44,6 +44,62 @@ export interface ChargeRequest {
    * buyer's identity on that rail and PayHold has no reason to remember it.
    */
   phone?: string
+  /**
+   * The buyer's card, when the tenant collects the fields itself.
+   *
+   * **This is an exception to §6, it is off by default, and it is the tenant's
+   * to take.** PayHold's normal posture is that a card never reaches this
+   * system at all: the hosted page, the framed checkout and `payment_element`
+   * all keep the number inside the provider's own origin, which is what makes
+   * "PayHold does not handle card numbers" structurally true rather than a
+   * promise. A tenant sending this has accepted PCI SAQ D on their own side —
+   * see `rawCardAllowed` in `settings.ts`, which refuses it unless switched on
+   * for that tenant.
+   *
+   * Prefer `payment_element` wherever the rail offers one. This exists because
+   * Flutterwave does not: it has a hosted page and a full-viewport script, and
+   * nothing in between, so a tenant who wants their own checkout on that rail
+   * has no other route.
+   *
+   * What is guaranteed: encrypted for the provider on the way out, never
+   * written to a column, never logged, never held past the request.
+   */
+  card?: {
+    number: string
+    cvv: string
+    /** Two digits. */
+    expiry_month: string
+    /** Two digits — the short year, as the rail wants it. */
+    expiry_year: string
+    name?: string
+    email?: string
+  }
+  /**
+   * The second factor a card rail asked for after seeing the card.
+   *
+   * Answering it means sending the card *again*, which is the rail's design
+   * rather than ours. Keeping it in the request — instead of caching the card
+   * here between calls — is what lets the client hold it in memory and resend,
+   * so nothing on this side ever stores one.
+   */
+  authorization?: {
+    mode: 'pin' | 'avs_noauth'
+    pin?: string
+    city?: string
+    address?: string
+    state?: string
+    country?: string
+    zipcode?: string
+  }
+  /**
+   * Distinguishes retries of one payment from each other.
+   *
+   * A card rail answers the first call with a demand for a PIN or an address,
+   * and the answer is a second call carrying the same reference. The
+   * idempotency key must therefore differ between them, or the rail replays the
+   * first response and the buyer is asked for the same PIN forever.
+   */
+  attempt?: number
   /** Where the provider returns the buyer once they have paid. */
   return_url: string
   /**
@@ -79,6 +135,22 @@ export type ChargeNextAction =
    * must be given; it is the provider's, not ours, and means nothing elsewhere.
    */
   | { type: 'otp'; reference: string; message: string }
+  /**
+   * The card needs a PIN before it will authorise.
+   *
+   * Distinct from `otp` because the answer goes somewhere else: a PIN returns
+   * to the *charge* endpoint alongside the card, while a code goes to
+   * `validate`. Collapsing them would send a PIN to a route that cannot use it.
+   * Usually followed by an `otp` action once the PIN is accepted.
+   */
+  | { type: 'pin'; message: string }
+  /**
+   * The card needs the billing address the issuer holds.
+   *
+   * `fields` names what to ask for rather than leaving a client to guess, and
+   * is ordered the way a form should read.
+   */
+  | { type: 'avs'; message: string; fields: string[] }
   /**
    * The buyer must be taken to the provider. Framing it is the client's call
    * and their risk — Stripe Checkout refuses to be framed, Flutterwave does not.

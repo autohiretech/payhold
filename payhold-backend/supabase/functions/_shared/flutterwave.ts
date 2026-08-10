@@ -12,6 +12,7 @@
  * keys would silently collect one tenant's money into another's balance.
  */
 
+import forge from 'npm:node-forge@1.3.1'
 import type {
   ChargeRequest,
   ChargeResult,
@@ -81,6 +82,49 @@ interface FlutterwaveEnvelope<T> {
       note?: string
     }
   }
+}
+
+/**
+ * Encrypt a payload the way this rail's direct endpoints require.
+ *
+ * 3DES-ECB under the tenant's `encryption_key`, base64, sent as `client`. The
+ * algorithm is not a choice — it is what the endpoint accepts — and it is worth
+ * being clear that it protects the payload *in transit to the rail* and is not
+ * a claim about anything stronger. ECB with a fixed key leaks equality between
+ * identical blocks; what makes that tolerable here is that the payload is
+ * unique per charge and is already inside TLS.
+ *
+ * `node-forge` rather than WebCrypto or `node:crypto`, because neither has 3DES
+ * in this runtime — `createCipheriv('des-ede3')` answers "Unknown cipher".
+ */
+function encryptPayload(encryptionKey: string, payload: unknown): string {
+  if (!encryptionKey) {
+    throw new PayHoldError(
+      'policy_violation',
+      'This Flutterwave account has no encryption key, so a card cannot be charged directly',
+    )
+  }
+
+  // 3DES takes a 24-byte key and nothing else, which is the length the rail's
+  // dashboard issues. Checked here so a mistyped key is a sentence an operator
+  // can act on rather than "Invalid Triple-DES key size" out of a crypto
+  // library, thrown mid-charge with a buyer waiting.
+  if (encryptionKey.length !== 24) {
+    throw new PayHoldError(
+      'policy_violation',
+      'This Flutterwave encryption key is the wrong length — it must be the ' +
+        '24-character key from their dashboard',
+    )
+  }
+
+  const cipher = forge.cipher.createCipher(
+    '3DES-ECB',
+    forge.util.createBuffer(encryptionKey),
+  )
+  cipher.start()
+  cipher.update(forge.util.createBuffer(JSON.stringify(payload), 'utf8'))
+  cipher.finish()
+  return forge.util.encode64(cipher.output.getBytes())
 }
 
 /**
@@ -220,6 +264,13 @@ export class FlutterwaveProvider implements PaymentProvider {
       return await this.chargeMobileMoney(req)
     }
 
+    // A card the tenant collected itself. Gated upstream in `startCharge` — by
+    // the time it reaches here the tenant has switched `raw_card_relay` on and
+    // taken SAQ D. See `ChargeRequest.card`.
+    if (req.method === 'card' && req.card) {
+      return await this.chargeCard(req, req.card)
+    }
+
     // A hosted payment link rather than a direct charge: it keeps card data
     // entirely off PayHold's infrastructure, which is what lets §6's "never
     // stores raw card numbers" be structurally true rather than a promise.
@@ -349,6 +400,106 @@ export class FlutterwaveProvider implements PaymentProvider {
       next_action: {
         type: 'wait',
         message: instruction ?? 'Approve the payment prompt on your phone.',
+      },
+    }
+  }
+
+  /**
+   * Charge a card the tenant collected, and report what the issuer wants next.
+   *
+   * The rail picks the authorisation model per card, so all four outcomes are
+   * live for any buyer: a PIN, a billing address, a 3DS redirect, or nothing.
+   * `pin` and `avs_noauth` are answered by calling this *again* with the same
+   * details plus an `authorization` block — the rail's design, not ours — which
+   * is why they are a request field rather than something cached here. Nothing
+   * on this side holds them between calls, and they appear in no log line.
+   */
+  private async chargeCard(
+    req: ChargeRequest,
+    card: NonNullable<ChargeRequest['card']>,
+  ): Promise<ChargeResult> {
+    const payload = {
+      card_number: card.number.replace(/\s+/g, ''),
+      cvv: card.cvv,
+      expiry_month: card.expiry_month,
+      expiry_year: card.expiry_year,
+      currency: req.currency,
+      amount: toMajor(req.amount, req.currency),
+      email: card.email ?? `deal-${req.deal_id}@payhold.invalid`,
+      fullname: card.name ?? 'PayHold buyer',
+      tx_ref: req.deal_id,
+      redirect_url: req.return_url,
+      // Answering a PIN or address demand means resending everything with the
+      // extra factor alongside. Absent on the first call.
+      ...(req.authorization ? { authorization: req.authorization } : {}),
+    }
+
+    const body = await this.envelope<{ flw_ref?: string; status?: string }>(
+      '/charges?type=card',
+      {
+        method: 'POST',
+        // Per attempt, not per deal. A continuation carries the same tx_ref, so
+        // `charge:${deal_id}` alone would make the rail replay the first
+        // response and ask the buyer for the same PIN forever.
+        idempotencyKey: `${req.idempotency_key}:${req.attempt ?? 0}`,
+        body: JSON.stringify({
+          client: encryptPayload(this.creds.encryption_key, payload),
+        }),
+      },
+    )
+
+    const auth = body.meta?.authorization ?? {}
+    const flwRef = body.data?.flw_ref ?? ''
+    const instruction = auth.instruction ?? auth.validate_instructions ?? auth.note
+
+    if (auth.mode === 'pin') {
+      return {
+        provider_ref: req.deal_id,
+        payment_link: '',
+        next_action: { type: 'pin', message: instruction ?? 'Enter the PIN for this card.' },
+      }
+    }
+
+    if (auth.mode === 'avs_noauth') {
+      return {
+        provider_ref: req.deal_id,
+        payment_link: '',
+        next_action: {
+          type: 'avs',
+          message: instruction ?? 'Enter the billing address for this card.',
+          fields: ['address', 'city', 'state', 'zipcode', 'country'],
+        },
+      }
+    }
+
+    // 3DS. The issuer's page rather than the rail's — nobody can render that
+    // inline, and handing a buyer to their own bank is the one correct handoff.
+    if (auth.mode === 'redirect' && auth.redirect) {
+      return {
+        provider_ref: req.deal_id,
+        payment_link: auth.redirect,
+        next_action: { type: 'redirect', url: auth.redirect },
+      }
+    }
+
+    if (auth.mode === 'otp' && flwRef) {
+      return {
+        provider_ref: req.deal_id,
+        payment_link: '',
+        next_action: {
+          type: 'otp',
+          reference: flwRef,
+          message: instruction ?? 'Enter the code sent to your phone.',
+        },
+      }
+    }
+
+    return {
+      provider_ref: req.deal_id,
+      payment_link: '',
+      next_action: {
+        type: 'wait',
+        message: instruction ?? 'Payment submitted — waiting for your bank to confirm.',
       },
     }
   }

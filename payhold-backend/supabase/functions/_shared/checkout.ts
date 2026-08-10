@@ -16,9 +16,10 @@
 
 import type { SupabaseClient } from 'npm:@supabase/supabase-js@2'
 import { loadProvider } from './load-provider.ts'
+import { loadSettings } from './settings.ts'
 import { closedMarkets, liveProviders } from './matrix.ts'
 import { collectionRails, countryInfo, METHOD_LABEL } from './rails.ts'
-import type { ChargeNextAction } from './provider.ts'
+import type { ChargeNextAction, ChargeRequest } from './provider.ts'
 import { PayHoldError, type Deal, type PaymentMethod, type Provider } from './types.ts'
 
 export interface StartedCharge {
@@ -90,6 +91,14 @@ export async function startCharge(
      * it still gets the hosted page it always got.
      */
     phone?: string
+    /**
+     * Card details the tenant collected itself, and the extra factor the rail
+     * asked for afterwards. Refused unless that tenant has switched
+     * `raw_card_relay` on — see `Settings.raw_card_relay`.
+     */
+    card?: NonNullable<ChargeRequest['card']>
+    authorization?: NonNullable<ChargeRequest['authorization']>
+    attempt?: number
     returnUrl?: string | null
   },
 ): Promise<StartedCharge> {
@@ -104,6 +113,20 @@ export async function startCharge(
     )
   }
 
+  // §6's exception, checked here rather than in an adapter so every rail is
+  // covered by one gate. A tenant that has not switched this on cannot send us
+  // a card at all, whatever they put in the body.
+  if (choice.card) {
+    const settings = await loadSettings(db, tenantId)
+    if (!settings.raw_card_relay) {
+      throw new PayHoldError(
+        'policy_violation',
+        'This account is not set up to send card details to PayHold. ' +
+          'Use the payment element or the hosted checkout instead.',
+      )
+    }
+  }
+
   const { provider } = await loadProvider(db, tenantId, chosen.provider)
   const publicUrl = Deno.env.get('PUBLIC_URL') ?? 'https://app.payhold.local'
 
@@ -116,6 +139,9 @@ export async function startCharge(
     method: choice.method,
     network: choice.network,
     phone: choice.method === 'mobile_money' ? choice.phone : undefined,
+    card: choice.card,
+    authorization: choice.authorization,
+    attempt: choice.attempt,
     return_url: choice.returnUrl ?? `${publicUrl}/deals/${deal.id}`,
     // §6: requested on every card charge, never silently downgraded.
     three_d_secure: choice.method === 'card',
