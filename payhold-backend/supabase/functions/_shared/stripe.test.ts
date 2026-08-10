@@ -65,7 +65,7 @@ async function sign(body: string, secret: string, timestamp: number): Promise<st
 // ---------------------------------------------------------------------------
 
 Deno.test('a charge asks for 3D Secure explicitly, never automatically', async () => {
-  const { seen, restore } = intercept({ id: 'cs_1', url: 'https://checkout/x' })
+  const { seen, restore } = intercept({ id: 'pi_1', client_secret: 'pi_1_secret_x' })
 
   try {
     await new StripeProvider(CREDS, '').charge({
@@ -84,16 +84,17 @@ Deno.test('a charge asks for 3D Secure explicitly, never automatically', async (
   const body = decodeURIComponent(seen.body ?? '')
   // §6, and the word that matters is `any`. Stripe's default is `automatic`,
   // which lets Radar decide — and a downgrade nobody asked for is exactly what
-  // "never silently downgraded" forbids.
+  // "never silently downgraded" forbids. The intent nests this one level
+  // shallower than the Session did; the rule is the same rule.
   assertEquals(
-    body.includes('payment_intent_data[payment_method_options][card][request_three_d_secure]=any'),
+    body.includes('payment_method_options[card][request_three_d_secure]=any'),
     true,
     body,
   )
 })
 
 Deno.test('amounts go to Stripe untouched, in the smallest unit', async () => {
-  const { seen, restore } = intercept({ id: 'cs_1', url: 'https://checkout/x' })
+  const { seen, restore } = intercept({ id: 'pi_1', client_secret: 'pi_1_secret_x' })
 
   try {
     await new StripeProvider(CREDS, '').charge({
@@ -113,11 +114,11 @@ Deno.test('amounts go to Stripe untouched, in the smallest unit', async () => {
   // Stripe takes the smallest currency unit, which is what `Money` already is —
   // hence no `toMajor` on this adapter, unlike Flutterwave's. A conversion here
   // would collect a hundredth or a hundred times the intended amount.
-  assertEquals(body.includes('line_items[0][price_data][unit_amount]=1500'), true, body)
+  assertEquals(body.includes('amount=1500'), true, body)
 })
 
 Deno.test('the idempotency key is a header, so a retry is not a second charge', async () => {
-  const { seen, restore } = intercept({ id: 'cs_1', url: 'https://checkout/x' })
+  const { seen, restore } = intercept({ id: 'pi_1', client_secret: 'pi_1_secret_x' })
 
   try {
     await new StripeProvider(CREDS, '').charge({
@@ -356,4 +357,95 @@ Deno.test('an unsigned webhook does not', async () => {
     await new StripeProvider(CREDS, '').verifySignature('{}', new Headers()),
     false,
   )
+})
+
+// ---------------------------------------------------------------------------
+// Paying in the client's own page
+// ---------------------------------------------------------------------------
+
+const CHARGE = {
+  deal_id: 'deal_1',
+  amount: 1500,
+  currency: 'USD' as const,
+  method: 'card' as const,
+  return_url: 'https://autohiretech.pages.dev/trips',
+  three_d_secure: true,
+  idempotency_key: 'charge:deal_1',
+}
+
+Deno.test('a charge opens an intent, not a page to send the buyer to', async () => {
+  const { seen, restore } = intercept({ id: 'pi_9', client_secret: 'pi_9_secret_abc' })
+
+  try {
+    const result = await new StripeProvider(CREDS, '').charge(CHARGE)
+
+    // Checkout Sessions can only be navigated to, and checkout.stripe.com
+    // refuses to be framed — so reaching that endpoint here would mean the
+    // buyer is being handed over no matter what the client wanted.
+    assertEquals(seen.url, 'https://api.stripe.com/v1/payment_intents')
+
+    assertEquals(result.provider_ref, 'pi_9')
+    // Said plainly rather than as a link that finishes nothing.
+    assertEquals(result.payment_link, '')
+
+    assertEquals(result.next_action?.type, 'payment_element')
+    if (result.next_action?.type !== 'payment_element') throw new Error('expected element')
+    assertEquals(result.next_action.client_secret, 'pi_9_secret_abc')
+    // Publishable, never the secret. This one crosses to a browser.
+    assertEquals(result.next_action.publishable_key, 'pk_test_deadbeef')
+  } finally {
+    restore()
+  }
+})
+
+Deno.test('the deal id rides on the intent, so the webhook can find its way back', async () => {
+  const { seen, restore } = intercept({ id: 'pi_9', client_secret: 'pi_9_secret_abc' })
+
+  try {
+    await new StripeProvider(CREDS, '').charge(CHARGE)
+    const body = decodeURIComponent(seen.body ?? '')
+    assertEquals(body.includes('metadata[deal_id]=deal_1'), true, body)
+  } finally {
+    restore()
+  }
+})
+
+Deno.test('an intent with no client secret is refused rather than returned empty', async () => {
+  // A client that got `payment_element` with a blank secret would mount an
+  // Element that can never confirm, and the buyer would sit in front of a form
+  // that does nothing. Better to fail where it can be seen.
+  const { restore } = intercept({ id: 'pi_9' })
+
+  try {
+    await assertRejects(
+      () => new StripeProvider(CREDS, '').charge(CHARGE),
+      PayHoldError,
+      'no client secret',
+    )
+  } finally {
+    restore()
+  }
+})
+
+Deno.test('the hosted session is still available, and still 3DS', async () => {
+  // Kept for callers that genuinely want to hand the buyer over — Stripe's own
+  // receipt and wallet buttons come with it. Deleting it would take that from
+  // every tenant at once.
+  const { seen, restore } = intercept({ id: 'cs_5', url: 'https://checkout.stripe.com/x' })
+
+  try {
+    const result = await new StripeProvider(CREDS, '').chargeHosted(CHARGE)
+    assertEquals(seen.url, 'https://api.stripe.com/v1/checkout/sessions')
+    assertEquals(result.payment_link, 'https://checkout.stripe.com/x')
+    assertEquals(result.provider_ref, 'cs_5')
+
+    const body = decodeURIComponent(seen.body ?? '')
+    assertEquals(
+      body.includes('payment_intent_data[payment_method_options][card][request_three_d_secure]=any'),
+      true,
+      body,
+    )
+  } finally {
+    restore()
+  }
 })

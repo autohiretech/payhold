@@ -85,10 +85,36 @@ export type ChargeNextAction =
    */
   | { type: 'redirect'; url: string }
   /**
+   * The provider's fields, mounted into the client's own markup.
+   *
+   * This is the variant to reach for. The provider serves each input from its
+   * own origin, so the card number never touches the client or us and SAQ A
+   * holds — but the client positions and styles the container, so it is their
+   * checkout rather than a page of somebody else's wearing a border. Stripe's
+   * Payment Element and PayPal's CardFields are both this shape.
+   *
+   * `client_secret` authorises exactly one payment and nothing else. It is
+   * meant for the buyer's browser — that is what it is for — but it must not be
+   * logged or stored, so it travels no further than the response that carries it.
+   */
+  | {
+    type: 'payment_element'
+    provider: Provider
+    /** The provider's publishable key. Public by construction. */
+    publishable_key: string
+    client_secret: string
+    /** Where the provider returns the buyer if a step of its own intervenes. */
+    return_url: string
+  }
+  /**
    * The provider collects the details itself, in the client's own page, from a
    * script it serves. This is what keeps a PAN out of both our infrastructure
    * and theirs while still ending inside their checkout: the fields belong to
    * the provider's iframe, the surrounding page belongs to the client.
+   *
+   * Weaker than `payment_element` and kept for rails that offer nothing better:
+   * a script is free to draw wherever it likes, and Flutterwave's takes the
+   * whole viewport with a method picker of its own.
    *
    * `reference` is the charge reference the widget must use — our deal id — so
    * the charge the browser creates is the one our webhook is waiting for.

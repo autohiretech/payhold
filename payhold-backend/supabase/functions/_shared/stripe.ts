@@ -131,6 +131,12 @@ interface StripeIntent {
   status: string
   latest_charge?: StripeCharge | string | null
   payment_method_types?: string[]
+  /**
+   * Present on creation, absent on the reads `verify` does. It authorises one
+   * payment on this intent and is meant for the buyer's browser — which is why
+   * it is never logged and never stored, only forwarded.
+   */
+  client_secret?: string
 }
 
 interface StripeCharge {
@@ -229,10 +235,19 @@ export class StripeProvider implements PaymentProvider {
   // -------------------------------------------------------------------------
 
   /**
-   * A hosted Checkout Session, for the same reason Flutterwave gets a payment
-   * link: card data never touches PayHold's infrastructure, which is what makes
-   * §6's "never stores raw card numbers" structurally true rather than a
-   * promise.
+   * A PaymentIntent, so the buyer can pay where they already are.
+   *
+   * This used to open a hosted Checkout Session, and the reason to stop is that
+   * a Session can only ever be *navigated to*: the URL is the whole product,
+   * `checkout.stripe.com` refuses to be framed, and a client integrating one
+   * therefore has no choice but to hand its buyer over to a page in somebody
+   * else's brand. That is the handoff clients are trying to remove.
+   *
+   * An intent is the same charge without the constraint. It yields a
+   * `client_secret`, Stripe's Payment Element mounts against it inside the
+   * client's own checkout, and every field is still served from Stripe's
+   * origin — so §6 does not move an inch. Card data touches neither the client
+   * nor us, exactly as before; only the surrounding page changes hands.
    */
   async charge(req: ChargeRequest): Promise<ChargeResult> {
     if (req.method === 'mobile_money') {
@@ -244,6 +259,55 @@ export class StripeProvider implements PaymentProvider {
       )
     }
 
+    const intent = await this.call<StripeIntent>('/payment_intents', {
+      method: 'POST',
+      idempotencyKey: req.idempotency_key,
+      body: {
+        amount: req.amount,
+        currency: req.currency.toLowerCase(),
+        metadata: { deal_id: req.deal_id },
+        // Let the dashboard decide what a buyer in this market may use, which
+        // is what the Session did too. The Element renders whatever comes back.
+        automatic_payment_methods: { enabled: true },
+        // §6, word for word the Session's rule: 3DS is requested on every card
+        // charge and **never silently downgraded**. `any` asks Stripe to apply
+        // it even where the issuer would have let the payment through without
+        // it; `automatic` — the default — lets Radar decide, which is the
+        // silent downgrade.
+        payment_method_options: { card: { request_three_d_secure: 'any' } },
+      },
+    })
+
+    if (!intent.client_secret) {
+      throw new PayHoldError('policy_violation', 'Stripe returned no client secret')
+    }
+
+    return {
+      provider_ref: intent.id,
+      // No page to send anyone to, and saying so plainly beats handing back a
+      // link that finishes nothing. `verify`, `refund` and `capture` all branch
+      // on the `cs_` prefix already, so a bare `pi_…` needs nothing downstream.
+      payment_link: '',
+      next_action: {
+        type: 'payment_element',
+        provider: 'stripe',
+        publishable_key: this.creds.publishable_key,
+        client_secret: intent.client_secret,
+        return_url: req.return_url,
+      },
+    }
+  }
+
+  /**
+   * The hosted Checkout Session — kept, and no longer the way in.
+   *
+   * Still the right answer for a caller that genuinely wants to hand its buyer
+   * over: a Session brings Stripe's own receipt, address collection and wallet
+   * buttons, and rebuilding those around an intent would be worse than
+   * navigating. `charge()` no longer reaches for it; deleting it would take the
+   * option away from every tenant at once, which is not this change's to make.
+   */
+  async chargeHosted(req: ChargeRequest): Promise<ChargeResult> {
     const session = await this.call<StripeSession>('/checkout/sessions', {
       method: 'POST',
       idempotencyKey: req.idempotency_key,
