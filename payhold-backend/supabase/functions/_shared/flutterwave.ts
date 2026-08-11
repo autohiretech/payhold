@@ -786,12 +786,23 @@ export class FlutterwaveProvider implements PaymentProvider {
   }
 
   async balances(): Promise<{ currency: Currency; amount: Money }[]> {
-    const data = await this.call<{ currency: string; available_balance: number }[]>(
-      '/balances',
-    )
+    const data = await this.call<
+      {
+        currency: string
+        available_balance?: number
+        ledger_balance?: number
+        reserved_balance?: number
+      }[]
+    >('/balances')
     return data.map((b) => ({
       currency: b.currency,
-      amount: toMinor(b.available_balance, b.currency),
+      // Everything the wallet still holds, not only what is spendable this
+      // instant. Settled funds sit in `ledger_balance` until settlement moves
+      // them into `available_balance`, and the reconciliation cron compares
+      // against everything the ledger expects the provider to be holding.
+      // Reading `available_balance` alone reported a funded wallet as empty and
+      // froze its payouts on the first pass.
+      amount: toMinor(b.ledger_balance ?? b.available_balance ?? 0, b.currency),
     }))
   }
 

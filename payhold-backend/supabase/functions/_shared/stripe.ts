@@ -603,12 +603,21 @@ export class StripeProvider implements PaymentProvider {
   async balances(): Promise<{ currency: Currency; amount: Money }[]> {
     const balance = await this.call<{
       available?: { amount: number; currency: string }[]
+      pending?: { amount: number; currency: string }[]
     }>('/balance')
 
-    return (balance.available ?? []).map((b) => ({
-      currency: b.currency.toUpperCase(),
-      amount: b.amount,
-    }))
+    // Money still with the provider is both buckets, not just what is spendable
+    // this instant. Captured funds sit in `pending` until the account's payout
+    // schedule moves them into `available` — that is still money the provider is
+    // holding, and the reconciliation cron compares against everything the
+    // ledger expects to be held. Reading `available` alone reported a fully
+    // funded account as empty and froze its payouts on the first pass.
+    const byCurrency = new Map<string, number>()
+    for (const b of [...(balance.available ?? []), ...(balance.pending ?? [])]) {
+      const key = b.currency.toUpperCase()
+      byCurrency.set(key, (byCurrency.get(key) ?? 0) + b.amount)
+    }
+    return [...byCurrency].map(([currency, amount]) => ({ currency, amount }))
   }
 
   // -------------------------------------------------------------------------
