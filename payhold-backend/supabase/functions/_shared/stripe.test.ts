@@ -292,6 +292,39 @@ Deno.test('a fee we cannot read is zero rather than a guess', async () => {
   }
 })
 
+Deno.test('verify fetches the balance transaction when only its id came back', async () => {
+  const original = globalThis.fetch
+  // A webhook can deliver the intent with `latest_charge` as a bare id. The old
+  // code booked fee 0 here; it must now fetch the charge (and its balance
+  // transaction) to read the real fee.
+  globalThis.fetch = ((url: string | URL | Request) => {
+    const u = String(url)
+    if (u.includes('/payment_intents/pi_5')) {
+      return Promise.resolve(new Response(JSON.stringify({
+        id: 'pi_5',
+        amount: 2000,
+        amount_received: 2000,
+        currency: 'usd',
+        status: 'succeeded',
+        latest_charge: 'ch_5',
+      }), { status: 200, headers: { 'content-type': 'application/json' } }))
+    }
+    if (u.includes('/charges/ch_5')) {
+      return Promise.resolve(new Response(JSON.stringify({
+        id: 'ch_5',
+        balance_transaction: { fee: 88 },
+      }), { status: 200, headers: { 'content-type': 'application/json' } }))
+    }
+    return Promise.resolve(new Response('{}', { status: 404 }))
+  }) as typeof fetch
+
+  try {
+    assertEquals((await new StripeProvider(CREDS, '').verify('pi_5')).fee, 88)
+  } finally {
+    globalThis.fetch = original
+  }
+})
+
 // ---------------------------------------------------------------------------
 // The signature
 // ---------------------------------------------------------------------------

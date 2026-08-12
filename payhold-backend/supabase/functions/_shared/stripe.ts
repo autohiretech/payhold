@@ -402,9 +402,15 @@ export class StripeProvider implements PaymentProvider {
     }
 
     const charge = typeof intent.latest_charge === 'object' ? intent.latest_charge : null
-    const balanceTx = charge && typeof charge.balance_transaction === 'object'
-      ? charge.balance_transaction
-      : null
+
+    // §7's provider fee, from the balance transaction — the only place Stripe
+    // states what it actually took. The re-fetch above expands it when the API
+    // returns it inline, but a webhook can reach us with the charge (or the
+    // balance transaction) as a bare id; in that case we fetch it directly
+    // rather than booking 0. Booking 0 was the bug that drifted AutoHire's
+    // ledger and froze their payouts: every deal verified before the expansion
+    // resolved silently lost its fee, and the next reconcile re-froze them.
+    const fee = await this.resolveProviderFee(intent, charge)
 
     return {
       provider_ref: providerRef,
@@ -424,12 +430,41 @@ export class StripeProvider implements PaymentProvider {
         charge?.payment_method_details?.type ?? intent.payment_method_types?.[0],
       ),
       network: charge?.payment_method_details?.card?.brand ?? null,
-      // §7's provider fee, from the balance transaction — the only place Stripe
-      // states what it actually took. Zero when it is not expanded yet, which
-      // is the honest reading: booking a guess would put the ledger out by the
-      // difference and reconciliation reads that as drift.
-      fee: balanceTx?.fee ?? 0,
+      fee,
     }
+  }
+
+  /**
+   * Resolves the fee Stripe actually took, fetching the balance transaction
+   * whenever the verify re-fetch only returned ids. Returns 0 only when there
+   * is genuinely nothing to read — never a guessed amount.
+   */
+  private async resolveProviderFee(
+    intent: StripeIntent,
+    charge: StripeCharge | null,
+  ): Promise<number> {
+    if (charge && charge.balance_transaction && typeof charge.balance_transaction === 'object') {
+      return charge.balance_transaction.fee ?? 0
+    }
+    if (charge && typeof charge.balance_transaction === 'string') {
+      const txn = await this.call<{ fee?: number }>(
+        `/balance_transactions/${charge.balance_transaction}`,
+      )
+      return txn?.fee ?? 0
+    }
+    if (typeof intent.latest_charge === 'string') {
+      const ch = await this.call<StripeCharge>(
+        `/charges/${intent.latest_charge}?expand[]=balance_transaction`,
+      )
+      if (ch && ch.balance_transaction && typeof ch.balance_transaction === 'object') return ch.balance_transaction.fee ?? 0
+      if (ch && typeof ch.balance_transaction === 'string') {
+        const txn = await this.call<{ fee?: number }>(
+          `/balance_transactions/${ch.balance_transaction}`,
+        )
+        return txn?.fee ?? 0
+      }
+    }
+    return 0
   }
 
   private async intentForSession(sessionId: string): Promise<StripeIntent | null> {

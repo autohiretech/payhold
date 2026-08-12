@@ -548,3 +548,51 @@ Deno.test('a transfer the rail will not mint an account for falls back to the pa
     restore()
   }
 })
+
+Deno.test('verify derives the provider fee from what actually settled', async () => {
+  // `amount_settled` is what the wallet actually holds; the fee is charged −
+  // settled, not the reported `app_fee`, which can exclude VAT or test-mode
+  // differences. 1000 charged, 945 settled → 55 fee, not the reported 35.
+  const { restore } = intercept({
+    data: {
+      id: 12345,
+      tx_ref: 'tx_1',
+      amount: 1000,
+      charged_amount: 1000,
+      currency: 'RWF',
+      status: 'successful',
+      payment_type: 'mobilemoney',
+      app_fee: 35,
+      amount_settled: 945,
+    },
+  })
+
+  try {
+    const v = await new FlutterwaveProvider(CREDS, '').verify('tx_1')
+    assertEquals(v.fee, 55)
+    assertEquals(v.amount, 1000)
+    assertEquals(v.currency, 'RWF')
+  } finally {
+    restore()
+  }
+})
+
+Deno.test('verify falls back to app_fee when settlement is absent', async () => {
+  const { restore } = intercept({
+    data: {
+      id: 12346,
+      tx_ref: 'tx_2',
+      amount: 1000,
+      currency: 'RWF',
+      status: 'successful',
+      payment_type: 'mobilemoney',
+      app_fee: 35,
+    },
+  })
+
+  try {
+    assertEquals((await new FlutterwaveProvider(CREDS, '').verify('tx_2')).fee, 35)
+  } finally {
+    restore()
+  }
+})

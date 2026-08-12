@@ -656,13 +656,35 @@ export class FlutterwaveProvider implements PaymentProvider {
     const data = await this.call<{
       id: number
       amount: number
+      charged_amount?: number
       currency: string
       status: string
       payment_type?: string
       card?: { type?: string }
-      /** What Flutterwave charged us for this collection. */
+      /**
+       * What Flutterwave charged us for this collection. `amount_settled` is the
+       * amount that actually landed in the merchant balance, so the fee is
+       * `charged_amount − amount_settled` — the only figure the reconciliation
+       * pass can check our ledger against. `app_fee` is what Flutterwave reports
+       * it charged, and can exclude VAT or test-mode differences, so it is the
+       * fallback rather than the source of truth.
+       */
       app_fee?: number
+      amount_settled?: number
     }>(`/transactions/verify_by_reference?tx_ref=${encodeURIComponent(providerRef)}`)
+
+    // §7's provider fee, in the same currency as the amount. Prefer the settled
+    // amount (what the wallet actually holds) over the reported `app_fee`; fall
+    // back to `app_fee` when settlement is not present, and to zero only when
+    // there is genuinely nothing to read. Booking a guess would put the ledger
+    // out by the difference and the reconciliation pass reads that as drift —
+    // which freezes the tenant.
+    const charged = data.charged_amount ?? data.amount
+    const fee = data.amount_settled != null && charged != null
+      ? toMinor(charged - data.amount_settled, data.currency)
+      : data.app_fee
+        ? toMinor(data.app_fee, data.currency)
+        : 0
 
     return {
       provider_ref: providerRef,
@@ -675,11 +697,7 @@ export class FlutterwaveProvider implements PaymentProvider {
         : 'pending',
       method: toMethod(data.payment_type),
       network: data.card?.type ?? null,
-      // §7's provider fee, in the same currency as the amount. Absent on some
-      // responses; zero is the honest reading, because booking a guess would
-      // put the ledger out by the difference and the reconciliation pass reads
-      // that as drift.
-      fee: data.app_fee ? toMinor(data.app_fee, data.currency) : 0,
+      fee,
     }
   }
 
