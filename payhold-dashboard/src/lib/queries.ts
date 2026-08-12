@@ -6,6 +6,8 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   api,
+  type CronJobName,
+  type CronRun,
   type DealListFilter,
   type WebhookDeliveryFilter,
 } from '@/api'
@@ -49,6 +51,11 @@ export const keys = {
   sellerWallets: (sellerId?: string) => ['seller-wallets', sellerId ?? 'all'] as const,
   alerts: ['admin', 'alerts'] as const,
   reconciliationRuns: ['admin', 'reconciliation-runs'] as const,
+  cronRuns: (filter?: { job?: CronJobName; status?: CronRun['status'] }) =>
+    ['admin', 'cron-runs', filter ?? {}] as const,
+  adminPayouts: (status?: string) => ['admin', 'payouts', status ?? 'all'] as const,
+  adminWebhookDeliveries: (status?: string) =>
+    ['admin', 'webhook-deliveries', status ?? 'all'] as const,
 }
 
 export const useTenant = () =>

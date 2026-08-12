@@ -34,6 +34,7 @@
 import type { SupabaseClient } from 'npm:@supabase/supabase-js@2'
 import { serviceClient } from '../_shared/auth.ts'
 import { requireCronCaller } from '../_shared/cron-auth.ts'
+import { finishCronRun, startCronRun } from '../_shared/cron-runs.ts'
 import { handler, json } from '../_shared/http.ts'
 import { settleDeal, SETTLE_COLUMNS, type SettleableDeal } from '../_shared/settle.ts'
 import type { PaymentMethod, Provider } from '../_shared/types.ts'
@@ -106,6 +107,20 @@ Deno.serve(handler(async (req) => {
   await requireCronCaller(req)
 
   const db = serviceClient()
+  const runId = await startCronRun(db, 'settle-pending')
+
+  try {
+    const result = await runPass(db)
+    await finishCronRun(db, runId, 'completed', result)
+    return json(req, result)
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    await finishCronRun(db, runId, 'failed', undefined, message)
+    throw err
+  }
+}))
+
+async function runPass(db: SupabaseClient): Promise<Record<string, number>> {
   const now = Date.now()
 
   const { data: suspended } = await db
@@ -179,5 +194,5 @@ Deno.serve(handler(async (req) => {
     }
   }
 
-  return json(req, result)
-}))
+  return result
+}

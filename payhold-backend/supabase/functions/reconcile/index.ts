@@ -14,11 +14,23 @@
 
 import { serviceClient } from '../_shared/auth.ts'
 import { requireCronCaller } from '../_shared/cron-auth.ts'
+import { finishCronRun, startCronRun } from '../_shared/cron-runs.ts'
 import { handler, json } from '../_shared/http.ts'
 import { reconcileAll } from '../_shared/reconciliation.ts'
 
 Deno.serve(handler(async (req) => {
   await requireCronCaller(req)
 
-  return json(req, await reconcileAll(serviceClient()))
+  const db = serviceClient()
+  const runId = await startCronRun(db, 'reconcile')
+
+  try {
+    const counters = await reconcileAll(db)
+    await finishCronRun(db, runId, 'completed', { ...counters })
+    return json(req, counters)
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    await finishCronRun(db, runId, 'failed', undefined, message)
+    throw err
+  }
 }))

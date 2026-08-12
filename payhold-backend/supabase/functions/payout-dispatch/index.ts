@@ -16,8 +16,10 @@
  * `scripts/schedule-cron.sql` are staggered for exactly that reason.
  */
 
+import type { SupabaseClient } from 'npm:@supabase/supabase-js@2'
 import { serviceClient } from '../_shared/auth.ts'
 import { requireCronCaller } from '../_shared/cron-auth.ts'
+import { finishCronRun, startCronRun } from '../_shared/cron-runs.ts'
 import { DISPATCHABLE, dispatchPayout, type DispatchOutcome } from '../_shared/dispatch.ts'
 import { handler, json } from '../_shared/http.ts'
 import type { Payout } from '../_shared/types.ts'
@@ -32,7 +34,20 @@ Deno.serve(handler(async (req) => {
   await requireCronCaller(req)
 
   const db = serviceClient()
+  const runId = await startCronRun(db, 'payout-dispatch')
 
+  try {
+    const result = await runPass(db)
+    await finishCronRun(db, runId, 'completed', result)
+    return json(req, result)
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    await finishCronRun(db, runId, 'failed', undefined, message)
+    throw err
+  }
+}))
+
+async function runPass(db: SupabaseClient): Promise<Record<DispatchOutcome | 'considered' | 'errored' | 'cleared', number>> {
   // Promote deals whose clearance window has closed, before looking for
   // payouts. Same pass, and in this order: a payout becomes dispatchable at
   // `payout_due_at`, which is the same instant the deal stops clearing, so
@@ -90,5 +105,5 @@ Deno.serve(handler(async (req) => {
     }
   }
 
-  return json(req, result)
-}))
+  return result
+}

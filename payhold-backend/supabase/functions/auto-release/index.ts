@@ -27,6 +27,7 @@
 import type { SupabaseClient } from 'npm:@supabase/supabase-js@2'
 import { serviceClient } from '../_shared/auth.ts'
 import { requireCronCaller } from '../_shared/cron-auth.ts'
+import { finishCronRun, startCronRun } from '../_shared/cron-runs.ts'
 import { releaseFigures } from '../_shared/figures.ts'
 import { handler, json } from '../_shared/http.ts'
 import {
@@ -99,16 +100,34 @@ Deno.serve(handler(async (req) => {
   await requireCronCaller(req)
 
   const db = serviceClient()
+  const runId = await startCronRun(db, 'auto-release')
 
-  // §8's 48 hours, run here rather than from a cron job of its own. Both passes
-  // are the same shape — a clock ran out — and this one moves no money, touches
-  // no deal and can only lapse a request nobody answered, so it is safe beside
-  // the release timer.
-  //
-  // It runs **first**, and the ordering is worth keeping: an expired request is
-  // a fact about a deal this pass may be about to release, and a dashboard that
-  // showed a released deal still carrying a live 48-hour window would be showing
-  // a window nobody could act on any more.
+  try {
+    const result = await runPass(db)
+    await finishCronRun(db, runId, 'completed', result)
+    return json(req, result)
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    await finishCronRun(db, runId, 'failed', undefined, message)
+    throw err
+  }
+}))
+
+/**
+ * One release pass. Extracted so the handler's only job is the run log: the
+ * pass is the work, and recording it should not be tangled up in it.
+ *
+ * §8's 48 hours run here rather than from a cron job of their own. Both passes
+ * are the same shape — a clock ran out — and this one moves no money, touches
+ * no deal and can only lapse a request nobody answered, so it is safe beside
+ * the release timer.
+ *
+ * The expiry runs **first**, and the ordering is worth keeping: an expired
+ * request is a fact about a deal this pass may be about to release, and a
+ * dashboard that showed a released deal still carrying a live 48-hour window
+ * would be showing a window nobody could act on any more.
+ */
+async function runPass(db: SupabaseClient): Promise<Record<string, number>> {
   const { data: expired, error: expiryError } = await db.rpc('expire_dispute_offers')
 
   if (expiryError) {
@@ -167,5 +186,5 @@ Deno.serve(handler(async (req) => {
     }
   }
 
-  return json(req, result)
-}))
+  return result
+}

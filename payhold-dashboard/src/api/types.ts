@@ -1604,6 +1604,67 @@ export interface ReconciliationRun {
   error: string | null
 }
 
+/** The five scheduled jobs. Matches the `job` check on `cron_job_runs`. */
+export type CronJobName =
+  | 'reconcile'
+  | 'auto-release'
+  | 'payout-dispatch'
+  | 'settle-pending'
+  | 'webhook-dispatch'
+
+/**
+ * One scheduled-job invocation, as the job itself recorded it.
+ *
+ * pg_cron knows a schedule fired; this is what our code did with the fire.
+ * `counters` are whatever the pass returned — reconciles count tenants and
+ * rails, dispatchers count outcomes — so the shape is deliberately open.
+ */
+export interface CronRun {
+  id: string
+  job: CronJobName
+  started_at: Timestamp
+  finished_at: Timestamp | null
+  status: 'running' | 'completed' | 'failed'
+  counters: Record<string, number> | null
+  error: string | null
+}
+
+/**
+ * A payout as the staff view sees it — cross-tenant, so the signal-carrying
+ * columns the tenant screen loads are left off the wire.
+ */
+export interface AdminPayout {
+  id: string
+  tenant_id: string
+  deal_id: string
+  seller_id: string
+  amount: Money
+  currency: Currency
+  status: PayoutStatus
+  scheduled_for: Timestamp
+  paid_at: Timestamp | null
+  failure_reason: string | null
+  attempts: number
+  next_attempt_at: Timestamp | null
+  created_at: Timestamp
+}
+
+/** A webhook delivery, across every tenant. */
+export interface AdminWebhookDelivery {
+  id: string
+  tenant_id: string
+  endpoint_id: string
+  event: WebhookEvent
+  deal_id: string | null
+  status: WebhookDeliveryStatus
+  attempts: number
+  status_code: number | null
+  error: string | null
+  next_attempt_at: Timestamp | null
+  delivered_at: Timestamp | null
+  created_at: Timestamp
+}
+
 // ---------------------------------------------------------------------------
 // Request payloads
 // ---------------------------------------------------------------------------

@@ -21,9 +21,13 @@
  */
 
 import type {
+  AdminPayout,
+  AdminWebhookDelivery,
   CheckoutSession,
   CheckoutSessionState,
   PublicCheckout,
+  CronJobName,
+  CronRun,
   AiChatMessage,
   AiDecision,
   AiSuggestion,
@@ -481,6 +485,24 @@ export interface AdminApi {
   ): Promise<ReconciliationRun>
   freezePayouts(tenantId: string): Promise<Tenant>
   unfreezePayouts(tenantId: string): Promise<Tenant>
+  /**
+   * The `cron_job_runs` log: every scheduled pass, newest first. pg_cron knows
+   * a schedule fired; these rows are what our code did with the fire.
+   */
+  listCronRuns(filter?: { job?: CronJobName; status?: CronRun['status'] }): Promise<CronRun[]>
+  /**
+   * Payouts in any given state across every tenant. The screen asks for
+   * `failed,blocked` — the ones the sweeper gave up on and a person has to
+   * look at. The retry below is idempotent and is how a human re-arms one.
+   */
+  listAdminPayouts(status?: string): Promise<AdminPayout[]>
+  retryAdminPayout(payoutId: string): Promise<AdminPayout>
+  /**
+   * Webhook deliveries across every tenant. The dispatch job re-arms its own
+   * failures; this is for the ones it has exhausted.
+   */
+  listAdminWebhookDeliveries(status?: string): Promise<AdminWebhookDelivery[]>
+  retryAdminWebhookDelivery(deliveryId: string): Promise<AdminWebhookDelivery>
 }
 
 /*

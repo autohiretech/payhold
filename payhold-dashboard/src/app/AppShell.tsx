@@ -113,6 +113,7 @@ function Sidebar({
 
         <Divider label="PayHold staff" />
         <NavItem to="/admin" label="Master admin" icon={IconAdmin} />
+        <NavItem to="/cron" label="Cron" icon={IconCron} />
       </nav>
 
       <AccountBlock />
@@ -346,6 +347,16 @@ function IconAdmin() {
     <>
       <path d="M12 3 4 6.2V11c0 4.6 3.2 8.7 8 10 4.8-1.3 8-5.4 8-10V6.2Z" />
       <path d="m9.2 12 2 2 3.6-3.8" />
+    </>,
+  )
+}
+
+/** A clock with its hands on a scheduled pass. */
+function IconCron() {
+  return icon(
+    <>
+      <circle cx="12" cy="12" r="8.5" />
+      <path d="M12 7.5V12l3 1.8" />
     </>,
   )
 }

@@ -49,6 +49,8 @@ import {
   type AiDecision,
   type AiSuggestion,
   type AiUsage,
+  type AdminPayout,
+  type AdminWebhookDelivery,
   type ApiKey,
   type AuditLogEntry,
   type Balance,
@@ -59,6 +61,8 @@ import {
   type CreateDealInput,
   type CreateDealResult,
   type CreateSellerInput,
+  type CronJobName,
+  type CronRun,
   type Deal,
   type DealAmounts,
   type DealOutcome,
@@ -1144,6 +1148,50 @@ export class HttpClient implements PayHoldClient {
         `/admin/tenants/${tenantId}/unfreeze`,
       )
       return tenant
+    },
+
+    listCronRuns: async (filter?: {
+      job?: CronJobName
+      status?: CronRun['status']
+    }): Promise<CronRun[]> => {
+      const params = new URLSearchParams()
+      if (filter?.job) params.set('job', filter.job)
+      if (filter?.status) params.set('status', filter.status)
+      const qs = params.toString()
+      const { runs } = await this.#call<{ runs: CronRun[] }>(
+        `/admin/cron-runs${qs ? `?${qs}` : ''}`,
+      )
+      return runs
+    },
+
+    listAdminPayouts: async (status?: string): Promise<AdminPayout[]> => {
+      const { payouts } = await this.#call<{ payouts: AdminPayout[] }>(
+        status ? `/admin/payouts?status=${encodeURIComponent(status)}` : '/admin/payouts',
+      )
+      return payouts
+    },
+
+    retryAdminPayout: async (payoutId: string): Promise<AdminPayout> => {
+      const { payout } = await this.#post<{ payout: AdminPayout }>(
+        `/admin/payouts/${payoutId}/retry`,
+      )
+      return payout
+    },
+
+    listAdminWebhookDeliveries: async (status?: string): Promise<AdminWebhookDelivery[]> => {
+      const { deliveries } = await this.#call<{ deliveries: AdminWebhookDelivery[] }>(
+        status
+          ? `/admin/webhook-deliveries?status=${encodeURIComponent(status)}`
+          : '/admin/webhook-deliveries',
+      )
+      return deliveries
+    },
+
+    retryAdminWebhookDelivery: async (deliveryId: string): Promise<AdminWebhookDelivery> => {
+      const { delivery } = await this.#post<{ delivery: AdminWebhookDelivery }>(
+        `/admin/webhook-deliveries/${deliveryId}/retry`,
+      )
+      return delivery
     },
   }
 }

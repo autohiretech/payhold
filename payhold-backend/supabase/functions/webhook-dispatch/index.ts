@@ -17,8 +17,10 @@
  * reject every retry that still carried the timestamp from three hours ago.
  */
 
+import type { SupabaseClient } from 'npm:@supabase/supabase-js@2'
 import { serviceClient } from '../_shared/auth.ts'
 import { requireCronCaller } from '../_shared/cron-auth.ts'
+import { finishCronRun, startCronRun } from '../_shared/cron-runs.ts'
 import { openWebhookSecret, signPayload } from '../_shared/crypto.ts'
 import { handler, json } from '../_shared/http.ts'
 
@@ -82,7 +84,20 @@ Deno.serve(handler(async (req) => {
   await requireCronCaller(req)
 
   const db = serviceClient()
+  const runId = await startCronRun(db, 'webhook-dispatch')
 
+  try {
+    const result = await runPass(db)
+    await finishCronRun(db, runId, 'completed', result)
+    return json(req, result)
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    await finishCronRun(db, runId, 'failed', undefined, message)
+    throw err
+  }
+}))
+
+async function runPass(db: SupabaseClient): Promise<Record<string, number>> {
   // `for update skip locked` inside this function is what lets two overlapping
   // invocations coexist without either sending the same delivery twice.
   const { data: claimed, error } = await db.rpc('claim_webhook_deliveries', {
@@ -140,5 +155,5 @@ Deno.serve(handler(async (req) => {
     else result.failed += 1
   }
 
-  return json(req, result)
-}))
+  return result
+}

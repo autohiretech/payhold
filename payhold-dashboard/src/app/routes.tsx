@@ -19,6 +19,7 @@ import { ApiKeysPage } from '@/screens/ApiKeys'
 import { AuditPage } from '@/screens/Audit'
 import { HelpPage } from '@/screens/Help'
 import { AdminPage } from '@/screens/Admin'
+import { CronPage } from '@/screens/Cron'
 import { CheckoutPage } from '@/screens/public/Checkout'
 import { DealStatusPage } from '@/screens/public/DealStatus'
 
@@ -61,6 +62,7 @@ export const routes: RouteObject[] = [
       // reader has. Public documentation is a different artefact.
       { path: 'help', element: <HelpPage /> },
       { path: 'admin', element: <AdminPage /> },
+      { path: 'cron', element: <CronPage /> },
     ],
   },
   // Getting in. Outside the gate for the obvious reason.
