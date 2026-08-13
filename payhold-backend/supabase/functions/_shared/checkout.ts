@@ -82,6 +82,14 @@ export async function startCharge(
   deal: Deal,
   choice: {
     method: PaymentMethod
+    /**
+     * The rail the buyer picked, when the checkout offered more than one for
+     * the same method (e.g. Card on both Stripe and Flutterwave). When given it
+     * must be one of the rails `availableMethods` returned for this method, or
+     * the charge is refused — a buyer cannot name a rail that is not actually
+     * on in their market.
+     */
+    provider?: Provider
     network?: string
     /**
      * The buyer's wallet number, when they typed one into the client's page.
@@ -103,9 +111,20 @@ export async function startCharge(
   },
 ): Promise<StartedCharge> {
   const available = await availableMethods(db, tenantId, deal)
-  const chosen = available.find((m) => m.method === choice.method)
+  const chosen = available.find(
+    (m) =>
+      m.method === choice.method &&
+      (!choice.provider || m.provider === choice.provider),
+  )
 
   if (!chosen) {
+    if (choice.provider) {
+      throw new PayHoldError(
+        'policy_violation',
+        `${choice.provider} is not available for ${choice.method} in ` +
+          `${countryInfo(deal.buyer_country).name}`,
+      )
+    }
     throw new PayHoldError(
       'policy_violation',
       `${choice.method} is not available for ${deal.presentment_currency} in ` +

@@ -339,6 +339,13 @@ async function payPublic(
 ): Promise<Response> {
   const body = await readJson<{
     method: PaymentMethod
+    /**
+     * The rail the buyer chose when the checkout offered more than one for the
+     * same method. Forwarded to `startCharge`, which refuses it unless that
+     * rail is genuinely on for this market — a buyer cannot name a rail that
+     * is switched off.
+     */
+    provider?: string
     network?: string
     /**
      * The buyer's wallet number. Passed to the rail and stored by nobody — see
@@ -359,6 +366,7 @@ async function payPublic(
 
   const charge = await startCharge(db, deal.tenant_id, deal, {
     method: body.method,
+    provider: body.provider as Provider | undefined,
     network: body.network,
     phone: typeof body.phone === 'string' ? body.phone.trim() : undefined,
     card: body.card,
