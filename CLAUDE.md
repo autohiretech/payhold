@@ -332,6 +332,7 @@ Auth: `X-Api-Key`, hashed at rest, rate-limited per key.
 | `GET /v1/checkout/public/:token` | What the buyer sees. **No credential** — the token is the credential |
 | `POST /v1/checkout/public/:token/pay` | The buyer chooses a method and is handed to the provider |
 | `POST /v1/deals` | Create deal → returns deal id + payment link |
+| `GET /v1/deals` | This tenant's deals. `?buyer_ref=` finds the ones where that opaque handle bought — see below |
 | `GET /v1/deals/:id` | Full status, timestamps, amounts |
 | `GET /v1/deals/:id/amounts` | §7's breakdown — buyer-paid, fees, tax, reserve, refunded, receivable, seller-net. Derived, never stored |
 | `GET /v1/deals/:id/refunds` | The refund records. A refund has a lifetime, not a moment |
@@ -512,6 +513,33 @@ the gate holds a payout and can do nothing else.
 It holds for: unverified identity, missing or stale sanctions screening, an
 unverified payout destination, a destination that moved in the last
 `destination_hold_hours` (§5.1's change protection), or an open dispute.
+
+**A destination is not required to become a seller.** `POST /v1/sellers`
+takes `country`, `payout_provider` and `destination` together or not at
+all — a host is registered the moment a tenant knows who they are, and money
+accrues in `held`/`available` against them from their first deal exactly as
+it does for any other seller. Nothing about accruing money ever depended on a
+destination existing; only the payout does, and `seller_capabilities` has
+answered *"No payout destination has been registered"* for that case since
+Phase 5 — it holds the payout at `needs_verification`, the same status an
+unverified destination produces, and never reaches routing. A destination
+added later, via `POST /v1/sellers/:id/destinations`, goes through the same
+security hold every destination change does — a seller's very first
+destination is not a special case, because a seller who has been quietly
+accruing money is exactly the target an account takeover would want.
+
+**A seller can also be a buyer, and PayHold makes no attempt to know that
+itself.** There is no buyer identity anywhere in this system —
+`deals.buyer_ref` is the client's own opaque handle, kept precisely so there
+is nothing here to join a buyer to (§8's conflict-of-interest rule on the
+Resolution Center depends on that absence). A tenant whose sellers can also
+book as buyers already holds the one fact this needs: tag the deal's
+`buyer_ref` with the seller's own `external_user_id` when they are renting
+rather than hosting, and `GET /v1/deals?buyer_ref=` reads it back. Nothing
+about money changes — the deal is funded, held and released exactly as any
+other, in a wallet that stays entirely separate from that same person's
+seller earnings. PayHold does not net one against the other; a host paying
+for their own booking pays in full, the same as anyone else.
 
 ## Seller wallets, and pulling instead of waiting
 

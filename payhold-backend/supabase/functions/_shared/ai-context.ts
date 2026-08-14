@@ -84,7 +84,7 @@ export interface DisputeCaseFile {
      */
     presentment_amount: Money
   }
-  seller: { name: string; country: string; registered_at: Timestamp } | null
+  seller: { name: string; country: string | null; registered_at: Timestamp } | null
   dispute: {
     id: string
     raised_by: 'buyer' | 'seller'
@@ -150,9 +150,9 @@ export interface RiskCaseFile {
   }
   seller: {
     name: string
-    country: string
-    payout_currency: string
-    masked_destination: string
+    country: string | null
+    payout_currency: string | null
+    masked_destination: string | null
     registered_at: Timestamp
     age_days: number
   } | null

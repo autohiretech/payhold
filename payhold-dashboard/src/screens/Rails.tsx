@@ -128,8 +128,12 @@ export function RailsPage() {
   const homeCurrency = currencies[0] ?? 'RWF'
 
   // The markets that matter to this tenant: everywhere they have a seller,
-  // plus international for card-paying visitors.
-  const markets: Country[] = [...new Set(sellers.data?.map((s) => s.country) ?? [])]
+  // plus international for card-paying visitors. A seller with no destination
+  // yet has no country on file, and contributes no market.
+  const sellerCountries = (sellers.data ?? [])
+    .map((s) => s.country)
+    .filter((c): c is Country => c !== null)
+  const markets: Country[] = [...new Set(sellerCountries)]
 
   return (
     <>

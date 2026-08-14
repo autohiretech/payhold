@@ -300,7 +300,7 @@ function CreateDealForm({ onClose }: { onClose: () => void }) {
               <option value="">Choose a seller…</option>
               {sellers.data?.map((s) => (
                 <option key={s.id} value={s.id}>
-                  {s.name} — {s.masked_destination}
+                  {s.name} — {s.masked_destination ?? 'no payout destination yet'}
                 </option>
               ))}
             </Select>

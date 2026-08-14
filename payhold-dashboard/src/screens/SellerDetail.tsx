@@ -80,6 +80,16 @@ export function SellerDetailPage() {
   const context = useRequestContext()
   const now = new Date()
 
+  // A host can also book as a renter. PayHold mints no buyer identity — a
+  // client tells the two apart by tagging the deal's buyer_ref with the
+  // seller's own external_user_id, so this is the same handle that finds them
+  // again with `?external_user_id=`, read backwards.
+  const externalUserId = sellers.data?.find((s) => s.id === id)?.external_user_id
+  const asBuyer = useDeals(
+    { buyer_ref: externalUserId ?? undefined },
+    { enabled: Boolean(externalUserId) },
+  )
+
   if (sellers.isPending) {
     return (
       <div className="space-y-4">
@@ -124,7 +134,11 @@ export function SellerDetailPage() {
   const lost = theirDisputes.filter((d) => d.status === 'resolved_refunded')
 
   const paidTotal = sumByCurrency(paid.map((p) => [p.amount, p.currency]))
-  const route = payoutRoute(seller.country, seller.payout_currency)
+  // Null until a destination is registered — a seller can exist, and money can
+  // accrue against them, before there is a route to evaluate at all.
+  const route = seller.country && seller.payout_currency
+    ? payoutRoute(seller.country, seller.payout_currency)
+    : null
   const registered = new Date(seller.created_at)
 
   /** How old the seller was when a deal was created — the rule's own measure. */
@@ -147,7 +161,7 @@ export function SellerDetailPage() {
 
       <PageHeader
         title={seller.name}
-        subtitle={`${countryFlag(seller.country)} ${countryName(seller.country)} · registered ${formatDate(seller.created_at)} (${formatRelative(seller.created_at, now)})`}
+        subtitle={`${seller.country ? `${countryFlag(seller.country)} ${countryName(seller.country)} · ` : ''}registered ${formatDate(seller.created_at)} (${formatRelative(seller.created_at, now)})`}
       />
 
       <div className="mb-8 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
@@ -189,19 +203,29 @@ export function SellerDetailPage() {
         />
         <dl className="grid gap-x-8 gap-y-5 px-6 pb-6 sm:grid-cols-2 lg:grid-cols-3">
           <Detail label="Seller id" value={<Mono>{seller.id}</Mono>} />
-          <Detail label="Method" value={PAYOUT_PROVIDER_LABEL[seller.payout_provider]} />
-          <Detail label="Paid in" value={seller.payout_currency} />
-          <Detail
-            label="Paid via"
-            value={
-              route.provider ? (
-                <ProviderChip provider={route.provider} />
-              ) : (
-                <span className="text-xs font-semibold text-danger">No rail</span>
-              )
-            }
-            hint={route.reason}
-          />
+          {seller.payout_provider ? (
+            <>
+              <Detail label="Method" value={PAYOUT_PROVIDER_LABEL[seller.payout_provider]} />
+              <Detail label="Paid in" value={seller.payout_currency} />
+              <Detail
+                label="Paid via"
+                value={
+                  route?.provider ? (
+                    <ProviderChip provider={route.provider} />
+                  ) : (
+                    <span className="text-xs font-semibold text-danger">No rail</span>
+                  )
+                }
+                hint={route?.reason}
+              />
+            </>
+          ) : (
+            <Detail
+              label="Method"
+              value={<span className="text-fg-muted">No payout destination on file yet</span>}
+              hint="Money still accrues against this seller; nothing can be sent until one is added."
+            />
+          )}
           <Detail label="Registered" value={formatDateTime(seller.created_at)} />
           {/* The client's own handle. Shown because it is how somebody looking
               at a support ticket from their own system finds this page. */}
@@ -210,6 +234,32 @@ export function SellerDetailPage() {
               label="Your id for them"
               value={<Mono>{seller.external_user_id}</Mono>}
               hint="This seller's id in your own system. PayHold does not interpret it."
+            />
+          )}
+          {/* PayHold mints no buyer identity — buyer_ref is your own opaque
+              handle. If a booking's buyer_ref matches this seller's own
+              external_user_id, that is you telling us they booked as a
+              renter too, and this is where that link reads back. */}
+          {externalUserId && !!asBuyer.data?.length && (
+            <Detail
+              label="Also booked as a buyer"
+              value={
+                <span className="space-x-2">
+                  <span>
+                    {asBuyer.data.length} deal{asBuyer.data.length === 1 ? '' : 's'}
+                  </span>
+                  {asBuyer.data.slice(0, 3).map((d) => (
+                    <Link
+                      key={d.id}
+                      className="text-brand hover:underline"
+                      to={`/deals/${d.id}`}
+                    >
+                      <Mono>{d.id.slice(0, 8)}</Mono>
+                    </Link>
+                  ))}
+                </span>
+              }
+              hint="Deals where their own external_user_id was the buyer_ref — your own link between the two roles, not one PayHold makes."
             />
           )}
         </dl>
@@ -642,7 +692,7 @@ function Destinations({ sellerId, now }: { sellerId: string; now: Date }) {
     return (
       <EmptyState
         title="No destination registered"
-        body="A seller without one is unpayable for a reason nobody chose."
+        body="Money still accrues for this seller. Nothing can be paid out until they add where."
       />
     )
   }

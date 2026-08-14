@@ -1371,6 +1371,65 @@ A recreated function is granted to PUBLIC by default — the same trap `refund_d
 and `resolve_dispute` walked into in V2. `tests/seller-wallet.test.ts` asserts
 `payhold_ai` cannot execute it, and pins `count(*) from pg_proc` at 1.
 
+## A seller without a destination — migration `20260814000001`
+
+`POST /v1/sellers` required `country`, `payout_provider` and `destination` in
+the same request since the table existed. Nothing about accruing money ever
+needed one: `held` and `available` are ledger sums keyed on `deal_id` and
+`seller_id`, and `seller_capabilities` has answered *"No payout destination
+has been registered"* since `20260807000007` — it was dead code, reachable
+only by a seller that could not exist, because `sellers.country`,
+`payout_currency`, `payout_provider`, `beneficiary_token` and
+`masked_destination` were all `not null` and `seed_primary_destination`
+always ran off them.
+
+This migration drops those five `not null` constraints and teaches
+`seed_primary_destination` to skip the insert when `beneficiary_token is
+null`, which is the only thing standing between "money can accrue before a
+destination exists" being true in the schema and true in practice. Nothing
+downstream needed to change: `seller_capabilities`'s missing-destination
+branch, `screen_payout`'s eligibility gate reading it into
+`needs_verification`, and `route_payout`'s `dest.id is null` branch were all
+already written for this seller — the gate holds before `dispatchPayout` ever
+reaches routing, so the null-country edge case in `route_evaluation` is never
+exercised on the normal path. `tests/seller-onboarding.test.ts`'s
+`route_payout` test calls it directly anyway, because it is reachable in
+principle and a silent "eligible" for lack of a country to refuse would be
+the wrong kind of quiet.
+
+**One real gap turned up finding this: `sync_primary_destination` never
+copied `country`.** It has copied `beneficiary_token`, `masked_destination`,
+`payout_currency` and `payout_provider` onto `sellers` since `20260807000007`,
+documented as keeping "the primary's copy" in step — `country` was simply
+missing from the `update`. That was invisible while `sellers.country` was
+`not null` and set once at registration: a seller's country moving mid-life
+was already a latent disagreement between the two tables, just never one that
+reached `null`. A seller registered with no destination and given one later
+would have stayed on the "no country" path permanently otherwise — every
+reader that falls back to `sellers.country` (`deals/index.ts`'s
+`buyer_country` default, the AI case files, the dashboard's seller page)
+would have kept asking a column this trigger was never going to fill. This
+migration adds `country = new.country` to the same `update`, and reissues the
+revoke a recreated function always needs.
+
+**A destination added after registration is not exempt from the security
+hold.** `add_seller_destination` stamps one on every insert regardless of
+whether a primary already existed to replace, and this migration does not
+special-case "this is the seller's first ever destination" to skip it. A
+seller who has been quietly accruing money before anyone knew how to pay them
+is exactly the target an account takeover would want, not less of one for
+having no prior destination to compare against — so their first destination
+waits out `destination_hold_hours` the same as anybody's fifth.
+
+`addDestination` in `functions/sellers/index.ts` refuses one call shape this
+opens up: a destination with no `country` in the request and no
+`sellers.country` to default to. That is the seller's very first destination,
+and somebody has to say which market they are in exactly once — a clear
+`policy_violation` rather than `countryInfo(undefined)`'s generic "unknown
+country code". `POST /v1/deals` carries the identical guard on
+`buyer_country`, for the same reason: `seller.country` no longer defaults to
+something.
+
 ## The auto-release timer
 
 `auto-release` has no release path of its own. It writes the missing

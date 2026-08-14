@@ -215,6 +215,195 @@ describe('§15 phase 5 — unverified sellers cannot receive payouts', () => {
   })
 })
 
+/**
+ * A seller can exist before a payout destination does.
+ *
+ * `POST /v1/sellers` used to require one in the same request, and the schema
+ * enforced it: `country`, `payout_provider`, `beneficiary_token` and
+ * `masked_destination` were all `not null`. Nothing about accruing money ever
+ * read a destination — `held` and `available` are ledger sums keyed on
+ * `deal_id` and `seller_id` — so the only thing that was ever actually
+ * blocked was the payout, and `seller_capabilities` has answered "No payout
+ * destination has been registered" since `20260807000007`. It was dead code:
+ * `seed_primary_destination` always ran, because the columns it read from
+ * were never null. `20260814000001` makes both halves reachable.
+ */
+describe('a seller can exist before a payout destination does', () => {
+  /** A seller as `POST /v1/sellers` creates one with no destination at all. */
+  async function sellerWithNoDestination(name = 'No destination yet'): Promise<string> {
+    const { rows: [s] } = await h.db.query<{ id: string }>(
+      `insert into sellers (tenant_id, name, created_at)
+       values ($1, $2, now() - interval '400 days')
+       returning id`,
+      [tenant, name],
+    )
+    return s.id
+  }
+
+  test('the row is created with every destination column null', async () => {
+    const seller = await sellerWithNoDestination()
+    const { rows: [s] } = await h.db.query<{
+      country: string | null
+      token: string | null
+      masked: string | null
+    }>(
+      `select country, beneficiary_token as token, masked_destination as masked
+         from sellers where id = $1`,
+      [seller],
+    )
+    expect(s.country).toBeNull()
+    expect(s.token).toBeNull()
+    expect(s.masked).toBeNull()
+  })
+
+  test('the seed trigger writes no destination row for one', async () => {
+    // The trap this migration exists to avoid: firing the trigger anyway would
+    // write a `seller_destinations` row full of nulls, which `seller_capabilities`
+    // would find and read as a real (if unverified) destination rather than as
+    // none at all.
+    const seller = await sellerWithNoDestination()
+    const { rows } = await h.db.query<{ n: number }>(
+      `select count(*)::int as n from seller_destinations where seller_id = $1`,
+      [seller],
+    )
+    expect(rows[0].n).toBe(0)
+  })
+
+  test('capabilities name the missing destination as its own reason', async () => {
+    const seller = await sellerWithNoDestination()
+    const c = await capabilities(seller)
+    expect(c.can).toBe(false)
+    expect(c.reasons.join(' ')).toMatch(/No payout destination has been registered/)
+  })
+
+  test('money still accrues: a deal can be created and held', async () => {
+    // `deals.seller_id` only asks for a row in `sellers`, and the ledger has no
+    // idea a destination exists. Held money never depended on one.
+    const seller = await sellerWithNoDestination()
+    const { rows: [d] } = await h.db.query<{ id: string }>(
+      `insert into deals (tenant_id, buyer_ref, seller_id, description, amount,
+                          currency, presentment_currency, presentment_amount,
+                          buyer_country, provider, status)
+       values ($1, 'buyer_1', $2, 'A rental', 100000, 'RWF', 'RWF', 100000, 'RW',
+               'fake', 'funded_held')
+       returning id`,
+      [tenant, seller],
+    )
+    await h.db.query(
+      `insert into ledger (tenant_id, deal_id, entry_type, amount, currency, provider)
+       values ($1, $2, 'hold', 100000, 'RWF', 'fake')`,
+      [tenant, d.id],
+    )
+
+    const { rows: [bal] } = await h.db.query<{ held: string }>(
+      `select held::text as held from rail_balances($1)
+        where provider = 'fake' and currency = 'RWF'`,
+      [tenant],
+    )
+    expect(Number(bal.held)).toBe(100000)
+  })
+
+  test('a payout is held at the eligibility gate, not blocked as a routing failure', async () => {
+    // Money accrues and a payout can still be scheduled; what stops is the
+    // transfer, at the same gate an unverified destination stops at — not a
+    // routing failure, and not a crash from evaluating a null country.
+    const seller = await sellerWithNoDestination()
+    const payout = await payoutFor(seller)
+    expect(await screen(payout)).toBe(true)
+
+    const { rows: [p] } = await h.db.query<{ status: string }>(
+      `select status::text from payouts where id = $1`, [payout],
+    )
+    expect(p.status).toBe('needs_verification')
+
+    const { rows: [sig] } = await h.db.query<{ explanation: string }>(
+      `select explanation from risk_signals
+        where seller_id = $1 and signal = 'not_eligible'`,
+      [seller],
+    )
+    expect(sig.explanation).toMatch(/No payout destination has been registered/)
+  })
+
+  test('route_payout blocks cleanly rather than evaluating a null country', async () => {
+    // Not reachable from the cron — `dispatchPayout` never calls `route_payout`
+    // once `screen_payout` holds the payout — but `route_payout` is callable on
+    // its own, and a destination-less seller has no country for
+    // `route_evaluation` to judge routes against. This is the guard against
+    // that silently reading as "eligible" for lack of a country to refuse.
+    const seller = await sellerWithNoDestination()
+    await h.db.query(`select verify_seller($1, 'compliance@payhold')`, [seller])
+    await h.db.query(
+      `update sellers set sanctions_checked_at = now() where id = $1`, [seller],
+    )
+    const payout = await payoutFor(seller)
+
+    const { rows: [decision] } = await h.db.query<{
+      reason_code: string
+      route_id: string | null
+    }>(`select reason_code, route_id from route_payout($1)`, [payout]);
+
+    expect(decision.reason_code).toBe('no_eligible_verified_destination')
+    expect(decision.route_id).toBeNull()
+
+    const { rows: [p] } = await h.db.query<{ status: string; reason: string | null }>(
+      `select status::text, failure_reason as reason from payouts where id = $1`,
+      [payout],
+    )
+    expect(p.status).toBe('blocked')
+    expect(p.reason).toMatch(/No verified payout destination has been registered/)
+  })
+
+  test('their first destination can be added after the fact, and becomes primary', async () => {
+    const seller = await sellerWithNoDestination('Adds one later')
+    const { rows: [added] } = await h.db.query<{ id: string; is_primary: boolean }>(
+      `select id, is_primary from add_seller_destination(
+         $1, $2, 'RW', 'RWF', 'flutterwave_momo', 'tok_first', 'MTN •••• 5150',
+         null, 'primary', 'api')`,
+      [seller, tenant],
+    )
+    expect(added.is_primary).toBe(true)
+
+    // The seller row now follows it, through the same sync trigger every other
+    // destination change goes through.
+    const { rows: [s] } = await h.db.query<{ token: string; country: string }>(
+      `select beneficiary_token as token, country from sellers where id = $1`,
+      [seller],
+    )
+    expect(s.token).toBe('tok_first')
+    expect(s.country).toBe('RW')
+  })
+
+  test('verified and given a destination, the payout clears the gate like any other', async () => {
+    const seller = await sellerWithNoDestination('Full circle')
+    await h.db.query(`select verify_seller($1, 'compliance@payhold')`, [seller])
+    const { rows: [dest] } = await h.db.query<{ id: string }>(
+      `select id from add_seller_destination($1, $2, 'RW', 'RWF', 'flutterwave_momo',
+                                             'tok_circle', 'MTN •••• 1200', null,
+                                             'primary', 'api')`,
+      [seller, tenant],
+    )
+    // `verify_seller` stamps the primary as verified only if it existed at the
+    // time it ran; called after adding one, it has to be asked again.
+    await h.db.query(`select verify_seller($1, 'compliance@payhold')`, [seller])
+
+    // Their very first destination still serves the standard security hold —
+    // `add_seller_destination` never special-cases "first ever", because a
+    // seller who has been quietly accruing money is exactly the target an
+    // account takeover would want, not less of one for having no prior
+    // destination to compare against.
+    let c = await capabilities(seller)
+    expect(c.can).toBe(false)
+    expect(c.reasons.join(' ')).toMatch(/security hold/)
+
+    await h.db.query(`select end_destination_hold($1, $2, 'compliance@payhold')`,
+      [dest.id, tenant])
+
+    c = await capabilities(seller)
+    expect(c.can).toBe(true)
+    expect(await screen(await payoutFor(seller))).toBe(false)
+  })
+})
+
 describe('seller capabilities — §10.1', () => {
   test('a fresh seller is told everything that is missing, not just the first', async () => {
     const seller = await newSeller('Missing everything')

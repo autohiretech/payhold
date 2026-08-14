@@ -256,6 +256,7 @@ export class HttpClient implements PayHoldClient {
     const params = new URLSearchParams()
     if (filter?.status?.length) params.set('status', filter.status.join(','))
     if (filter?.seller_id) params.set('seller_id', filter.seller_id)
+    if (filter?.buyer_ref) params.set('buyer_ref', filter.buyer_ref)
     if (filter?.limit) params.set('limit', String(filter.limit))
 
     const query = params.toString()

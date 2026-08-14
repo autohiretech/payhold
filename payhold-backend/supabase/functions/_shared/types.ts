@@ -347,12 +347,18 @@ export interface Seller {
   id: string
   tenant_id: string
   name: string
-  country: Country
-  payout_currency: Currency
-  payout_provider: PayoutProvider
+  /**
+   * Null until a destination is registered. A seller with no destination is
+   * still a payable party in waiting: money accrues in `held`/`available`
+   * against them from their first deal, and the eligibility gate reports
+   * `'No payout destination has been registered'` rather than paying out.
+   */
+  country: Country | null
+  payout_currency: Currency | null
+  payout_provider: PayoutProvider | null
   /** Provider-side token. PayHold never stores the real destination. */
-  beneficiary_token: string
-  masked_destination: string
+  beneficiary_token: string | null
+  masked_destination: string | null
   /**
    * §12's onboarding state. A seller starts `pending` and cannot be paid until
    * somebody attests that the identity check, the sanctions screen and the
@@ -668,11 +674,17 @@ export interface CreateDealResult {
 
 export interface CreateSellerInput {
   name: string
-  country: Country
+  /**
+   * All three of `country`, `payout_provider` and `destination` are optional
+   * together — a seller can be registered with no payout destination at all,
+   * to be added later with `POST /v1/sellers/:id/destinations` — but sending
+   * one without the others is refused rather than silently dropped.
+   */
+  country?: Country
   payout_currency?: Currency
-  payout_provider: PayoutProvider
+  payout_provider?: PayoutProvider
   /** Raw destination — tokenized immediately, never stored. */
-  destination: string
+  destination?: string
   /**
    * §11's external user id: the client's own handle for this person, so their
    * system can find this seller again. Unique per tenant where supplied, which

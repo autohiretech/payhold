@@ -199,7 +199,12 @@ export function SellersPage() {
             </thead>
             <tbody>
               {sellers.data.map((s) => {
-                const route = payoutRoute(s.country, s.payout_currency)
+                // Null until a destination is registered — a seller can exist,
+                // and money can accrue against them, before there is a route
+                // to evaluate at all.
+                const route = s.country && s.payout_currency
+                  ? payoutRoute(s.country, s.payout_currency)
+                  : null
                 return (
                   <tr key={s.id} className="hover:bg-surface-2">
                     <Td className="font-medium">
@@ -210,30 +215,38 @@ export function SellersPage() {
                     <Td>
                       <Badge meta={KYC_STATUS_META[s.kyc_status]} />
                     </Td>
-                    <Td className="text-fg-muted">
-                      {countryFlag(s.country)} {countryName(s.country)}
-                    </Td>
-                    <Td className="text-fg-muted">
-                      {PAYOUT_PROVIDER_LABEL[s.payout_provider]}
-                    </Td>
-                    <Td>
-                      <Mono>{s.masked_destination}</Mono>
-                    </Td>
-                    <Td className="tabular text-fg-muted">{s.payout_currency}</Td>
-                    <Td>
-                      {route.provider ? (
-                        <span title={route.reason}>
-                          <ProviderChip provider={route.provider} />
-                        </span>
-                      ) : (
-                        <span
-                          className="text-xs font-semibold text-danger"
-                          title={route.reason}
-                        >
-                          No rail
-                        </span>
-                      )}
-                    </Td>
+                    {s.country ? (
+                      <>
+                        <Td className="text-fg-muted">
+                          {countryFlag(s.country)} {countryName(s.country)}
+                        </Td>
+                        <Td className="text-fg-muted">
+                          {s.payout_provider ? PAYOUT_PROVIDER_LABEL[s.payout_provider] : '—'}
+                        </Td>
+                        <Td>
+                          <Mono>{s.masked_destination}</Mono>
+                        </Td>
+                        <Td className="tabular text-fg-muted">{s.payout_currency}</Td>
+                        <Td>
+                          {route?.provider ? (
+                            <span title={route.reason}>
+                              <ProviderChip provider={route.provider} />
+                            </span>
+                          ) : (
+                            <span
+                              className="text-xs font-semibold text-danger"
+                              title={route?.reason}
+                            >
+                              No rail
+                            </span>
+                          )}
+                        </Td>
+                      </>
+                    ) : (
+                      <Td className="text-fg-muted" colSpan={4}>
+                        No payout destination on file yet
+                      </Td>
+                    )}
                     <Td align="right" className="text-fg-muted">
                       {formatDate(s.created_at)}
                     </Td>
@@ -252,6 +265,11 @@ function AddSellerForm({ onClose }: { onClose: () => void }) {
   const [name, setName] = useState('')
   const [country, setCountry] = useState<Country>('RW')
   const [destination, setDestination] = useState('')
+  // A destination is optional at registration — a seller can exist, and money
+  // can accrue against them, before anyone knows how to pay them. Checked by
+  // default because most registrations here know both at once; unchecking it
+  // is for onboarding someone before their payout details are collected.
+  const [hasDestination, setHasDestination] = useState(true)
   // The client's own id for this person. Optional here because somebody
   // registering by hand has nothing to put in it; a server integration should
   // always send one, or it cannot find this seller again.
@@ -273,6 +291,12 @@ function AddSellerForm({ onClose }: { onClose: () => void }) {
   const route = payoutRoute(country, wanted)
 
   const create = useMoneyAction(() => {
+    if (!hasDestination) {
+      return api.createSeller({
+        name,
+        external_user_id: externalUserId.trim() || undefined,
+      })
+    }
     if (!effective) {
       throw new Error(
         `PayHold cannot send money to ${countryName(country)} yet — a seller there cannot be paid.`,
@@ -308,70 +332,74 @@ function AddSellerForm({ onClose }: { onClose: () => void }) {
             />
           </Field>
 
-          <Field label="Market">
-            <Select
-              value={country}
-              onChange={(e) => {
-                const next = e.target.value as Country
-                setCountry(next)
-                setPayoutCurrency(defaultCurrencyFor(next))
-              }}
-            >
-              {countriesByRegion().map((group) => (
-                <optgroup key={group.region} label={group.region}>
-                  {group.countries.map((info) => (
-                    <option key={info.code} value={info.code}>
-                      {countryFlag(info.code)}  {info.name}
+          {hasDestination && (
+            <>
+              <Field label="Market">
+                <Select
+                  value={country}
+                  onChange={(e) => {
+                    const next = e.target.value as Country
+                    setCountry(next)
+                    setPayoutCurrency(defaultCurrencyFor(next))
+                  }}
+                >
+                  {countriesByRegion().map((group) => (
+                    <optgroup key={group.region} label={group.region}>
+                      {group.countries.map((info) => (
+                        <option key={info.code} value={info.code}>
+                          {countryFlag(info.code)}  {info.name}
+                        </option>
+                      ))}
+                    </optgroup>
+                  ))}
+                </Select>
+              </Field>
+
+              <Field label="Wants to be paid in">
+                <Select
+                  value={wanted}
+                  onChange={(e) => setPayoutCurrency(e.target.value as Currency)}
+                >
+                  {currencyChoices.map((c) => (
+                    <option key={c} value={c}>
+                      {c}
+                      {c === local ? ' (local)' : ''}
                     </option>
                   ))}
-                </optgroup>
-              ))}
-            </Select>
-          </Field>
+                </Select>
+              </Field>
 
-          <Field label="Wants to be paid in">
-            <Select
-              value={wanted}
-              onChange={(e) => setPayoutCurrency(e.target.value as Currency)}
-            >
-              {currencyChoices.map((c) => (
-                <option key={c} value={c}>
-                  {c}
-                  {c === local ? ' (local)' : ''}
-                </option>
-              ))}
-            </Select>
-          </Field>
+              <Field label="Payout method">
+                <Select
+                  value={effective ?? ''}
+                  disabled={available.length === 0}
+                  onChange={(e) => setProvider(e.target.value as PayoutProvider)}
+                >
+                  {available.length === 0 ? (
+                    <option value="">No rail available</option>
+                  ) : (
+                    available.map((p) => (
+                      <option key={p} value={p}>
+                        {PAYOUT_PROVIDER_LABEL[p]}
+                      </option>
+                    ))
+                  )}
+                </Select>
+              </Field>
 
-          <Field label="Payout method">
-            <Select
-              value={effective ?? ''}
-              disabled={available.length === 0}
-              onChange={(e) => setProvider(e.target.value as PayoutProvider)}
-            >
-              {available.length === 0 ? (
-                <option value="">No rail available</option>
-              ) : (
-                available.map((p) => (
-                  <option key={p} value={p}>
-                    {PAYOUT_PROVIDER_LABEL[p]}
-                  </option>
-                ))
-              )}
-            </Select>
-          </Field>
-
-          <Field
-            label="Destination"
-            hint="Tokenized immediately. Only the last four digits are kept."
-          >
-            <Input
-              required
-              value={destination}
-              onChange={(e) => setDestination(e.target.value)}
-              placeholder="0788 123 456"
-            />
-          </Field>
+              <Field
+                label="Destination"
+                hint="Tokenized immediately. Only the last four digits are kept."
+              >
+                <Input
+                  required
+                  value={destination}
+                  onChange={(e) => setDestination(e.target.value)}
+                  placeholder="0788 123 456"
+                />
+              </Field>
+            </>
+          )}
 
           <Field
             label="Your id for them"
@@ -385,26 +413,39 @@ function AddSellerForm({ onClose }: { onClose: () => void }) {
           </Field>
         </div>
 
+        <label className="flex items-center gap-2 text-sm text-fg-muted">
+          <input
+            type="checkbox"
+            checked={!hasDestination}
+            onChange={(e) => setHasDestination(!e.target.checked)}
+          />
+          I don't have their payout details yet — register them anyway. Money
+          will still accrue; nothing can be paid out until a destination is
+          added.
+        </label>
+
         {/* The resulting route, stated before you save rather than discovered
             when the first payout is due. */}
-        <div
-          className={cx(
-            'rounded-xl px-4 py-3 text-sm leading-relaxed',
-            route.blocked
-              ? 'bg-danger-soft text-danger'
-              : route.provider === 'stripe'
-                ? 'bg-held-soft text-held'
-                : 'bg-surface-2 text-fg-muted',
-          )}
-        >
-          <span className="flex flex-wrap items-center gap-2">
-            <strong className="font-semibold">
-              {route.blocked ? 'Cannot be paid' : 'Will be paid via'}
-            </strong>
-            {route.provider && <ProviderChip provider={route.provider} />}
-          </span>
-          <span className="mt-1.5 block">{route.reason}</span>
-        </div>
+        {hasDestination && (
+          <div
+            className={cx(
+              'rounded-xl px-4 py-3 text-sm leading-relaxed',
+              route.blocked
+                ? 'bg-danger-soft text-danger'
+                : route.provider === 'stripe'
+                  ? 'bg-held-soft text-held'
+                  : 'bg-surface-2 text-fg-muted',
+            )}
+          >
+            <span className="flex flex-wrap items-center gap-2">
+              <strong className="font-semibold">
+                {route.blocked ? 'Cannot be paid' : 'Will be paid via'}
+              </strong>
+              {route.provider && <ProviderChip provider={route.provider} />}
+            </span>
+            <span className="mt-1.5 block">{route.reason}</span>
+          </div>
+        )}
 
         {create.isError && <ErrorNote message={create.error.message} />}
 
@@ -412,7 +453,7 @@ function AddSellerForm({ onClose }: { onClose: () => void }) {
           <Button
             type="submit"
             variant="primary"
-            disabled={create.isPending || available.length === 0}
+            disabled={create.isPending || (hasDestination && available.length === 0)}
           >
             {create.isPending ? 'Registering…' : 'Register seller'}
           </Button>

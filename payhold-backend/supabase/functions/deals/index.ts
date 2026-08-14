@@ -2,7 +2,10 @@
  * Deals — the public API's centre of gravity.
  *
  *   POST   /deals                    create → returns the deal and a payment link
- *   GET    /deals                    list, this tenant only
+ *   GET    /deals                    list, this tenant only. `?buyer_ref=` finds
+ *                                     the deals where that opaque handle bought —
+ *                                     how a client tells that one of its own
+ *                                     sellers also booked as a buyer
  *   GET    /deals/:id                full status, timestamps, amounts
  *   POST   /deals/:id/pay            start the charge on the buyer's chosen rail
  *   POST   /deals/:id/confirm        side=buyer|seller; both → atomic release
@@ -169,7 +172,17 @@ async function create(
   // Most deals are local, so the buyer defaults to the seller's market. They
   // pick their own country at checkout if that is wrong, and every market can
   // pay by card.
-  const buyerCountry = body.buyer_country ?? seller.country
+  //
+  // A seller registered with no payout destination yet also has no country on
+  // file — `POST /v1/sellers` no longer requires one — so there is nothing to
+  // default from, and the caller has to say where the buyer is.
+  if (!body.buyer_country && !seller.country) {
+    throw new PayHoldError(
+      'policy_violation',
+      'buyer_country is required: this seller has no country on file yet',
+    )
+  }
+  const buyerCountry = body.buyer_country ?? seller.country!
   countryInfo(buyerCountry)
 
   // The seller is owed `currency`. If the buyer's market cannot be charged it —
@@ -647,6 +660,13 @@ Deno.serve(handler(async (req) => {
 
   if (req.method === 'GET' && !id) {
     const status = url.searchParams.get('status')
+    // `buyer_ref` is the client's own opaque identifier — PayHold mints no
+    // buyer identity and stores no buyer PII. A client whose sellers can also
+    // book as a buyer already has everything it needs to tell the two apart:
+    // tag the deal with buyer_ref = the seller's own external_user_id, and
+    // pull those deals back with this filter. Nothing here joins a seller to a
+    // buyer; that link is made by the client, once, in the value it sends.
+    const buyerRef = url.searchParams.get('buyer_ref')
     let query = db
       .from('deals')
       .select(DEAL_COLUMNS)
@@ -655,6 +675,7 @@ Deno.serve(handler(async (req) => {
       .limit(Math.min(Number(url.searchParams.get('limit') ?? 100), 500))
 
     if (status) query = query.in('status', status.split(','))
+    if (buyerRef) query = query.eq('buyer_ref', buyerRef)
 
     const { data } = await query
     return json(req, {

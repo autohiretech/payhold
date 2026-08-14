@@ -51,21 +51,52 @@ async function create(
   caller: Caller,
 ): Promise<Response> {
   const body = await readJson<CreateSellerInput>(req)
-  required(
-    body as unknown as Record<string, unknown>,
-    'name',
-    'country',
-    'payout_provider',
-    'destination',
-  )
+  required(body as unknown as Record<string, unknown>, 'name')
 
-  const info = countryInfo(body.country)
-  const payoutCurrency = body.payout_currency ?? info.currency
+  // A destination is optional at registration — a host becomes a payable
+  // party the moment PayHold knows who they are, and money can accrue in
+  // `held`/`available` against them from their first deal. What is not
+  // optional is doing it by halves: `country` and `payout_provider` name a
+  // rail and a corridor together, and accepting one without the other would
+  // silently drop it, which is worse than refusing.
+  const hasDestination = body.country !== undefined || body.payout_provider !== undefined ||
+    body.destination !== undefined
+  if (hasDestination) {
+    required(
+      body as unknown as Record<string, unknown>,
+      'country',
+      'payout_provider',
+      'destination',
+    )
+  }
 
-  // Refuse a destination we could never send money to.
-  const route = payoutRoute(body.country, payoutCurrency)
-  if (route.blocked) {
-    throw new PayHoldError('policy_violation', route.reason)
+  let route: ReturnType<typeof payoutRoute> | null = null
+  let payoutCurrency: string | null = null
+  let token: { beneficiary_token: string; masked_destination: string } | null = null
+
+  if (hasDestination) {
+    // `required` above already threw if any of these three were missing.
+    const country = body.country!
+    const destination = body.destination!
+
+    const info = countryInfo(country)
+    payoutCurrency = body.payout_currency ?? info.currency
+
+    // Refuse a destination we could never send money to.
+    route = payoutRoute(country, payoutCurrency)
+    if (route.blocked) {
+      throw new PayHoldError('policy_violation', route.reason)
+    }
+
+    // Tokenize on the rail that will actually carry the payout, not on
+    // whichever rail happens to be connected: a Rwandan seller is paid by
+    // Flutterwave even when the buyer's card was charged by Stripe.
+    const { provider } = await loadProvider(db, caller.tenant_id, route.provider!)
+    token = await provider.tokenize({
+      destination,
+      currency: payoutCurrency,
+      country,
+    })
   }
 
   // §11's external user id: the client's own handle for this person. Checked
@@ -95,26 +126,16 @@ async function create(
     }
   }
 
-  // Tokenize on the rail that will actually carry the payout, not on whichever
-  // rail happens to be connected: a Rwandan seller is paid by Flutterwave even
-  // when the buyer's card was charged by Stripe.
-  const { provider } = await loadProvider(db, caller.tenant_id, route.provider!)
-  const token = await provider.tokenize({
-    destination: body.destination,
-    currency: payoutCurrency,
-    country: body.country,
-  })
-
   const { data, error } = await db
     .from('sellers')
     .insert({
       tenant_id: caller.tenant_id,
       name: body.name,
-      country: body.country,
+      country: hasDestination ? body.country : null,
       payout_currency: payoutCurrency,
-      payout_provider: body.payout_provider,
-      beneficiary_token: token.beneficiary_token,
-      masked_destination: token.masked_destination,
+      payout_provider: hasDestination ? body.payout_provider : null,
+      beneficiary_token: token?.beneficiary_token ?? null,
+      masked_destination: token?.masked_destination ?? null,
       external_user_id: externalUserId,
     })
     .select(SELLER_COLUMNS)
@@ -446,9 +467,20 @@ async function addDestination(
   // and a client that had to restate it could get it wrong. A stated country
   // brings its own currency with it, because the pair has to agree — a
   // destination in Kenya paid in RWF is a corridor, not a preference.
-  const country = body.country ?? seller.country
+  //
+  // A seller registered with no destination at all has no country to default
+  // to — `POST /v1/sellers` no longer requires one — so this, their first
+  // destination, is the first point anybody has to say which market they are
+  // in.
+  if (!body.country && !seller.country) {
+    throw new PayHoldError(
+      'policy_violation',
+      'This seller has no country on file yet; country is required with their first destination',
+    )
+  }
+  const country = body.country ?? seller.country!
   const payoutCurrency = body.payout_currency ??
-    (body.country ? countryInfo(body.country).currency : seller.payout_currency)
+    (body.country ? countryInfo(body.country).currency : seller.payout_currency!)
 
   const route = payoutRoute(country, payoutCurrency)
   if (route.blocked) throw new PayHoldError('policy_violation', route.reason)

@@ -90,6 +90,12 @@ export interface PayoutRouting {
 export interface DealListFilter {
   status?: DealStatus[]
   seller_id?: string
+  /**
+   * The deals where this opaque handle was the buyer — server-side, unlike
+   * `search`. How a client finds the bookings one of its own sellers made as
+   * a renter: pass the seller's own `external_user_id`.
+   */
+  buyer_ref?: string
   /** Matches deal id, buyer_ref, or description. */
   search?: string
   limit?: number

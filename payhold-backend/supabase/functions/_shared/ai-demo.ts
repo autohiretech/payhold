@@ -158,9 +158,11 @@ export function demoRiskBrief(file: RiskCaseFile): Record<string, unknown> {
   const points = [
     PREAMBLE,
     seller
-      ? `${seller.name}, registered in ${seller.country} ${seller.age_days} day(s) ` +
-        `before this deal, paid out to ${seller.masked_destination} in ` +
-        `${seller.payout_currency}.`
+      ? `${seller.name}, registered ${seller.age_days} day(s) before this deal` +
+        (seller.country ? ` in ${seller.country}` : '') +
+        (seller.masked_destination
+          ? `, paid out to ${seller.masked_destination} in ${seller.payout_currency}.`
+          : ', with no payout destination on file yet.')
       : 'No seller record is attached to this deal.',
     `${file.history.deals_on_this_account} deal(s) on this account, ` +
       `${file.history.completed} completed, ${file.history.prior_disputes} ` +

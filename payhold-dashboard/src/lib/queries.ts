@@ -76,8 +76,12 @@ export const useSellerWallets = (sellerId?: string) =>
     queryFn: () => api.listSellerWallets(sellerId),
   })
 
-export const useDeals = (filter?: DealListFilter) =>
-  useQuery({ queryKey: keys.deals(filter), queryFn: () => api.listDeals(filter) })
+export const useDeals = (filter?: DealListFilter, options?: { enabled?: boolean }) =>
+  useQuery({
+    queryKey: keys.deals(filter),
+    queryFn: () => api.listDeals(filter),
+    enabled: options?.enabled,
+  })
 
 export const useDeal = (id: string) =>
   useQuery({ queryKey: keys.deal(id), queryFn: () => api.getDeal(id) })

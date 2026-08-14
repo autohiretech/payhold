@@ -242,15 +242,20 @@ export interface Seller {
   id: string
   tenant_id: string
   name: string
-  /** Where the seller banks. Decides which rail can actually pay them. */
-  country: Country
+  /**
+   * Null until a destination is registered. A seller can exist — and accrue
+   * `held`/`available` money — before they have one; `seller_capabilities`
+   * reports `'No payout destination has been registered'` in `reasons` until
+   * `addSellerDestination` gives them one.
+   */
+  country: Country | null
   /** What they want to be paid in. Local by default; foreign changes the rail. */
-  payout_currency: Currency
-  payout_provider: PayoutProvider
+  payout_currency: Currency | null
+  payout_provider: PayoutProvider | null
   /** Provider-side token. PayHold never stores the real destination. */
-  beneficiary_token: string
+  beneficiary_token: string | null
   /** Display-safe, e.g. "MTN •••• 4821". */
-  masked_destination: string
+  masked_destination: string | null
   /**
    * §12's onboarding state. A seller starts `pending` and cannot be paid until
    * somebody attests that the identity check, the sanctions screen and the
@@ -1712,12 +1717,18 @@ export interface CreateDealResult {
 
 export interface CreateSellerInput {
   name: string
-  country: Country
+  /**
+   * `country`, `payout_provider` and `destination` are optional together — a
+   * seller can be registered with no payout destination at all, added later
+   * with `addSellerDestination`. Sending one of the three without the others
+   * is refused rather than silently dropped.
+   */
+  country?: Country
   /** Defaults to the market's local currency when omitted. */
   payout_currency?: Currency
-  payout_provider: PayoutProvider
+  payout_provider?: PayoutProvider
   /** Raw destination — tokenized immediately, never stored. */
-  destination: string
+  destination?: string
   /**
    * §11's external user id: the client's own handle for this person, so their
    * system can find this seller again. Unique per tenant where supplied, which
