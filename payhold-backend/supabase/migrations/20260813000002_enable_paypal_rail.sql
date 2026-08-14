@@ -1,5 +1,13 @@
 -- PayPal becomes a rail a buyer can actually reach.
 --
+-- Renamed from `20260810000001` to `20260813000002`: it shared its original
+-- timestamp with `20260810000001_checkout_session_search_path.sql`, which
+-- `supabase migration list` tracks by that leading numeric version — a
+-- duplicate primary key on `supabase_migrations.schema_migrations` once both
+-- existed. `db push` applied this file's content (idempotent — the `update`
+-- below has no effect run twice) and then failed writing its tracking row,
+-- which is what made the collision visible.
+--
 -- It has been `implemented = true, enabled = false` since the adapter landed,
 -- which was correct then: the adapter existed but nothing routed to it, because
 -- `rails.ts` emitted no `wallet` rail at all. `collectionRails` therefore never
