@@ -43,7 +43,6 @@ import {
   type Dispute,
   type DisputeOffer,
   type DisputeOfferKind,
-  type Money,
 } from '@/api'
 import { useAuth } from '@/auth/AuthProvider'
 import { actorId } from '@/auth'
@@ -77,6 +76,7 @@ import {
   formatDateTime,
   formatMoney,
   formatRelative,
+  toMinorUnits,
 } from '@/lib/format'
 import {
   useAiAction,
@@ -474,7 +474,7 @@ function MakeRequest({
 
   const make = useMoneyAction(() =>
     api.makeDisputeOffer(dispute.id, side, kind, {
-      amount: kind === 'partial_refund' ? toMinor(amount) : undefined,
+      amount: kind === 'partial_refund' ? toMinorUnits(Number(amount), deal?.presentment_currency ?? 'USD') : undefined,
       extendTo: kind === 'extension' ? new Date(extendTo).toISOString() : undefined,
       note: note || undefined,
     }),
@@ -496,7 +496,7 @@ function MakeRequest({
   const needsDate = kind === 'extension'
   const ready =
     !!actor &&
-    (!needsAmount || toMinor(amount) > 0) &&
+    (!needsAmount || toMinorUnits(Number(amount), deal?.presentment_currency ?? 'USD') > 0) &&
     (!needsDate || (!!extendTo && Date.parse(extendTo) > now.getTime()))
 
   return (
@@ -613,7 +613,7 @@ function Decide({
       dispute.id,
       choice!,
       note,
-      choice === 'partial_refund' ? toMinor(amount) : undefined,
+      choice === 'partial_refund' ? toMinorUnits(Number(amount), deal?.presentment_currency ?? 'USD') : undefined,
     ),
   )
 
@@ -665,7 +665,7 @@ function Decide({
     !!note &&
     !!actor &&
     !acted &&
-    (!needsAmount || toMinor(amount) > 0)
+    (!needsAmount || toMinorUnits(Number(amount), deal?.presentment_currency ?? 'USD') > 0)
 
   return (
     <div className="space-y-4">
@@ -815,12 +815,3 @@ function Timeline({ disputeId }: { disputeId: string }) {
   )
 }
 
-/**
- * Major units in the form, minor units on the wire — the boundary conversion
- * every form in this dashboard does. Zero-decimal currencies are stored x100
- * like everything else, so they convert identically.
- */
-function toMinor(input: string): Money {
-  const value = Number.parseFloat(input)
-  return Number.isFinite(value) ? Math.round(value * 100) : 0
-}

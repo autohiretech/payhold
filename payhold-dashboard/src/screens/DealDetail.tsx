@@ -12,6 +12,7 @@ import {
   type Money,
   type RefundStatus,
 } from '@/api'
+import { ZERO_DECIMAL_CURRENCIES } from '@/lib/countries'
 import {
   Badge,
   Button,
@@ -36,6 +37,8 @@ import {
   formatDateTime,
   formatMoney,
   formatRelative,
+  toMajorUnits,
+  toMinorUnits,
   type StatusMeta,
   type Tone,
 } from '@/lib/format'
@@ -869,14 +872,17 @@ function Actions({ deal }: { deal: Deal }) {
     api.refundDeal(
       deal.id,
       refundReason,
-      refundAmount ? Math.round(Number(refundAmount) * 100) : undefined,
+      refundAmount ? toMinorUnits(Number(refundAmount), deal.presentment_currency) : undefined,
     ),
   )
   const dispute = useMoneyAction(() =>
     api.openDispute(deal.id, 'buyer', disputeReason),
   )
   const capture = useMoneyAction(() =>
-    api.captureDeposit(deal.id, Math.round(Number(captureAmount) * 100)),
+    // `deposit_amount` is a Deal column — the agreement, in the settlement
+    // currency (`deal.currency`) — not `presentment_currency`, which is
+    // §7's ledger-derived figures. The two can differ.
+    api.captureDeposit(deal.id, toMinorUnits(Number(captureAmount), deal.currency)),
   )
   const releaseDeposit = useMoneyAction(() => api.releaseDeposit(deal.id))
 
@@ -978,8 +984,8 @@ function Actions({ deal }: { deal: Deal }) {
               <Input
                 type="number"
                 min="0"
-                step="0.01"
-                max={refundable / 100}
+                step={ZERO_DECIMAL_CURRENCIES.includes(deal.presentment_currency) ? '1' : '0.01'}
+                max={toMajorUnits(refundable, deal.presentment_currency)}
                 value={refundAmount}
                 onChange={(e) => setRefundAmount(e.target.value)}
                 placeholder="everything"
@@ -1001,7 +1007,7 @@ function Actions({ deal }: { deal: Deal }) {
               Refund{' '}
               {refundAmount
                 ? formatMoney(
-                    Math.round(Number(refundAmount) * 100),
+                    toMinorUnits(Number(refundAmount), deal.presentment_currency),
                     deal.presentment_currency,
                   )
                 : formatMoney(refundable, deal.presentment_currency)}
@@ -1023,7 +1029,8 @@ function Actions({ deal }: { deal: Deal }) {
               <Input
                 type="number"
                 min="0"
-                step="0.01"
+                step={ZERO_DECIMAL_CURRENCIES.includes(deal.currency) ? '1' : '0.01'}
+                max={toMajorUnits(deal.deposit_amount ?? 0, deal.currency)}
                 value={captureAmount}
                 onChange={(e) => setCaptureAmount(e.target.value)}
                 placeholder="0"

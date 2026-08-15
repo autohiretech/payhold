@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { DEAL_STATUSES, type Country, type Currency, type DealStatus } from '@/api'
+import { ZERO_DECIMAL_CURRENCIES } from '@/lib/countries'
 import {
   Badge,
   Button,
@@ -19,7 +20,12 @@ import {
   cx,
 } from '@/components/ui'
 import { MethodChip, ProviderChip } from '@/components/rails'
-import { DEAL_STATUS_META, formatMoney, formatRelative } from '@/lib/format'
+import {
+  DEAL_STATUS_META,
+  formatMoney,
+  formatRelative,
+  toMinorUnits,
+} from '@/lib/format'
 import {
   COUNTRY_LABEL,
   SCHEME_LABEL,
@@ -242,25 +248,27 @@ function CreateDealForm({ onClose }: { onClose: () => void }) {
       seller_id: sellerId,
       buyer_ref: buyerRef,
       description,
-      // The form takes major units; the API is minor units everywhere.
-      amount: Math.round(Number(amount) * 100),
+      // The form takes major units; the API is minor units everywhere. A
+      // zero-decimal currency (RWF, UGX, the CFA francs) has no minor unit
+      // to convert to — see toMinorUnits.
+      amount: toMinorUnits(Number(amount), currency),
       currency,
       buyer_country: country,
-      deposit_amount: deposit ? Math.round(Number(deposit) * 100) : undefined,
+      deposit_amount: deposit ? toMinorUnits(Number(deposit), currency) : undefined,
       expected_complete_at: expectedCompleteAt
         ? new Date(expectedCompleteAt).toISOString()
         : undefined,
       split_percent: splitPercent ? Number(splitPercent) : undefined,
       overage_unit_seconds: overageUnit ? OVERAGE_UNIT_SECONDS[overageUnit] : undefined,
       overage_rate: overageUnit && overageRate
-        ? Math.round(Number(overageRate) * 100)
+        ? toMinorUnits(Number(overageRate), currency)
         : undefined,
     }),
   )
 
   const feePreview =
     settings.data && amount
-      ? Math.round(Number(amount) * 100 * settings.data.service_fee_rate)
+      ? Math.round(toMinorUnits(Number(amount), currency) * settings.data.service_fee_rate)
       : 0
 
   const submit = async (e: React.FormEvent) => {
@@ -360,7 +368,7 @@ function CreateDealForm({ onClose }: { onClose: () => void }) {
               required
               type="number"
               min="1"
-              step="0.01"
+              step={ZERO_DECIMAL_CURRENCIES.includes(currency) ? '1' : '0.01'}
               value={amount}
               onChange={(e) => setAmount(e.target.value)}
               placeholder="13500"
@@ -393,7 +401,7 @@ function CreateDealForm({ onClose }: { onClose: () => void }) {
             <Input
               type="number"
               min="0"
-              step="0.01"
+              step={ZERO_DECIMAL_CURRENCIES.includes(currency) ? '1' : '0.01'}
               value={deposit}
               onChange={(e) => setDeposit(e.target.value)}
               placeholder="0"
@@ -508,7 +516,7 @@ function CreateDealForm({ onClose }: { onClose: () => void }) {
                 <Input
                   type="number"
                   min="0"
-                  step="0.01"
+                  step={ZERO_DECIMAL_CURRENCIES.includes(currency) ? '1' : '0.01'}
                   value={overageRate}
                   onChange={(e) => setOverageRate(e.target.value)}
                   placeholder="0"
@@ -520,7 +528,7 @@ function CreateDealForm({ onClose }: { onClose: () => void }) {
           {splitPercent && (
             <p className="mt-3 text-xs text-fg-muted">
               {formatMoney(
-                Math.round((Number(amount) || 0) * 100 * Number(splitPercent) / 100),
+                Math.round(toMinorUnits(Number(amount) || 0, currency) * Number(splitPercent) / 100),
                 currency,
               )}{' '}
               charged now, the rest charged automatically the moment the rental is

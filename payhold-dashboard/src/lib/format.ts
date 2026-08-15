@@ -13,12 +13,32 @@ import type {
 import { ZERO_DECIMAL_CURRENCIES } from './countries'
 
 /**
- * Money is stored in minor units everywhere; only this file divides by 100.
+ * Money is stored in minor units everywhere; only these two functions cross
+ * that boundary, in either direction, and every screen with a money amount —
+ * displayed or typed into a form — goes through one of them.
  *
  * Zero-decimal currencies — RWF, UGX, the CFA francs — have no minor unit at
- * all. PayHold still stores them x100 for uniformity, so they divide the same
- * way but must never render a decimal point.
+ * all, and PayHold's own money engine stores them as-is: `toMajor`/`toMinor`
+ * in payhold-backend's `_shared/flutterwave.ts` are a no-op for every
+ * currency in `ZERO_DECIMAL_CURRENCIES`, the same list this file uses. A
+ * scatter of screens used to do the ×100/÷100 conversion inline and treat
+ * every currency identically — `formatMoney`/`formatMoneyShort` here, plus
+ * the deal-creation, refund, deposit-capture and dispute-resolution forms —
+ * so a real RWF 673,200 payout rendered as "RWF 6,732", and a operator typing
+ * "673200" into an RWF refund field would have sent 67,320,000. Confirmed
+ * against the live ledger: summing a seller's actual entries lands exactly on
+ * the *undivided* ledger_balance PayHold reports, not on 1/100th of it.
  */
+export function toMajorUnits(minor: Money, currency: Currency): number {
+  return ZERO_DECIMAL_CURRENCIES.includes(currency) ? minor : minor / 100
+}
+
+/** The inverse of `toMajorUnits` — what a form's typed amount sends on the wire. */
+export function toMinorUnits(major: number, currency: Currency): Money {
+  const value = Number.isFinite(major) ? major : 0
+  return ZERO_DECIMAL_CURRENCIES.includes(currency) ? Math.round(value) : Math.round(value * 100)
+}
+
 export function formatMoney(amount: Money, currency: Currency): string {
   const zeroDecimal = ZERO_DECIMAL_CURRENCIES.includes(currency)
   return new Intl.NumberFormat('en-GB', {
@@ -27,12 +47,12 @@ export function formatMoney(amount: Money, currency: Currency): string {
     currencyDisplay: 'code',
     minimumFractionDigits: zeroDecimal ? 0 : 2,
     maximumFractionDigits: zeroDecimal ? 0 : 2,
-  }).format(amount / 100)
+  }).format(toMajorUnits(amount, currency))
 }
 
 /** Compact form for stat tiles, where the exact centime is noise. */
 export function formatMoneyShort(amount: Money, currency: Currency): string {
-  const major = amount / 100
+  const major = toMajorUnits(amount, currency)
   if (Math.abs(major) >= 1_000_000) {
     return `${currency} ${(major / 1_000_000).toFixed(1)}M`
   }
