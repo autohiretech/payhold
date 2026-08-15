@@ -455,12 +455,21 @@ export interface PublicCheckout {
     status: DealStatus
   }
   seller: { name: string | null }
-  /** Only rails that are open in this market and live right now — §29.11. */
+  /**
+   * Only rails that are open in this market and live right now — §29.11.
+   *
+   * `amount` is what choosing that method charges today, and it is not
+   * always `deal.amount`: a split deal offers a method with no reusable
+   * credential (mobile money, a wallet, a bank transfer) at its full price
+   * instead of the first installment, because that method could never fund
+   * the second charge later. Card still shows the installment.
+   */
   methods: {
     method: PaymentMethod
     label: string
     provider: Provider
     networks: string[]
+    amount: Money
   }[]
 }
 

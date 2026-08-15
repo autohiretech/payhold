@@ -1579,32 +1579,49 @@ suite catching both on the first run is the argument for running the whole
 suite after touching a shared function, not just the new test written for
 the change.
 
-**A split deal's checkout excludes any method that cannot fund its second
-charge.** `_shared/rails.ts`'s `METHOD_SUPPORTS_REUSE` is a static fact about
-each `PaymentMethod` — `card` is the only one that can ever produce a
-reusable credential; mobile money is a one-time approval push with nothing
-left over, and neither wallet (PayPal et al. — `chargeSaved` is unbuilt for
-it) nor bank transfer produces one either. `availableMethods`
-(`_shared/checkout.ts`) filters it out of a deal's method list whenever
-`split_percent` is set, because that second installment is not optional — it
-collects automatically the instant both sides confirm, and offering a method
-guaranteed to strand it would be worse than not offering it at all.
+**A split deal's checkout prices a method without a reusable credential at
+the full amount, rather than excluding it — migration `20260815000006`.**
+`_shared/rails.ts`'s `METHOD_SUPPORTS_REUSE` is still a static fact about each
+`PaymentMethod` — `card` is the only one that can ever produce a reusable
+credential; mobile money is a one-time approval push with nothing left over,
+and neither wallet (PayPal et al. — `chargeSaved` is unbuilt for it) nor bank
+transfer produces one either. `availableMethods` (`_shared/checkout.ts`) used
+to filter such a method out of a split deal's list entirely, because the
+second installment collects automatically the instant both sides confirm and
+a method guaranteed to strand it seemed worse than not offering it. The
+product call is the other way now: offer it, and charge the whole thing up
+front instead of a first installment, so there is nothing left owing for the
+missing credential to strand.
 
-**`overage_rate` alone does not trigger this filter.** A deal with only
+`availableMethods` now returns an `amount` per method — `deal.presentment_amount`
+for card, the full price (`presentment_amount + balance_amount`) for anything
+`METHOD_SUPPORTS_REUSE` says cannot be charged again. Choosing the latter does
+not just change what gets displayed: `startCharge` calls `collapse_deal_split`
+(new, `security definer`, service-role only) immediately before the provider
+call, which rewrites `presentment_amount` to the full price and nulls
+`balance_amount`/`split_percent` under the deal's row lock. That write has to
+happen *before* the charge, not after — `fund_deal` disputes a webhook whose
+amount does not match `presentment_amount`, so a full charge landing next to a
+deal still describing a first installment would be exactly that mismatch. The
+function is idempotent (a no-op once `split_percent` is already null), which
+is what makes it safe for `startCharge`'s second call on the same deal when a
+rail asks the buyer for an extra factor. **Deliberately one-way**: a deal that
+collapsed this way stays flat even if that specific charge attempt then fails
+and the buyer retries with a card — restoring the original split is a gap
+disclosed in the migration header, not a case this handles.
+
+**`overage_rate` alone still does not trigger any of this.** A deal with only
 overage terms (no split) might never actually owe anything extra — the
 charge is conditional on a late return, not certain the way a split's second
-half is — so excluding mobile money from every overage-eligible deal would
-turn "might get stuck if it's ever late" into "can never book this way,"
-which is a worse trade for a buyer than the plain shortfall this codebase
-already accepts elsewhere (`payout_primary_attempts`, `retry_max_attempts`,
-and every other place a rail may simply fail and wait on a person).
+half is — so a method that cannot support it remains an ordinary,
+identically-priced choice.
 
 Both callers of `availableMethods` — the hosted checkout page and
-`startCharge`'s own re-check against a client-supplied method — share this
-one filter, so a buyer editing the request directly is refused exactly as a
-buyer clicking a hidden option would have been; there is no second path that
-forgot the rule. `_shared/rails.test.ts` pins the four method flags so a
-silent flip to `true` cannot pass unnoticed.
+`startCharge`'s own re-check against a client-supplied method — share this one
+pricing logic, so a buyer editing the request directly gets the same amount a
+buyer clicking the option would have. `_shared/rails.test.ts` still pins the
+four method flags so a silent flip to `true` cannot pass unnoticed; they now
+feed a price rather than a filter.
 
 ## The auto-release timer
 

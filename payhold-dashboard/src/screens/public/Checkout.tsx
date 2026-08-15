@@ -118,6 +118,13 @@ export function CheckoutPage() {
   const { deal, seller, methods } = checkout.data
   const chosen = methods.find((m) => m.method === method)
   const networks = chosen?.networks ?? []
+  const dueNow = chosen?.amount ?? deal.amount
+  // Methods price differently only on a split deal: one whose second charge
+  // is collected automatically later shows the first installment; one that
+  // cannot be charged again shows the full amount instead. Derived from what
+  // the server already returned per method, not computed here.
+  const pricesVary = new Set(methods.map((m) => m.amount)).size > 1
+  const cheapestAmount = pricesVary ? Math.min(...methods.map((m) => m.amount)) : dueNow
 
   return (
     <PublicFrame>
@@ -131,16 +138,21 @@ export function CheckoutPage() {
         </div>
 
         <dl className="space-y-2 px-6 py-5 text-sm">
-          <div className="flex justify-between gap-4">
-            <dt className="text-fg-muted">Amount</dt>
-            <dd className="tabular">{formatMoney(deal.amount, deal.currency)}</dd>
-          </div>
           <div className="flex justify-between border-t border-line pt-2 text-base">
             <dt className="font-medium text-fg">Total today</dt>
             <dd className="tabular font-semibold text-fg">
-              {formatMoney(deal.amount, deal.currency)}
+              {formatMoney(dueNow, deal.currency)}
             </dd>
           </div>
+          {pricesVary && (
+            <p className="text-xs leading-relaxed text-fg-muted">
+              {chosen == null
+                ? 'The amount due now depends on how you pay — some methods charge the rest automatically later, others take it all up front.'
+                : chosen.amount > cheapestAmount
+                  ? "This method can't be charged again later, so the full amount is due now."
+                  : "You'll pay the rest automatically once this is confirmed complete."}
+            </p>
+          )}
         </dl>
 
         {/* Only methods that are open in this market *and* live right now.
@@ -191,7 +203,12 @@ export function CheckoutPage() {
                         {METHOD_BLURB[option.method]}
                       </span>
                     </span>
-                    <span className="mt-0.5 shrink-0">
+                    <span className="mt-0.5 flex shrink-0 flex-col items-end gap-1">
+                      {pricesVary && (
+                        <span className="tabular text-xs font-semibold text-fg">
+                          {formatMoney(option.amount, deal.currency)}
+                        </span>
+                      )}
                       <ProviderChip provider={option.provider} />
                     </span>
                   </button>
@@ -253,7 +270,7 @@ export function CheckoutPage() {
                 ? 'Choose a payment method'
                 : networks.length > 1 && !network
                   ? 'Choose which one'
-                  : `Pay ${formatMoney(deal.amount, deal.currency)} with ${METHOD_LABEL[method]}`}
+                  : `Pay ${formatMoney(dueNow, deal.currency)} with ${METHOD_LABEL[method]}`}
           </Button>
 
           {pay.isError && (

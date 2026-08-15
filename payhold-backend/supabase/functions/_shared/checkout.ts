@@ -37,8 +37,21 @@ export interface StartedCharge {
   next_action: ChargeNextAction
 }
 
+export interface AvailableMethod {
+  method: PaymentMethod
+  label: string
+  provider: Provider
+  networks: string[]
+  /**
+   * What choosing this method charges right now, in the deal's presentment
+   * currency — not always `deal.presentment_amount`. See below.
+   */
+  amount: number
+}
+
 /**
- * Which rails this buyer may actually choose right now.
+ * Which rails this buyer may actually choose right now, and what each one
+ * charges today.
  *
  * The generated registry says what is *possible* in that market;
  * `payment_markets` and `provider_capabilities` say what is *on* (§29.11). A
@@ -49,7 +62,7 @@ export async function availableMethods(
   db: SupabaseClient,
   tenantId: string,
   deal: Deal,
-): Promise<{ method: PaymentMethod; label: string; provider: Provider; networks: string[] }[]> {
+): Promise<AvailableMethod[]> {
   const [closed, live] = await Promise.all([
     closedMarkets(db, tenantId),
     liveProviders(db),
@@ -58,23 +71,29 @@ export async function availableMethods(
   const closure = closed.get(deal.buyer_country)
   if (closure && !closure.collect) return []
 
-  // A split deal's second installment is not optional — it collects
-  // automatically the moment both sides confirm, on whatever the buyer paid
-  // with. Offering a method that can never produce a reusable credential
-  // would let a buyer choose one that guarantees that charge gets stuck.
+  // A split deal's second installment collects automatically the moment
+  // both sides confirm, on whatever the buyer paid with — and a method with
+  // no reusable credential can never produce one for it to collect against.
+  // Rather than dropping such a method from the list, it is offered at the
+  // deal's FULL price instead of the first installment: nothing is left
+  // owing later, so there is nothing for the missing credential to strand.
+  // `startCharge` is what actually commits to that (`collapse_deal_split`)
+  // once the buyer picks one; this only prices the choice.
+  //
   // `overage_rate` alone does not trigger this: overage only fires on a late
-  // return, so a method that cannot support it is still a legitimate choice
-  // for the (possibly only) charge that is certain to happen.
-  const needsReusableMethod = deal.split_percent != null && deal.split_percent > 0
+  // return, so it is still a legitimate, ordinary-priced choice for the
+  // (possibly only) charge that is certain to happen.
+  const isSplit = deal.split_percent != null && deal.split_percent > 0
+  const fullAmount = deal.presentment_amount + (deal.balance_amount ?? 0)
 
   return collectionRails(deal.buyer_country, deal.presentment_currency)
     .filter((rail) => live.has(rail.provider))
-    .filter((rail) => !needsReusableMethod || METHOD_SUPPORTS_REUSE[rail.method])
     .map((rail) => ({
       method: rail.method,
       label: METHOD_LABEL[rail.method],
       provider: rail.provider,
       networks: rail.networks,
+      amount: isSplit && !METHOD_SUPPORTS_REUSE[rail.method] ? fullAmount : deal.presentment_amount,
     }))
 }
 
@@ -156,15 +175,34 @@ export async function startCharge(
     }
   }
 
+  // `chosen.amount` is the full price rather than a first installment
+  // whenever this method cannot fund a split's second charge — see
+  // `availableMethods`. `deal.presentment_amount` has to say the same thing
+  // *before* the provider is asked to take it: `fund_deal` disputes a webhook
+  // whose amount does not match that column, and a charge for the full
+  // amount landing next to a deal still describing a first installment would
+  // be exactly that mismatch. `collapse_deal_split` is the one write, under
+  // the deal's row lock, and it is a no-op on every call that does not need it
+  // — including the second `startCharge` call a rail's extra-factor step makes
+  // against the same deal.
+  let funding = deal
+  if (chosen.amount !== deal.presentment_amount) {
+    const { data, error } = await db.rpc('collapse_deal_split', { p_deal_id: deal.id })
+    if (error) {
+      throw new PayHoldError('policy_violation', error.message)
+    }
+    funding = data as Deal
+  }
+
   const { provider } = await loadProvider(db, tenantId, chosen.provider)
   const publicUrl = Deno.env.get('PUBLIC_URL') ?? 'https://app.payhold.local'
 
   const charge = await provider.charge({
     // Our deal id goes across as their reference, which is what lets the
     // webhook find its way back to the right deal.
-    deal_id: deal.id,
-    amount: deal.presentment_amount,
-    currency: deal.presentment_currency,
+    deal_id: funding.id,
+    amount: funding.presentment_amount,
+    currency: funding.presentment_currency,
     method: choice.method,
     network: choice.network,
     phone: choice.method === 'mobile_money' ? choice.phone : undefined,

@@ -619,6 +619,57 @@ describe('installment billing', () => {
     )
     expect(released).toEqual([])
   })
+
+  describe('collapsing a split when the buyer pays by a method with no reusable credential', () => {
+    test('folds the balance into presentment_amount and clears the split', async () => {
+      const s = await seedSplitDeal({ amount: 100_000, splitPercent: 50, status: 'created' })
+
+      const { rows: [collapsed] } = await h.db.query<
+        { presentment_amount: string; balance_amount: string | null; split_percent: number | null }
+      >(
+        `select presentment_amount, balance_amount, split_percent from collapse_deal_split($1)`,
+        [s.deal],
+      )
+      expect(collapsed).toEqual({
+        presentment_amount: 100_000,
+        balance_amount: null,
+        split_percent: null,
+      })
+
+      const { rows } = await h.db.query<{ action: string }>(
+        `select action from audit_log where deal_id = $1 and action = 'deal.split_collapsed'`,
+        [s.deal],
+      )
+      expect(rows).toHaveLength(1)
+    })
+
+    test('is idempotent — a deal already collapsed, or never split, is untouched', async () => {
+      const s = await seedSplitDeal({ amount: 100_000, splitPercent: 50, status: 'created' })
+      await h.db.query(`select collapse_deal_split($1)`, [s.deal])
+
+      const { rows: [again] } = await h.db.query<{ presentment_amount: string }>(
+        `select presentment_amount from collapse_deal_split($1)`,
+        [s.deal],
+      )
+      expect(again.presentment_amount).toBe(100_000)
+
+      const flat = await seedSplitDeal({ amount: 100_000, splitPercent: null, status: 'created' })
+      const { rows: [untouched] } = await h.db.query<{ presentment_amount: string }>(
+        `select presentment_amount from collapse_deal_split($1)`,
+        [flat.deal],
+      )
+      expect(untouched.presentment_amount).toBe(100_000)
+    })
+
+    test('refuses once the deal is already funded', async () => {
+      // Default status is 'funded_held' — see seedSplitDeal.
+      const s = await seedSplitDeal({ amount: 100_000, splitPercent: 50 })
+      await rejects(
+        () => h.db.query(`select collapse_deal_split($1)`, [s.deal]),
+        /already been funded/,
+      )
+    })
+  })
 })
 
 describe('balances are derived from the ledger', () => {

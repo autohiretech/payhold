@@ -260,13 +260,18 @@ async function bySession(
   }
 
   // `currency`, `provider` and `provider_ref` are here for `/confirm`, which
-  // settles against the rail and needs all three. They widen the *query*, not
+  // settles against the rail and needs all three. `split_percent` and
+  // `balance_amount` are for `availableMethods`/`startCharge`, which price a
+  // split deal's methods differently — without them here a split deal on the
+  // hosted page would silently look flat, the same shape of bug this select
+  // already had before this deal ever existed. They widen the *query*, not
   // the response: `publicView` names every field it returns by hand, which is
   // exactly why adding a column here cannot leak one.
   const { data: deal } = await db
     .from('deals')
     .select('id, tenant_id, description, currency, presentment_amount, ' +
-      'presentment_currency, buyer_country, status, seller_id, provider, provider_ref')
+      'presentment_currency, buyer_country, status, seller_id, provider, provider_ref, ' +
+      'split_percent, balance_amount')
     .eq('id', session.deal_id)
     .maybeSingle()
 

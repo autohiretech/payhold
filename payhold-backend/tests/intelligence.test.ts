@@ -300,6 +300,7 @@ describe('the AI role cannot reach a money function', () => {
     'capture_deposit',
     'release_deposit',
     'settle_deal_balance',
+    'collapse_deal_split',
     'resolve_dispute',
     'decide_ai_suggestion',
     'approve_payout_review',
