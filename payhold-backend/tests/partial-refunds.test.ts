@@ -220,6 +220,39 @@ describe('§7.1.3 — after release, before payout', () => {
     expect(p.reason).toMatch(/refunded/i)
   })
 
+  test('a full refund cancels the payout no matter which status it was stuck in', async () => {
+    // `('scheduled', 'frozen', 'held_for_review')` was the whole list this
+    // cleanup matched on — `needs_verification` and `blocked` were never in
+    // it, so a payout screening put into either of those survived a full
+    // refund on the deal underneath it. Found live on AutoHire's tenant: a
+    // `needs_verification` payout left showing "RWF 1" for a deal that had
+    // been refunded in full weeks earlier.
+    const deal = await funded()
+    await release(deal)
+
+    const { rows: [before] } = await h.db.query<{ amount: string }>(
+      `select amount from payouts where deal_id = $1`, [deal],
+    )
+
+    await h.db.query(
+      `update payouts set status = 'needs_verification' where deal_id = $1`, [deal],
+    )
+    await h.db.query(`select refund_deal($1, 'All of it')`, [deal])
+
+    const { rows: [p] } = await h.db.query<{ status: string; reason: string; amount: string }>(
+      `select status::text, failure_reason as reason, amount from payouts where deal_id = $1`,
+      [deal],
+    )
+    expect(p.status).toBe('failed')
+    expect(p.reason).toMatch(/refunded/i)
+    // The proportional-scaling update must not run for a full refund either:
+    // the deal's clearing pool goes negative once the platform fee and
+    // provider fee are the only thing left in it, and `greatest(1, …)`
+    // silently floored that negative truth to a payout that read as owing a
+    // nominal amount instead of nothing at all.
+    expect(Number(p.amount)).toBe(Number(before.amount))
+  })
+
   test('a transfer already with the provider cannot be unwound from here', async () => {
     const deal = await funded()
     await release(deal)
