@@ -73,7 +73,7 @@ environment or a build log.
 | `deals` | create (with §14's `completion_policy`), list, get, `/pay`, `/confirm`, `/refund`, `/deposit`, `/capture`, `/release-deposit` |
 | `checkout` | §10.1's sessions. `/sessions` for the client's server; `/public/:token` for the buyer, with no credential |
 | `payment-options` | what a buyer in a market can pay with; the catalogue a client renders its checkout from |
-| `sellers` | register a tokenized payout destination, list (`?external_user_id=` finds the client's own handle), `/wallets`, `/:id/capabilities`, `/:id/balance`, `/:id/withdraw`, `/:id/verify` (person-only), `/:id/destinations` and `/:id/destinations/:id/end-hold` (person-only) |
+| `sellers` | register (destination optional), list (`?external_user_id=` finds the client's own handle), `/wallets`, `/:id/capabilities`, `/:id/balance`, `/:id/withdraw`, `/:id/verify` (person-only), `/:id/active` (status only, no payout effect), `/:id/destinations` and `/:id/destinations/:id/end-hold` (person-only) |
 | `balance` | four buckets per currency, or `?by=rail` |
 | `ledger` | the entries behind those buckets, filterable by deal. No writer, on any method |
 | `audit-log` | who did what, including every act that moved no money |
@@ -1429,6 +1429,33 @@ and somebody has to say which market they are in exactly once — a clear
 country code". `POST /v1/deals` carries the identical guard on
 `buyer_country`, for the same reason: `seller.country` no longer defaults to
 something.
+
+## A seller's `active` flag — migration `20260815000001`
+
+A destination-less seller made a second gap visible: PayHold had no column
+for "this person used to sell here and does not any more." AutoHire's own
+example is what asked for it — a host who switches back to renting is not
+deleted, and money already owed to them keeps moving, but AutoHire knows
+something about them PayHold was never told.
+
+`sellers.active` (default `true`) is that fact, and `set_seller_active` is
+shaped like `verify_seller` with one deliberate difference: it takes no
+`p_actor` non-blank check, and `POST /v1/sellers/:id/active` accepts an API
+key where `/verify` refuses one. The two attest to different kinds of thing —
+`/verify` is a person certifying identity, sanctions and ownership checks came
+back; `/active` is a tenant restating a fact about its own business that its
+own server already knows firsthand, the same reasoning `request_withdrawal`
+accepts an API key for.
+
+**It is read by nothing on the payout path, on purpose.** `screen_payout`
+does not select it, `seller_capabilities` does not report it as a reason, and
+`tests/seller-onboarding.test.ts` pins a verified, funded, *inactive* seller
+still clearing a scheduled payout. A seller who steps back mid-clearance-window
+is still owed whatever they already earned, and invariant 11 already draws the
+line on what may stop a payout — a status flag a client toggles about its own
+roster is not that. Wiring inactivity into the eligibility gate is a real
+option for later, but it is a deliberate policy decision that belongs next to
+`screen_payout`'s other conditions, not a side effect of this column shipping.
 
 ## The auto-release timer
 

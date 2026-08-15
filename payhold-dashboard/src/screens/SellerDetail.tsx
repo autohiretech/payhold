@@ -162,6 +162,15 @@ export function SellerDetailPage() {
       <PageHeader
         title={seller.name}
         subtitle={`${seller.country ? `${countryFlag(seller.country)} ${countryName(seller.country)} · ` : ''}registered ${formatDate(seller.created_at)} (${formatRelative(seller.created_at, now)})`}
+        action={
+          // Status only, and not shown for the common case — a seller is
+          // presumed active until the client says otherwise.
+          !seller.active ? (
+            <span className="rounded-full bg-surface-2 px-2.5 py-1 text-xs font-medium text-fg-muted">
+              Inactive
+            </span>
+          ) : undefined
+        }
       />
 
       <div className="mb-8 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">

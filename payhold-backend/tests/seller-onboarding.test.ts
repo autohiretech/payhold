@@ -706,6 +706,83 @@ describe('§5.1 moving a destination', () => {
   })
 })
 
+describe('active — status only, not an eligibility check', () => {
+  test('a new seller is active by default', async () => {
+    const seller = await newSeller('Freshly registered')
+    const { rows: [s] } = await h.db.query<{ active: boolean }>(
+      `select active from sellers where id = $1`, [seller],
+    )
+    expect(s.active).toBe(true)
+  })
+
+  test('it can be set false and back, and audits who set it', async () => {
+    const seller = await newSeller('Toggled twice')
+
+    const { rows: [off] } = await h.db.query<{ active: boolean }>(
+      `select active from set_seller_active($1, $2, false, 'api_key:autohire')`,
+      [seller, tenant],
+    )
+    expect(off.active).toBe(false)
+
+    const { rows: [on] } = await h.db.query<{ active: boolean }>(
+      `select active from set_seller_active($1, $2, true, 'api_key:autohire')`,
+      [seller, tenant],
+    )
+    expect(on.active).toBe(true)
+
+    const { rows: logs } = await h.db.query<{ action: string; actor: string }>(
+      `select action, actor from audit_log
+        where details ->> 'seller_id' = $1
+        order by created_at`,
+      [seller],
+    )
+    expect(logs.map((l) => l.action)).toEqual(['seller.deactivated', 'seller.activated'])
+    expect(logs.every((l) => l.actor === 'api_key:autohire')).toBe(true)
+  })
+
+  test('it carries no weight on the payout path', async () => {
+    // The whole point: a seller who stepped back is still owed whatever they
+    // already earned. Verified, funded, and inactive — the payout still goes.
+    const seller = await newSeller('Stepped back mid-clearance')
+    await h.db.query(`select verify_seller($1, 'compliance@payhold')`, [seller])
+    await h.db.query(`select set_seller_active($1, $2, false, 'api_key:autohire')`,
+      [seller, tenant])
+
+    expect((await capabilities(seller)).can).toBe(true)
+    expect(await screen(await payoutFor(seller))).toBe(false)
+  })
+
+  test('it refuses an unknown seller, and a seller belonging to another tenant', async () => {
+    const { rows: [other] } = await h.db.query<{ id: string }>(
+      `insert into tenants (name, slug) values ('Active Flag Co', 'active-flag-co') returning id`,
+    )
+    const seller = await newSeller('Not yours')
+
+    await rejects(
+      () => h.db.query(
+        `select set_seller_active($1, $2, false, 'api_key:someone-else')`,
+        [seller, other.id],
+      ),
+      /does not exist/,
+    )
+  })
+
+  test('a blank actor still falls back to a recorded name', async () => {
+    // Unlike verify_seller, this is not an attestation — a blank actor is not
+    // refused, because the caller may genuinely be an API key with no person
+    // behind the request. The audit row still names something.
+    const seller = await newSeller('No actor given')
+    await h.db.query(`select set_seller_active($1, $2, false, '')`, [seller, tenant])
+
+    const { rows: [log] } = await h.db.query<{ actor: string }>(
+      `select actor from audit_log
+        where action = 'seller.deactivated' and details ->> 'seller_id' = $1`,
+      [seller],
+    )
+    expect(log.actor).toBe('api')
+  })
+})
+
 describe('§11 external user id — the client’s own handle', () => {
   const withHandle = (name: string, handle: string | null) =>
     h.db.query(

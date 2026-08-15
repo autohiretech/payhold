@@ -216,6 +216,14 @@ export interface PayHoldClient {
    */
   verifySeller(sellerId: string, verified: boolean): Promise<Seller>
   /**
+   * Whether this seller is currently one of the tenant's active sellers, as
+   * opposed to someone who used to be. Status only — it does not touch KYC or
+   * the payout path, which is why (unlike `verifySeller`) an API key may call
+   * it: it is the client restating a fact about its own business, not an
+   * attestation.
+   */
+  setSellerActive(sellerId: string, active: boolean): Promise<Seller>
+  /**
    * §5.1's step-up: record that a destination change was confirmed with the
    * seller, ending its security hold early.
    *

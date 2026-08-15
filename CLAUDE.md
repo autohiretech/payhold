@@ -345,6 +345,7 @@ Auth: `X-Api-Key`, hashed at rest, rate-limited per key.
 | `GET /v1/sellers` | This tenant's sellers, or `?external_user_id=` to find the one registered against the client's own handle. No match is an empty list, not a 404 — that is the question a get-or-create asks |
 | `GET /v1/sellers/:id/capabilities` | Can this seller be paid, and if not, every reason. Two lists, kept apart |
 | `POST /v1/sellers/:id/verify` | Record the attestation. **Refuses an API key** — it is a person's decision |
+| `POST /v1/sellers/:id/active` | Whether this seller is currently one of the tenant's. Status only, no payout effect — takes an API key |
 | `GET /v1/sellers/:id/destinations` | §5.1's preferred destination and verified backup |
 | `POST /v1/sellers/:id/destinations` | Move where a seller is paid, or give them a backup. The new row is unverified and inside §5.1's security hold — payouts pause until it is checked, and no parameter skips that |
 | `POST /v1/sellers/:id/destinations/:id/end-hold` | §5.1's step-up: somebody confirmed the change with the seller, so the hold ends early. **Refuses an API key** — a client that could end its own holds has deleted the defence rather than satisfied it. Does not verify the destination |
@@ -540,6 +541,18 @@ about money changes — the deal is funded, held and released exactly as any
 other, in a wallet that stays entirely separate from that same person's
 seller earnings. PayHold does not net one against the other; a host paying
 for their own booking pays in full, the same as anyone else.
+
+**`active` is a status the tenant reports, not a fact PayHold decides.**
+Nothing here forces a seller to stay one forever — a host who stops hosting is
+not deleted, and money already owed to them does not stop moving. `active`
+(default `true`) is where a client says "this one stepped back," and
+`POST /v1/sellers/:id/active` **accepts an API key**, unlike `/verify`: it is
+the client restating a fact about its own business rather than an attestation.
+It carries no weight anywhere on the payout path — `screen_payout` does not
+read it, and a seller marked inactive mid-clearance still gets paid what they
+already earned. If a tenant later wants inactivity to *hold* a payout, that is
+a deliberate policy decision belonging next to the eligibility gate, not
+something this column does on its own.
 
 ## Seller wallets, and pulling instead of waiting
 

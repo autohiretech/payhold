@@ -368,6 +368,12 @@ export interface Seller {
   external_user_id: string | null
   sanctions_checked_at: Timestamp | null
   destination_changed_at: Timestamp | null
+  /**
+   * Whether this seller is currently one of the tenant's active sellers, as
+   * opposed to someone who used to be. Status only — it carries no weight on
+   * the payout path. Defaults `true`.
+   */
+  active: boolean
   created_at: Timestamp
 }
 

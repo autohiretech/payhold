@@ -269,6 +269,12 @@ export interface Seller {
   sanctions_checked_at: Timestamp | null
   /** §5.1's change protection. A recent move holds the next payout. */
   destination_changed_at: Timestamp | null
+  /**
+   * Whether this seller is currently one of the tenant's active sellers, as
+   * opposed to someone who used to be. Status only — it carries no weight on
+   * the payout path. Defaults `true`.
+   */
+  active: boolean
   created_at: Timestamp
 }
 

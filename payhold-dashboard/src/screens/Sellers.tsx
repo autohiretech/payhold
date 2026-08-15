@@ -211,6 +211,13 @@ export function SellersPage() {
                       <Link className="text-brand hover:underline" to={`/sellers/${s.id}`}>
                         {s.name}
                       </Link>
+                      {/* Status only, not shown for the common case — a seller
+                          is presumed active until the client says otherwise. */}
+                      {!s.active && (
+                        <span className="ml-2 rounded-full bg-surface-2 px-2 py-0.5 text-xs font-medium text-fg-muted">
+                          Inactive
+                        </span>
+                      )}
                     </Td>
                     <Td>
                       <Badge meta={KYC_STATUS_META[s.kyc_status]} />

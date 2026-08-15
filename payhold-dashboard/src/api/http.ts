@@ -593,6 +593,11 @@ export class HttpClient implements PayHoldClient {
     return await this.#post<Seller>(`/sellers/${sellerId}/verify`, { verified })
   }
 
+  /** Status only, unlike `verifySeller` — the endpoint accepts an API key too. */
+  async setSellerActive(sellerId: string, active: boolean): Promise<Seller> {
+    return await this.#post<Seller>(`/sellers/${sellerId}/active`, { active })
+  }
+
   /**
    * §5.1's step-up. Same shape as `verifySeller` and for the same reasons: the
    * actor comes from the session and the endpoint refuses an API key.

@@ -33,7 +33,7 @@ import {
 const SELLER_COLUMNS =
   'id, tenant_id, name, country, payout_currency, payout_provider, ' +
   'beneficiary_token, masked_destination, kyc_status, external_user_id, ' +
-  'sanctions_checked_at, destination_changed_at, created_at'
+  'sanctions_checked_at, destination_changed_at, active, created_at'
 
 /**
  * **`beneficiary_token` is not in this list and must not join it.** It is the
@@ -263,6 +263,46 @@ async function verify(
     p_verified: body.verified ?? true,
   })
   if (error) throw new Error(`verify_seller failed: ${error.message}`)
+
+  const { data } = await db
+    .from('sellers')
+    .select(SELLER_COLUMNS)
+    .eq('id', id)
+    .maybeSingle()
+
+  return json(req, data)
+}
+
+/**
+ * `POST /v1/sellers/:id/active` — whether this seller is currently one of the
+ * tenant's active sellers, as opposed to someone who used to be.
+ *
+ * Status only. It carries no weight on the payout path — a seller who steps
+ * back is still owed whatever they already earned, and `screen_payout` does
+ * not read this column. **Accepts an API key**, unlike `/verify`: this is not
+ * an attestation, it is the client restating a fact about its own business
+ * that it already knows firsthand — the same reasoning `/withdraw` accepts one
+ * for. A tenant that could not say "this host stopped hosting" without a
+ * person in the loop would have to route every role change through its
+ * dashboard, which is not where its hosts are.
+ */
+async function setActive(
+  req: Request,
+  db: SupabaseClient,
+  caller: Caller,
+  id: string,
+): Promise<Response> {
+  await ownSeller(db, caller, id)
+
+  const body = await readJson<{ active?: boolean }>(req)
+
+  const { error } = await db.rpc('set_seller_active', {
+    p_seller: id,
+    p_tenant: caller.tenant_id,
+    p_active: body.active ?? true,
+    p_actor: caller.actor,
+  })
+  if (error) throw new Error(`set_seller_active failed: ${error.message}`)
 
   const { data } = await db
     .from('sellers')
@@ -754,6 +794,10 @@ Deno.serve(handler(async (req) => {
 
   if (req.method === 'POST' && id && action === 'verify') {
     return await verify(req, db, caller, id)
+  }
+
+  if (req.method === 'POST' && id && action === 'active') {
+    return await setActive(req, db, caller, id)
   }
 
   // An unmatched path under a seller is a 404, and until this guard it was the
