@@ -681,3 +681,41 @@ Deno.test('verify falls back to app_fee when settlement is absent', async () => 
     restore()
   }
 })
+
+Deno.test('a settlement that lands late is still preferred over app_fee', async () => {
+  const original = globalThis.fetch
+  // The incident this pins: a Nigerian-issued card charges 7.5% VAT on top of
+  // Flutterwave's 3.8% fee, and `app_fee` excludes it — confirmed live, a
+  // deal's booked provider_fee came out exactly 3.8% of the charge with no
+  // VAT at all, because `amount_settled` was not there yet on the first look.
+  // Two calls come back with it absent before the third has it.
+  let calls = 0
+  globalThis.fetch = (() => {
+    calls++
+    const amount_settled = calls >= 3 ? 945 : undefined
+    return Promise.resolve(
+      new Response(JSON.stringify({
+        data: {
+          id: 12350,
+          tx_ref: 'tx_6',
+          amount: 1000,
+          charged_amount: 1000,
+          currency: 'RWF',
+          status: 'successful',
+          payment_type: 'card',
+          app_fee: 35,
+          amount_settled,
+        },
+      }), { status: 200, headers: { 'content-type': 'application/json' } }),
+    )
+  }) as typeof fetch
+
+  try {
+    const v = await new FlutterwaveProvider(CREDS, '').verify('tx_6')
+    // 1000 − 945 = 55, not the VAT-excluding app_fee of 35.
+    assertEquals(v.fee, 55)
+    assertEquals(calls, 3)
+  } finally {
+    globalThis.fetch = original
+  }
+})

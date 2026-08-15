@@ -32,6 +32,19 @@ import { PayHoldError, type Currency, type Money, type PaymentMethod } from './t
 
 const API = 'https://api.flutterwave.com/v3'
 
+/**
+ * `amount_settled` can lag a transaction's own success the same way Stripe's
+ * balance transaction does — see the identical constants and reasoning in
+ * `stripe.ts`'s `resolveProviderFee`. `verify` retries this many times,
+ * `PROVIDER_FEE_RETRY_DELAY_MS` apart, before accepting whatever it has.
+ */
+const PROVIDER_FEE_RETRIES = 3
+const PROVIDER_FEE_RETRY_DELAY_MS = 1000
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
 export interface FlutterwaveCredentials {
   /** `FLWSECK_TEST-…` or `FLWSECK-…`. The one that must never leave the server. */
   secret_key: string
@@ -659,7 +672,7 @@ export class FlutterwaveProvider implements PaymentProvider {
    * anyone can POST a webhook body.
    */
   async verify(providerRef: string): Promise<VerifiedTransaction> {
-    const data = await this.call<{
+    type VerifyResponse = {
       id: number
       amount: number
       charged_amount?: number
@@ -685,7 +698,31 @@ export class FlutterwaveProvider implements PaymentProvider {
        */
       app_fee?: number
       amount_settled?: number
-    }>(`/transactions/verify_by_reference?tx_ref=${encodeURIComponent(providerRef)}`)
+    }
+
+    // `amount_settled` can lag a transaction's own success the same way
+    // Stripe's balance transaction does — Flutterwave settles asynchronously,
+    // and a webhook re-verified faster than that lands here with
+    // `amount_settled` still absent. The old code fell back to `app_fee`
+    // immediately in that case, which the field comment above already says
+    // "can exclude VAT" — and a Nigerian-issued card charges 7.5% VAT on top
+    // of the 3.8% fee, so that fallback silently under-booked by the VAT
+    // every time it fired. Confirmed live: a deal whose booked provider_fee
+    // was exactly 3.8% of the charge, to the rand, with no VAT component at
+    // all. Retried the same bounded way `stripe.ts` retries its own fee read.
+    let data = await this.call<VerifyResponse>(
+      `/transactions/verify_by_reference?tx_ref=${encodeURIComponent(providerRef)}`,
+    )
+    for (
+      let attempt = 1;
+      attempt < PROVIDER_FEE_RETRIES && data.amount_settled == null;
+      attempt++
+    ) {
+      await delay(PROVIDER_FEE_RETRY_DELAY_MS)
+      data = await this.call<VerifyResponse>(
+        `/transactions/verify_by_reference?tx_ref=${encodeURIComponent(providerRef)}`,
+      )
+    }
 
     // §7's provider fee, in the same currency as the amount. Prefer the settled
     // amount (what the wallet actually holds) over the reported `app_fee`; fall
