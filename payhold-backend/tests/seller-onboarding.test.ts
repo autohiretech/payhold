@@ -752,6 +752,26 @@ describe('active — status only, not an eligibility check', () => {
     expect(await screen(await payoutFor(seller))).toBe(false)
   })
 
+  test('setting it to what it already is writes no audit row', async () => {
+    // The common case once a host toggles: PATCH-and-mostly-no-op. A caller
+    // that cannot cheaply know whether a seller is already active — as
+    // `payhold-ensure-seller` cannot without a second round trip — has to be
+    // able to call this unconditionally on every toggle without flooding the
+    // log with "was true, set true" rows.
+    const seller = await newSeller('Already active')
+
+    await h.db.query(`select set_seller_active($1, $2, true, 'api_key:autohire')`,
+      [seller, tenant])
+
+    const { rows: [n] } = await h.db.query<{ n: number }>(
+      `select count(*)::int as n from audit_log
+        where action in ('seller.activated', 'seller.deactivated')
+          and details ->> 'seller_id' = $1`,
+      [seller],
+    )
+    expect(n.n).toBe(0)
+  })
+
   test('it refuses an unknown seller, and a seller belonging to another tenant', async () => {
     const { rows: [other] } = await h.db.query<{ id: string }>(
       `insert into tenants (name, slug) values ('Active Flag Co', 'active-flag-co') returning id`,
