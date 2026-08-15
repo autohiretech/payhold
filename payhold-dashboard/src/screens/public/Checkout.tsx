@@ -40,7 +40,7 @@ import { useParams } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { api, type PaymentMethod } from '@/api'
 import { Button, Card, Dot, ErrorNote, Select, Skeleton, cx } from '@/components/ui'
-import { MethodIcon, ProviderChip } from '@/components/rails'
+import { MethodIcon } from '@/components/rails'
 import { formatMoney } from '@/lib/format'
 import { METHOD_BLURB, METHOD_LABEL } from '@/lib/rails'
 import { useMoneyAction } from '@/lib/queries'
@@ -158,7 +158,9 @@ export function CheckoutPage() {
         {/* Only methods that are open in this market *and* live right now.
             §29.11: the registry says what is possible, the matrix says what is
             on, and an option the buyer cannot complete is worse than no
-            option. */}
+            option. No `ProviderChip` here on purpose — Flutterwave/Stripe is
+            plumbing a buyer has no reason to see; the operator screens still
+            show it because there the rail is the thing being managed. */}
         <div className="border-t border-line px-6 py-5">
           <p className="text-sm font-semibold text-fg">How would you like to pay?</p>
 
@@ -203,14 +205,11 @@ export function CheckoutPage() {
                         {METHOD_BLURB[option.method]}
                       </span>
                     </span>
-                    <span className="mt-0.5 flex shrink-0 flex-col items-end gap-1">
-                      {pricesVary && (
-                        <span className="tabular text-xs font-semibold text-fg">
-                          {formatMoney(option.amount, deal.currency)}
-                        </span>
-                      )}
-                      <ProviderChip provider={option.provider} />
-                    </span>
+                    {pricesVary && (
+                      <span className="mt-0.5 shrink-0 tabular text-xs font-semibold text-fg">
+                        {formatMoney(option.amount, deal.currency)}
+                      </span>
+                    )}
                   </button>
                 )
               })}
