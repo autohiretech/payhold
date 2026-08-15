@@ -29,14 +29,22 @@ afterAll(() => h.close())
 // rather than assumed.
 beforeEach(async () => {
   await h.db.query(`delete from payout_routes where tenant_id is not null`)
-  // Enabled exactly where the adapter is live. Phase 6 made that one fact in
-  // one place — `payout_routes.provider` names an adapter now, and whether it
-  // is built lives on `provider_capabilities`.
+  // Enabled exactly where the adapter is live — except the three routes
+  // `assert_route_has_live_provider` (`20260815000007`) refuses regardless:
+  // Venmo-via-PayPal and Cash App Pay's own row (§17, permanent), and
+  // PayPal's own payout row (§16 — a signed agreement, not merely a live
+  // adapter). Without this exclusion the reset itself trips that trigger the
+  // moment PayPal's capability row is live, which is exactly the bug that
+  // migration fixed — before it, "enabled tracks adapter liveness" was true
+  // for every platform route without exception.
   await h.db.query(
     `update payout_routes r
         set enabled = exists (
               select 1 from provider_capabilities c
-               where c.provider = r.provider and c.implemented and c.enabled),
+               where c.provider = r.provider and c.implemented and c.enabled)
+              and not (r.payout_provider = 'venmo' and r.provider = 'paypal')
+              and not (r.payout_provider = 'cash_app_pay' and r.provider = 'cash_app_pay')
+              and not (r.payout_provider = 'paypal' and r.provider = 'paypal'),
             risk_status = 'approved',
             max_amount = null
       where r.tenant_id is null`,
@@ -184,10 +192,13 @@ describe('§5.2 — payout routing acceptance tests', () => {
     const home = await newSeller({ country: 'US', currency: 'USD', rail: 'venmo' })
     const domestic = await payoutFor(home, { amount: 5_000, currency: 'USD' })
 
-    // `provider_unavailable`, not `provider_disabled`: Phase 6 separated "the
-    // adapter is not built" from "we switched this corridor off". Same sentence
-    // to the seller, different next action for us.
-    expect((await route(domestic)).reason_code).toBe('provider_unavailable')
+    // `provider_disabled`, not `provider_unavailable`: Phase 6 separated "the
+    // adapter is not built" from "we switched this corridor off", and since
+    // `20260813000002` the adapter behind Venmo (PayPal) genuinely is built
+    // and live for collection — it is the *route* that stays off, on its own,
+    // permanent §17 ground (`20260815000007`). Same sentence to the seller
+    // either way, different next action for us.
+    expect((await route(domestic)).reason_code).toBe('provider_disabled')
     expect((await statusOf(domestic)).why).toBe('venmo is not available for payouts yet.')
 
     // §5.2's case is about the border, so switch the rail on for one tenant to
@@ -367,9 +378,12 @@ describe('a decision is a record, not a return value', () => {
     expect(own?.payout_provider).toBe('flutterwave_momo')
 
     // Including the losers, which is what answers "why not the one I picked".
+    // `provider_disabled`, not `provider_unavailable` — PayPal (Venmo's
+    // adapter) is live for collection; the route itself stays off on §17's
+    // own, separate ground. See the reason-code comment in case 2 above.
     const venmo = (decision.checks as { payout_provider: string; reason_code: string }[])
       .find((c) => c.payout_provider === 'venmo')
-    expect(venmo?.reason_code).toBe('provider_unavailable')
+    expect(venmo?.reason_code).toBe('provider_disabled')
   })
 
   test('an unchanged outcome does not write a second row', async () => {

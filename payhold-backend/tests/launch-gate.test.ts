@@ -458,15 +458,21 @@ describe('§17 — no personal-account Venmo or Cash App transfers', () => {
     expect(rows.length).toBeGreaterThan(0)
     for (const row of rows) expect(row.enabled).toBe(false)
 
-    // Not "nobody has turned them on" — they cannot be turned on, because the
-    // adapter behind them is unbuilt and a trigger reads that. §29.3.
+    // Not "nobody has turned them on" — they cannot be turned on. Originally
+    // enforced only by "the adapter behind them is unbuilt", which stopped
+    // being true for Venmo the moment PayPal's own capability row went live
+    // for collection (`20260813000002`) — Venmo rides that same adapter, and
+    // the trigger could no longer tell "PayPal may collect" from "PayPal may
+    // pay Venmo". `20260815000007` added the permanent, adapter-independent
+    // block this asserts: §17's prohibition, not a temporary gap in what is
+    // built.
     await rejects(
       () =>
         h.db.query(
           `update payout_routes set enabled = true
             where tenant_id is null and payout_provider = 'venmo'`,
         ),
-      /has no live adapter/,
+      /not available for payouts — personal accounts only/,
     )
   })
 })
