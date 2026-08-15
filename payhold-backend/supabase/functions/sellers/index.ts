@@ -314,6 +314,45 @@ async function setActive(
 }
 
 /**
+ * `POST /v1/sellers/:id/name` — keep this seller's name matching the client's
+ * own record of them.
+ *
+ * `create` set `name` once and nothing has touched it since — a client's own
+ * name for this person can change after registration (a profile edit, a typo
+ * fix), and until this route PayHold had no way to be told. Same reasoning as
+ * `/active`: this is not an attestation, it is the client restating a fact it
+ * already knows about its own business, so it accepts an API key rather than
+ * a person in the loop.
+ */
+async function setName(
+  req: Request,
+  db: SupabaseClient,
+  caller: Caller,
+  id: string,
+): Promise<Response> {
+  await ownSeller(db, caller, id)
+
+  const body = await readJson<{ name?: string }>(req)
+  required(body as unknown as Record<string, unknown>, 'name')
+
+  const { error } = await db.rpc('set_seller_name', {
+    p_seller: id,
+    p_tenant: caller.tenant_id,
+    p_name: body.name,
+    p_actor: caller.actor,
+  })
+  if (error) throw new Error(`set_seller_name failed: ${error.message}`)
+
+  const { data } = await db
+    .from('sellers')
+    .select(SELLER_COLUMNS)
+    .eq('id', id)
+    .maybeSingle()
+
+  return json(req, data)
+}
+
+/**
  * `POST /v1/sellers/:id/destinations/:destinationId/end-hold` — §5.1's step-up.
  *
  * The section asks for two things and the table only had one of them. A new
@@ -798,6 +837,10 @@ Deno.serve(handler(async (req) => {
 
   if (req.method === 'POST' && id && action === 'active') {
     return await setActive(req, db, caller, id)
+  }
+
+  if (req.method === 'POST' && id && action === 'name') {
+    return await setName(req, db, caller, id)
   }
 
   // An unmatched path under a seller is a 404, and until this guard it was the
