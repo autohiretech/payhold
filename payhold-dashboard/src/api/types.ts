@@ -473,6 +473,56 @@ export interface PublicCheckout {
   }[]
 }
 
+/**
+ * What the buyer has to do next, mirrored field-for-field from the backend's
+ * `ChargeNextAction` (`_shared/provider.ts`) — see that file for the full
+ * argument. Only `wait`, `otp` and `redirect` are handled on this page today:
+ * that is everything Flutterwave's direct mobile money charge can return.
+ * The rest exist so a future method (card's own `element`, a wallet's
+ * `wallet_approval`, …) fails closed to `redirect` rather than the type
+ * silently not compiling.
+ */
+export type ChargeNextAction =
+  | { type: 'wait'; message: string }
+  | { type: 'otp'; reference: string; message: string }
+  | { type: 'pin'; message: string }
+  | { type: 'avs'; message: string; fields: string[] }
+  | {
+    type: 'wallet_approval'
+    provider: Provider
+    client_id: string
+    order: string
+    currency: Currency
+    approval_url: string
+  }
+  | {
+    type: 'transfer'
+    account: string
+    bank: string
+    amount: string
+    reference: string
+    expires_at: string | null
+    note: string | null
+  }
+  | { type: 'redirect'; url: string }
+  | {
+    type: 'payment_element'
+    provider: Provider
+    publishable_key: string
+    client_secret: string
+    return_url: string
+  }
+  | {
+    type: 'element'
+    provider: Provider
+    public_key: string
+    reference: string
+    amount: Money
+    currency: Currency
+    options: string[]
+    redirect_url: string
+  }
+
 // ---------------------------------------------------------------------------
 // Payout routing — §5.1's Routing Center
 // ---------------------------------------------------------------------------

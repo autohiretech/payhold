@@ -35,11 +35,13 @@ import type {
   ApiKey,
   AuditLogEntry,
   Balance,
+  ChargeNextAction,
   ConfirmSide,
   ConnectProviderInput,
   CreateDealInput,
   CreateDealResult,
   CreateSellerInput,
+  Currency,
   Deal,
   DealAmounts,
   DealOutcome,
@@ -131,17 +133,51 @@ export interface PayHoldClient {
    */
   getPublicCheckout(token: string): Promise<PublicCheckout>
   /**
-   * The buyer chooses, and is handed to the provider.
+   * The buyer chooses, and a charge starts.
    *
    * The furthest a session goes is `payment_pending`. `funded_held` is the
    * provider webhook's, after it verifies a signature *and* re-fetches the
-   * transaction — §15 phase 2, and the reason this returns a link to follow
+   * transaction — §15 phase 2, and the reason this returns what to do next
    * rather than a funded deal.
+   *
+   * `phone` is what turns a mobile money charge into a direct one — present,
+   * the rail charges the wallet itself and `next_action` comes back `wait` or
+   * `otp`, nothing to redirect to; absent, every method still falls back to
+   * the rail's own hosted page exactly as before. `payment_link` is kept
+   * alongside `next_action` for a caller that only understands "go here".
    */
   payCheckout(
     token: string,
-    choice: { method: PaymentMethod; network?: string },
-  ): Promise<{ status: CheckoutSessionState; payment_link: string | null }>
+    choice: { method: PaymentMethod; network?: string; phone?: string },
+  ): Promise<{
+    status: CheckoutSessionState
+    payment_link: string | null
+    next_action: ChargeNextAction
+  }>
+  /**
+   * Ask the rail whether a direct mobile money charge has landed yet.
+   *
+   * Polled while `next_action` is `wait` or after an `otp` is accepted — the
+   * buyer approves on their handset and nothing here prompts us, so this is
+   * how the page finds out. Costs the rail a call every time, which is why it
+   * is its own method and not folded into a `GET`.
+   */
+  confirmCheckout(token: string): Promise<{
+    status: CheckoutSessionState
+    deal: { id: string; status: DealStatus; amount: Money; currency: Currency }
+    settled: boolean
+    reason: string | null
+  }>
+  /**
+   * Answer the code the rail sent to the buyer's phone.
+   *
+   * `reference` is the `otp` action's own handle for the half-finished
+   * charge — the provider's, not ours — and is meaningless anywhere else.
+   */
+  answerCheckoutOtp(
+    token: string,
+    answer: { reference: string; otp: string },
+  ): Promise<{ status: CheckoutSessionState; next_action: ChargeNextAction }>
 
   /**
    * Every link issued for a deal, newest first — including the withdrawn and

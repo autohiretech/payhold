@@ -54,6 +54,7 @@ import {
   type ApiKey,
   type AuditLogEntry,
   type Balance,
+  type ChargeNextAction,
   type CheckoutSession,
   type CheckoutSessionState,
   type ConfirmSide,
@@ -63,9 +64,11 @@ import {
   type CreateSellerInput,
   type CronJobName,
   type CronRun,
+  type Currency,
   type Deal,
   type DealAmounts,
   type DealOutcome,
+  type DealStatus,
   type Dispute,
   type DisputeEvidence,
   type DisputeOffer,
@@ -394,14 +397,38 @@ export class HttpClient implements PayHoldClient {
 
   async payCheckout(
     token: string,
-    choice: { method: PaymentMethod; network?: string },
-  ): Promise<{ status: CheckoutSessionState; payment_link: string | null }> {
+    choice: { method: PaymentMethod; network?: string; phone?: string },
+  ): Promise<{
+    status: CheckoutSessionState
+    payment_link: string | null
+    next_action: ChargeNextAction
+  }> {
     return await this.#public<{
       status: CheckoutSessionState
       payment_link: string | null
+      next_action: ChargeNextAction
     }>(`/checkout/public/${token}/pay`, {
       method: 'POST',
       body: JSON.stringify(choice),
+    })
+  }
+
+  async confirmCheckout(token: string): Promise<{
+    status: CheckoutSessionState
+    deal: { id: string; status: DealStatus; amount: Money; currency: Currency }
+    settled: boolean
+    reason: string | null
+  }> {
+    return await this.#public(`/checkout/public/${token}/confirm`, { method: 'POST' })
+  }
+
+  async answerCheckoutOtp(
+    token: string,
+    answer: { reference: string; otp: string },
+  ): Promise<{ status: CheckoutSessionState; next_action: ChargeNextAction }> {
+    return await this.#public(`/checkout/public/${token}/validate`, {
+      method: 'POST',
+      body: JSON.stringify(answer),
     })
   }
 

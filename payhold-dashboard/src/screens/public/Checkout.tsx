@@ -38,13 +38,21 @@
 import { useEffect, useState } from 'react'
 import { useParams } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
-import { api, type PaymentMethod } from '@/api'
-import { Button, Card, Dot, ErrorNote, Select, Skeleton, cx } from '@/components/ui'
+import { api, type ChargeNextAction, type PaymentMethod } from '@/api'
+import { Button, Card, Dot, ErrorNote, Input, Select, Skeleton, cx } from '@/components/ui'
 import { MethodIcon } from '@/components/rails'
 import { formatMoney } from '@/lib/format'
 import { METHOD_BLURB, METHOD_LABEL } from '@/lib/rails'
 import { useMoneyAction } from '@/lib/queries'
 import { postToParent, reportHeight } from '@/lib/embed'
+
+/**
+ * What this page is waiting on, once `pay` starts a charge that has nothing
+ * to redirect to. `otp`'s `reference` is the rail's own handle for the
+ * half-finished charge — `answerCheckoutOtp` needs it back, and it means
+ * nothing anywhere else.
+ */
+type Pending = { type: 'wait'; message: string } | { type: 'otp'; reference: string; message: string }
 
 export function CheckoutPage() {
   const { token = '' } = useParams()
@@ -61,6 +69,38 @@ export function CheckoutPage() {
 
   const [method, setMethod] = useState<PaymentMethod | null>(null)
   const [network, setNetwork] = useState<string | null>(null)
+  const [phone, setPhone] = useState('')
+  const [otp, setOtp] = useState('')
+  const [otpError, setOtpError] = useState<string | null>(null)
+  /**
+   * Non-null once the rail has nothing left to send the buyer to — a mobile
+   * money charge that only needs an approval on their handset, or a code back.
+   * Card and every other method still ends at the rail's own page, exactly as
+   * before; this only ever gets set for the direct charge `phone` makes
+   * possible. Non-null switches the whole card from "how would you like to
+   * pay" to "here's what's happening", which is why it lives above both
+   * mutations rather than inside either one.
+   */
+  const [pending, setPending] = useState<Pending | null>(null)
+
+  const handleNextAction = (next: ChargeNextAction, fallbackLink: string | null) => {
+    switch (next.type) {
+      case 'wait':
+        setPending({ type: 'wait', message: next.message })
+        return
+      case 'otp':
+        setPending({ type: 'otp', reference: next.reference, message: next.message })
+        return
+      case 'redirect':
+        location.assign(next.url)
+        return
+      default:
+        // Every other shape (card's own inline widget, a wallet's popup, …) is
+        // not built into this page yet. `payment_link` still works for all of
+        // them — the same fallback `startCharge` always meant by carrying one.
+        if (fallbackLink) location.assign(fallbackLink)
+    }
+  }
 
   const pay = useMoneyAction(async () => {
     if (!method) return
@@ -69,6 +109,11 @@ export function CheckoutPage() {
       result = await api.payCheckout(token, {
         method,
         network: network ?? undefined,
+        // Present, mobile money is charged directly and the buyer never
+        // leaves this page — the rail pushes an approval to their handset
+        // instead. Absent, it falls back to the rail's own hosted page
+        // exactly as every other method does.
+        phone: method === 'mobile_money' && phone.trim() ? phone.trim() : undefined,
       })
     } catch (err) {
       // A refusal before the buyer ever reaches the provider — a method we
@@ -77,18 +122,38 @@ export function CheckoutPage() {
       postToParent('payment_failed', { deal_id: checkout.data?.deal.id })
       throw err
     }
-    // In production this is the provider's own hosted page. The buyer leaves
-    // for Flutterwave or Stripe here and comes back when the charge settles.
-    //
-    // **Note for anyone embedding this:** the frame navigates to the provider
-    // at this point, and whether that works is the provider's decision, not
-    // ours — their pages set their own `frame-ancestors`, and Stripe Checkout
-    // in particular refuses to be framed. A parent must keep the redirect
-    // fallback for exactly this reason. There is no outcome event here because
-    // this page is no longer the one that knows: the buyer comes back to
-    // `/status/:id`, which is where the result is reported from.
-    if (result.payment_link) location.assign(result.payment_link)
+    handleNextAction(result.next_action, result.payment_link)
   })
+
+  const answerOtp = useMoneyAction(async () => {
+    if (!pending || pending.type !== 'otp') return
+    setOtpError(null)
+    try {
+      const result = await api.answerCheckoutOtp(token, { reference: pending.reference, otp })
+      handleNextAction(result.next_action, null)
+    } catch (err) {
+      setOtpError(err instanceof Error ? err.message : 'That code was not accepted.')
+    }
+  })
+
+  // Polled only while waiting on the buyer's handset — an `otp` state waits on
+  // `answerOtp` instead, which arms its own `wait` once a code is accepted.
+  // Nothing here can fund a deal: this is `/confirm`'s own re-fetch from the
+  // provider, the identical check the webhook makes, never a request body.
+  const confirmPoll = useQuery({
+    queryKey: ['public-checkout-confirm', token],
+    queryFn: () => api.confirmCheckout(token),
+    enabled: pending?.type === 'wait',
+    refetchInterval: (query) => (query.state.data?.settled ? false : 3000),
+  })
+
+  const settledDealId = confirmPoll.data?.settled ? confirmPoll.data.deal.id : null
+  useEffect(() => {
+    // This page is now the one that knows, since a direct charge never sends
+    // the buyer anywhere for `/status/:id` to pick up the story from. Fired
+    // once per settle, the same way `DealStatusPage` fires it once per status.
+    if (settledDealId) postToParent('payment_succeeded', { deal_id: settledDealId })
+  }, [settledDealId])
 
   if (checkout.isPending) {
     return (
@@ -100,8 +165,12 @@ export function CheckoutPage() {
 
   // Expired, withdrawn, already used and never-existed all land here, and the
   // page says the same thing for all four — distinguishing them would let
-  // somebody probe for real tokens.
-  if (checkout.isError || !checkout.data || checkout.data.status !== 'open') {
+  // somebody probe for real tokens. Checked only while nothing is `pending`:
+  // paying moves the session past `open` server-side, `useMoneyAction`
+  // invalidates every query including this one, and the refetch that follows
+  // would otherwise read as an expired link on the very page that is waiting
+  // on the buyer's handset.
+  if (!pending && (checkout.isError || !checkout.data || checkout.data.status !== 'open')) {
     return (
       <PublicFrame>
         <Card className="p-8 text-center">
@@ -110,6 +179,68 @@ export function CheckoutPage() {
             It may have expired or already been used. Ask the company you are
             buying from for a new one.
           </p>
+        </Card>
+      </PublicFrame>
+    )
+  }
+
+  if (!checkout.data) return null
+
+  if (pending) {
+    return (
+      <PublicFrame>
+        <Card className="overflow-hidden p-8 text-center">
+          {confirmPoll.data?.settled ? (
+            <>
+              <p className="text-3xl">✓</p>
+              <p className="mt-3 font-medium text-fg">Payment received.</p>
+              <p className="mt-1 text-sm text-fg-muted">
+                Your money is held safely. The seller has been notified.
+              </p>
+            </>
+          ) : pending.type === 'wait' ? (
+            <>
+              <div className="mx-auto size-8 animate-spin rounded-full border-2 border-line-strong border-t-brand" />
+              <p className="mt-4 font-medium text-fg">{pending.message}</p>
+              <p className="mt-1 text-sm text-fg-muted">
+                This page updates itself — no need to refresh.
+              </p>
+              <button
+                type="button"
+                className="mt-6 text-sm font-medium text-brand hover:underline"
+                onClick={() => setPending(null)}
+              >
+                Choose a different way to pay
+              </button>
+            </>
+          ) : (
+            <>
+              <p className="font-medium text-fg">{pending.message}</p>
+              <label className="mt-4 block text-left">
+                <span className="text-sm font-medium text-fg">Code</span>
+                <Input
+                  className="mt-2"
+                  inputMode="numeric"
+                  autoFocus
+                  value={otp}
+                  onChange={(e) => setOtp(e.target.value)}
+                />
+              </label>
+              <Button
+                variant="primary"
+                className="mt-3 w-full"
+                disabled={answerOtp.isPending || !otp.trim()}
+                onClick={() => answerOtp.mutate()}
+              >
+                {answerOtp.isPending ? 'Checking…' : 'Submit code'}
+              </Button>
+              {otpError && (
+                <div className="mt-3 text-left">
+                  <ErrorNote message={otpError} />
+                </div>
+              )}
+            </>
+          )}
         </Card>
       </PublicFrame>
     )
@@ -233,6 +364,24 @@ export function CheckoutPage() {
               </Select>
             </label>
           )}
+
+          {/* Given a number, mobile money is charged right here — a prompt
+              goes straight to the buyer's own phone rather than a page of
+              Flutterwave's. Left blank, it still works exactly as before,
+              on the rail's own hosted page. */}
+          {method === 'mobile_money' && (
+            <label className="mt-3 block">
+              <span className="text-sm font-medium text-fg">Your mobile money number</span>
+              <Input
+                className="mt-2"
+                type="tel"
+                inputMode="tel"
+                placeholder="e.g. 0781 234 567"
+                value={phone}
+                onChange={(e) => setPhone(e.target.value)}
+              />
+            </label>
+          )}
         </div>
 
         <div className="border-t border-line bg-surface-2 px-6 py-5">
@@ -259,17 +408,24 @@ export function CheckoutPage() {
             variant="primary"
             className="w-full"
             disabled={
-              pay.isPending || !method || (networks.length > 1 && !network)
+              pay.isPending ||
+              !method ||
+              (networks.length > 1 && !network) ||
+              (method === 'mobile_money' && !phone.trim())
             }
             onClick={() => pay.mutate()}
           >
             {pay.isPending
-              ? 'Taking you to pay…'
+              ? method === 'mobile_money'
+                ? 'Sending the request to your phone…'
+                : 'Taking you to pay…'
               : !method
                 ? 'Choose a payment method'
                 : networks.length > 1 && !network
                   ? 'Choose which one'
-                  : `Pay ${formatMoney(dueNow, deal.currency)} with ${METHOD_LABEL[method]}`}
+                  : method === 'mobile_money' && !phone.trim()
+                    ? 'Enter your mobile money number'
+                    : `Pay ${formatMoney(dueNow, deal.currency)} with ${METHOD_LABEL[method]}`}
           </Button>
 
           {pay.isError && (
