@@ -1579,6 +1579,33 @@ suite catching both on the first run is the argument for running the whole
 suite after touching a shared function, not just the new test written for
 the change.
 
+**A split deal's checkout excludes any method that cannot fund its second
+charge.** `_shared/rails.ts`'s `METHOD_SUPPORTS_REUSE` is a static fact about
+each `PaymentMethod` — `card` is the only one that can ever produce a
+reusable credential; mobile money is a one-time approval push with nothing
+left over, and neither wallet (PayPal et al. — `chargeSaved` is unbuilt for
+it) nor bank transfer produces one either. `availableMethods`
+(`_shared/checkout.ts`) filters it out of a deal's method list whenever
+`split_percent` is set, because that second installment is not optional — it
+collects automatically the instant both sides confirm, and offering a method
+guaranteed to strand it would be worse than not offering it at all.
+
+**`overage_rate` alone does not trigger this filter.** A deal with only
+overage terms (no split) might never actually owe anything extra — the
+charge is conditional on a late return, not certain the way a split's second
+half is — so excluding mobile money from every overage-eligible deal would
+turn "might get stuck if it's ever late" into "can never book this way,"
+which is a worse trade for a buyer than the plain shortfall this codebase
+already accepts elsewhere (`payout_primary_attempts`, `retry_max_attempts`,
+and every other place a rail may simply fail and wait on a person).
+
+Both callers of `availableMethods` — the hosted checkout page and
+`startCharge`'s own re-check against a client-supplied method — share this
+one filter, so a buyer editing the request directly is refused exactly as a
+buyer clicking a hidden option would have been; there is no second path that
+forgot the rule. `_shared/rails.test.ts` pins the four method flags so a
+silent flip to `true` cannot pass unnoticed.
+
 ## The auto-release timer
 
 `auto-release` has no release path of its own. It writes the missing

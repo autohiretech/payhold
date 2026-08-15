@@ -215,6 +215,19 @@ export const METHOD_BLURB: Record<PaymentMethod, string> = {
   bank_transfer: 'Transfer directly from your bank account.',
 }
 
+/**
+ * Mirrors `payhold-backend/supabase/functions/_shared/rails.ts` — see that
+ * file for why. A fact about the method (can it ever produce a reusable
+ * credential), not something this screen computes a checkout list from; the
+ * hosted checkout's own method list is the backend's read, not this one's.
+ */
+export const METHOD_SUPPORTS_REUSE: Record<PaymentMethod, boolean> = {
+  card: true,
+  mobile_money: false,
+  wallet: false,
+  bank_transfer: false,
+}
+
 export const COUNTRY_LABEL: Record<string, string> = Object.fromEntries(
   COUNTRIES.map((info) => [info.code, info.name]),
 )

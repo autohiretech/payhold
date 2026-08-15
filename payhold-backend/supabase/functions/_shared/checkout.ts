@@ -18,7 +18,7 @@ import type { SupabaseClient } from 'npm:@supabase/supabase-js@2'
 import { loadProvider } from './load-provider.ts'
 import { loadSettings } from './settings.ts'
 import { closedMarkets, liveProviders } from './matrix.ts'
-import { collectionRails, countryInfo, METHOD_LABEL } from './rails.ts'
+import { collectionRails, countryInfo, METHOD_LABEL, METHOD_SUPPORTS_REUSE } from './rails.ts'
 import type { ChargeNextAction, ChargeRequest } from './provider.ts'
 import { PayHoldError, type Deal, type PaymentMethod, type Provider } from './types.ts'
 
@@ -58,8 +58,18 @@ export async function availableMethods(
   const closure = closed.get(deal.buyer_country)
   if (closure && !closure.collect) return []
 
+  // A split deal's second installment is not optional — it collects
+  // automatically the moment both sides confirm, on whatever the buyer paid
+  // with. Offering a method that can never produce a reusable credential
+  // would let a buyer choose one that guarantees that charge gets stuck.
+  // `overage_rate` alone does not trigger this: overage only fires on a late
+  // return, so a method that cannot support it is still a legitimate choice
+  // for the (possibly only) charge that is certain to happen.
+  const needsReusableMethod = deal.split_percent != null && deal.split_percent > 0
+
   return collectionRails(deal.buyer_country, deal.presentment_currency)
     .filter((rail) => live.has(rail.provider))
+    .filter((rail) => !needsReusableMethod || METHOD_SUPPORTS_REUSE[rail.method])
     .map((rail) => ({
       method: rail.method,
       label: METHOD_LABEL[rail.method],

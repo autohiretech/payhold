@@ -13,6 +13,7 @@ import {
   countryInfo,
   currenciesFor,
   defaultProviderFor,
+  METHOD_SUPPORTS_REUSE,
   payoutProviderFor,
   payoutRoute,
   providerFor,
@@ -26,6 +27,15 @@ import { PayHoldError } from './types.ts'
 Deno.test('nothing is marked verified against a provider agreement', () => {
   // Flipping this must be a deliberate act, not something that drifts true.
   assertEquals(RAILS_VERIFIED, false)
+})
+
+Deno.test('only card can fund a split deal\'s automatic second charge', () => {
+  // A silent flip of any of these to true would let availableMethods offer
+  // a split deal a method that is certain to strand its second installment.
+  assertEquals(METHOD_SUPPORTS_REUSE.card, true)
+  assertEquals(METHOD_SUPPORTS_REUSE.mobile_money, false)
+  assertEquals(METHOD_SUPPORTS_REUSE.wallet, false)
+  assertEquals(METHOD_SUPPORTS_REUSE.bank_transfer, false)
 })
 
 Deno.test('every country that is not sanctioned can pay by card', () => {

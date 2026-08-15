@@ -70,6 +70,30 @@ export const METHOD_BLURB: Record<PaymentMethod, string> = {
   bank_transfer: 'Transfer directly from your bank account.',
 }
 
+/**
+ * Whether a charge on this method can ever produce a reusable credential —
+ * a fact about the method itself, not any one provider's implementation. A
+ * mobile money charge is a one-time approval push with nothing left over to
+ * charge again; a card is tokenizable everywhere it is accepted. Neither a
+ * wallet charge (PayPal et al. — `chargeSaved` is unbuilt for it) nor a bank
+ * transfer produces one today either.
+ *
+ * `availableMethods` (`_shared/checkout.ts`) reads this to exclude a method
+ * from a deal with `split_percent` set — the second installment is not
+ * optional, so offering a method that cannot fund it would guarantee that
+ * charge gets stuck at confirmation with no way to collect it. A deal that
+ * merely has `overage_rate` set (no split) is not filtered on this: overage
+ * is conditional on a late return, not a certainty, so a method that cannot
+ * support it is still a legitimate choice — the shortfall stays the seller's
+ * to collect the way it always could, outside PayHold, if it never resolves.
+ */
+export const METHOD_SUPPORTS_REUSE: Record<PaymentMethod, boolean> = {
+  card: true,
+  mobile_money: false,
+  wallet: false,
+  bank_transfer: false,
+}
+
 export interface Rail {
   method: PaymentMethod
   country: Country
