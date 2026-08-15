@@ -47,6 +47,21 @@ import { PayHoldError, type Currency, type Money, type PaymentMethod } from './t
 
 const API = 'https://api.stripe.com/v1'
 
+/**
+ * Stripe attaches a charge's balance transaction asynchronously, usually
+ * within a second or two of the charge succeeding. `resolveProviderFee`
+ * retries this many times, spaced `PROVIDER_FEE_RETRY_DELAY_MS` apart, before
+ * giving up — bounded so a webhook handler still returns promptly, generous
+ * enough to clear Stripe's normal attachment lag. See the fee-drift note on
+ * `resolveProviderFee` for why giving up early is not a safe default.
+ */
+const PROVIDER_FEE_RETRIES = 3
+const PROVIDER_FEE_RETRY_DELAY_MS = 1000
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
 export interface StripeCredentials {
   /** `sk_test_…` or `sk_live_…`. The one that must never leave the server. */
   secret_key: string
@@ -478,7 +493,18 @@ export class StripeProvider implements PaymentProvider {
   /**
    * Resolves the fee Stripe actually took, fetching the balance transaction
    * whenever the verify re-fetch only returned ids. Returns 0 only when there
-   * is genuinely nothing to read — never a guessed amount.
+   * is genuinely nothing to read after retrying — never a guessed amount.
+   *
+   * The retry is the fix for a real incident, not defensive padding. A charge
+   * can succeed — and its webhook fire — before Stripe has attached a balance
+   * transaction to it at all, not just before it was expanded inline: in that
+   * window `charge.balance_transaction` is `null`, not an id, so there is
+   * nothing here to fetch by id either. `fund_deal` calls this exactly once,
+   * so a fee missed in that window was booked as 0 forever — the ledger then
+   * permanently overstated Stripe's real balance by exactly the missing fee,
+   * which is what reconciliation was catching, one deal at a time, as
+   * "drift". Retrying a few times, a second or two apart, covers Stripe's
+   * normal attachment lag without turning a webhook handler into a long poll.
    */
   private async resolveProviderFee(
     intent: StripeIntent,
@@ -494,15 +520,22 @@ export class StripeProvider implements PaymentProvider {
       return txn?.fee ?? 0
     }
     if (typeof intent.latest_charge === 'string') {
-      const ch = await this.call<StripeCharge>(
-        `/charges/${intent.latest_charge}?expand[]=balance_transaction`,
-      )
-      if (ch && ch.balance_transaction && typeof ch.balance_transaction === 'object') return ch.balance_transaction.fee ?? 0
-      if (ch && typeof ch.balance_transaction === 'string') {
-        const txn = await this.call<{ fee?: number }>(
-          `/balance_transactions/${ch.balance_transaction}`,
+      for (let attempt = 0; attempt < PROVIDER_FEE_RETRIES; attempt++) {
+        const ch = await this.call<StripeCharge>(
+          `/charges/${intent.latest_charge}?expand[]=balance_transaction`,
         )
-        return txn?.fee ?? 0
+        if (ch && ch.balance_transaction && typeof ch.balance_transaction === 'object') {
+          return ch.balance_transaction.fee ?? 0
+        }
+        if (ch && typeof ch.balance_transaction === 'string') {
+          const txn = await this.call<{ fee?: number }>(
+            `/balance_transactions/${ch.balance_transaction}`,
+          )
+          return txn?.fee ?? 0
+        }
+        if (attempt < PROVIDER_FEE_RETRIES - 1) {
+          await delay(PROVIDER_FEE_RETRY_DELAY_MS)
+        }
       }
     }
     return 0

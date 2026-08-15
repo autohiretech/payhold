@@ -466,6 +466,48 @@ Deno.test('verify fetches the balance transaction when only its id came back', a
   }
 })
 
+Deno.test('a fee that attaches late is still booked, not lost to the first look', async () => {
+  const original = globalThis.fetch
+  // The incident this pins: Stripe can report a charge as succeeded before it
+  // has attached a balance transaction at all — `balance_transaction` reads
+  // `null`, not even a bare id — so the very first fetch after a webhook has
+  // nothing to read. The old code took that at face value and booked 0
+  // forever, since `fund_deal` only ever calls this once; that permanently
+  // overstated the ledger's idea of Stripe's balance by the missing fee,
+  // which is what reconciliation kept finding as drift on AutoHire's tenant.
+  // Two calls come back empty here before the third succeeds.
+  let calls = 0
+  globalThis.fetch = ((url: string | URL | Request) => {
+    const u = String(url)
+    if (u.includes('/payment_intents/pi_6')) {
+      return Promise.resolve(new Response(JSON.stringify({
+        id: 'pi_6',
+        amount: 3000,
+        amount_received: 3000,
+        currency: 'usd',
+        status: 'succeeded',
+        latest_charge: 'ch_6',
+      }), { status: 200, headers: { 'content-type': 'application/json' } }))
+    }
+    if (u.includes('/charges/ch_6')) {
+      calls++
+      const balance_transaction = calls >= 3 ? { fee: 117 } : null
+      return Promise.resolve(new Response(JSON.stringify({
+        id: 'ch_6',
+        balance_transaction,
+      }), { status: 200, headers: { 'content-type': 'application/json' } }))
+    }
+    return Promise.resolve(new Response('{}', { status: 404 }))
+  }) as typeof fetch
+
+  try {
+    assertEquals((await new StripeProvider(CREDS, '').verify('pi_6')).fee, 117)
+    assertEquals(calls, 3)
+  } finally {
+    globalThis.fetch = original
+  }
+})
+
 // ---------------------------------------------------------------------------
 // The signature
 // ---------------------------------------------------------------------------
