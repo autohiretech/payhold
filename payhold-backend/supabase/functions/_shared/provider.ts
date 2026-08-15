@@ -297,6 +297,19 @@ export interface VerifiedTransaction {
    * drift and answers by freezing the tenant's payouts.
    */
   fee: Money
+  /**
+   * A reusable reference to this buyer's payment method, present only once
+   * the rail has actually confirmed the charge — a card is not reusable
+   * until it has been used successfully once. `null` on a rail with no
+   * saved-method capability (`ProviderCapabilities.supportsSavedPaymentMethod`)
+   * and on every mobile money transaction, which has no reusable credential
+   * at all: a MoMo charge is a one-time approval push, not a token.
+   *
+   * The caller persists this onto `deals.metadata` at funding time, which is
+   * the only place a split deal's later `chargeSaved` call (the balance +
+   * overage charge on return) can read it back from.
+   */
+  saved_payment_method: string | null
 }
 
 export interface PayoutRequest {
@@ -326,6 +339,23 @@ export interface PreauthRequest {
   amount: Money
   currency: Currency
   return_url: string
+  idempotency_key: string
+}
+
+/**
+ * Charge a payment method saved from an earlier, buyer-present charge on this
+ * deal — off-session, with nobody watching. Used for exactly one thing: a
+ * split deal's balance (plus any overage), charged the moment a rental is
+ * confirmed returned.
+ *
+ * `token` is `VerifiedTransaction.saved_payment_method` off the deal's own
+ * funding — never invented, never taken from a request body. A caller naming
+ * its own token would be a caller charging any card it likes.
+ */
+export interface ChargeSavedRequest {
+  token: string
+  amount: Money
+  currency: Currency
   idempotency_key: string
 }
 
@@ -370,6 +400,16 @@ export interface ProviderCapabilities {
   supportsMobileMoney: boolean
   /** The refund is acknowledged now and settles later, by webhook. */
   supportsAsyncRefund: boolean
+  /**
+   * Can this adapter save a payment method at charge time and charge it
+   * again later, off-session? True for Stripe and Flutterwave cards. Never
+   * true for a mobile money charge specifically — see
+   * `VerifiedTransaction.saved_payment_method` — which is why this is a rail
+   * capability rather than something `chargeSaved`'s presence alone answers:
+   * an adapter that serves both cards and MoMo can carry this flag true while
+   * still returning a null token for any given MoMo transaction.
+   */
+  supportsSavedPaymentMethod: boolean
 }
 
 export interface PaymentProvider {
@@ -410,6 +450,17 @@ export interface PaymentProvider {
 
   /** Take some or all of a held pre-auth. */
   capture(providerRef: string, amount: Money): Promise<{ provider_ref: string }>
+
+  /**
+   * Charge a payment method saved from this deal's own funding — a split
+   * deal's balance, charged the moment a rental is confirmed returned, and
+   * never called until then. Optional the way `validate?` is: PayPal has no
+   * adapter for this, and a method every adapter implements but most throw
+   * from would be a worse lie than its absence.
+   * `ProviderCapabilities.supportsSavedPaymentMethod` is what a caller checks
+   * first.
+   */
+  chargeSaved?(req: ChargeSavedRequest): Promise<{ provider_ref: string }>
 
   /** Turn a raw payout destination into a token we can safely store. */
   tokenize(req: TokenizeRequest): Promise<TokenizeResult>
@@ -468,6 +519,7 @@ export class FakeProvider implements PaymentProvider {
     supportsLocalCurrency: true,
     supportsMobileMoney: true,
     supportsAsyncRefund: false,
+    supportsSavedPaymentMethod: true,
   }
 
   /** Everything charged in this process, so `verify()` can answer honestly. */
@@ -491,6 +543,10 @@ export class FakeProvider implements PaymentProvider {
       method: req.method,
       network: req.network ?? null,
       fee: 0,
+      // A card is reusable; mobile money is not — the same rule a real rail
+      // follows, so a demo split deal exercises the identical refusal a
+      // MoMo-funded deal gets in production.
+      saved_payment_method: req.method === 'card' ? this.ref('fakepm') : null,
     })
     return Promise.resolve({
       provider_ref,
@@ -518,6 +574,7 @@ export class FakeProvider implements PaymentProvider {
       // full lifecycle with zero keys, and inventing a fee would make demo
       // balances stop adding up for no gain.
       fee: 0,
+      saved_payment_method: null,
     })
   }
 
@@ -527,6 +584,10 @@ export class FakeProvider implements PaymentProvider {
 
   refund(_req: RefundRequest): Promise<{ provider_ref: string }> {
     return Promise.resolve({ provider_ref: this.ref('fakerfnd') })
+  }
+
+  chargeSaved(_req: ChargeSavedRequest): Promise<{ provider_ref: string }> {
+    return Promise.resolve({ provider_ref: this.ref('fakebal') })
   }
 
   preauth(req: PreauthRequest): Promise<ChargeResult> {
@@ -539,6 +600,7 @@ export class FakeProvider implements PaymentProvider {
       method: 'card',
       network: 'Visa',
       fee: 0,
+      saved_payment_method: null,
     })
     return Promise.resolve({
       provider_ref,

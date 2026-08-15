@@ -29,6 +29,7 @@ import { convert } from '../_shared/fx.ts'
 import { handler, json } from '../_shared/http.ts'
 import { loadProvider } from '../_shared/load-provider.ts'
 import { normaliseIp, recordContext } from '../_shared/request-context.ts'
+import { persistSavedPaymentMethod } from '../_shared/settle.ts'
 import { loadSettings } from '../_shared/settings.ts'
 import { PayHoldError, type PaymentMethod } from '../_shared/types.ts'
 
@@ -283,6 +284,8 @@ Deno.serve(handler(async (req) => {
     console.error('funding failed', { deal_id: deal.id, message: error.message })
     throw new PayHoldError('invalid_state', 'Could not apply that payment')
   }
+
+  await persistSavedPaymentMethod(db, deal.id, verified.saved_payment_method)
 
   return json(req, { status: 'applied', deal_id: deal.id })
 }))

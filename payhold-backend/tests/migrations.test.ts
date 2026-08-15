@@ -394,6 +394,233 @@ describe('deposits', () => {
   })
 })
 
+describe('installment billing', () => {
+  async function seedSplitDeal(opts: {
+    amount?: number
+    /** Omitted defaults to 50; `null` seeds a flat, non-split (daily) deal. */
+    splitPercent?: number | null
+    overageRate?: number | null
+    overageUnitSeconds?: number | null
+    expectedCompleteAt?: string | null
+    status?: string
+  } = {}): Promise<Seeded> {
+    const amount = opts.amount ?? 100_000
+    const split = opts.splitPercent === undefined ? 50 : opts.splitPercent
+    const firstInstallment = split ? Math.round(amount * split / 100) : amount
+    const balance = split ? amount - firstInstallment : null
+
+    const { rows: [tenant] } = await h.db.query<{ id: string }>(
+      `insert into tenants (name, slug) values ('Acme', 'acme-' || gen_random_uuid()) returning id`,
+    )
+    const { rows: [seller] } = await h.db.query<{ id: string }>(
+      `insert into sellers (tenant_id, name, country, payout_currency, payout_provider,
+                            beneficiary_token, masked_destination)
+       values ($1, 'Host', 'RW', 'RWF', 'flutterwave_momo', 'tok_1', 'MTN •••• 4821')
+       returning id`,
+      [tenant.id],
+    )
+    const { rows: [deal] } = await h.db.query<{ id: string }>(
+      `insert into deals (tenant_id, buyer_ref, seller_id, description, amount, currency,
+                          presentment_currency, presentment_amount,
+                          buyer_country, provider, provider_ref, status, fee_amount,
+                          split_percent, balance_amount, overage_rate, overage_unit_seconds,
+                          expected_complete_at)
+       values ($1, 'buyer-1', $2, 'Car hire', $3, 'RWF', 'RWF', $4,
+               'RW', 'fake', 'ref-' || gen_random_uuid(), $5::deal_status, $6,
+               $7, $8, $9, $10, $11)
+       returning id`,
+      [
+        tenant.id, seller.id, amount, firstInstallment, opts.status ?? 'funded_held',
+        Math.round(amount * 0.1), split, balance,
+        opts.overageRate ?? null, opts.overageUnitSeconds ?? null,
+        opts.expectedCompleteAt ?? null,
+      ],
+    )
+
+    return { tenant: tenant.id, seller: seller.id, deal: deal.id }
+  }
+
+  test('a deal with no split and no overage terms has nothing to collect', async () => {
+    const s = await seedDeal()
+    await rejects(
+      () => h.db.query(`select settle_deal_balance($1, 0, 0, 'ref-1')`, [s.deal]),
+      /has no balance to collect/,
+    )
+  })
+
+  test('a flat (non-split) deal can still owe overage on its own', async () => {
+    // A daily rental: no split_percent at all, balance_amount is null from
+    // creation, but overage_rate is set. The old guard read "balance_amount
+    // is null" as "nothing to do" and refused this deal outright.
+    const s = await seedSplitDeal({
+      amount: 100_000,
+      splitPercent: null,
+      overageRate: 5_000,
+      overageUnitSeconds: 86_400,
+    })
+
+    const { rows: [booked] } = await h.db.query<
+      { presentment_amount: string; fee_amount: string; balance_amount: string }
+    >(
+      `select presentment_amount, fee_amount, balance_amount
+         from settle_deal_balance($1, 5000, 500, 'flw_ref_daily')`,
+      [s.deal],
+    )
+    // 100,000 base (no split, all of it charged already) + 5,000 overage;
+    // 10,000 base fee + 500 overage fee.
+    expect(booked).toEqual({
+      presentment_amount: 105_000,
+      fee_amount: 10_500,
+      balance_amount: 0,
+    })
+
+    const { rows: holds } = await h.db.query<{ amount: string }>(
+      `select amount from ledger where deal_id = $1 and entry_type = 'hold'`,
+      [s.deal],
+    )
+    // Only the overage moves — the base amount was already funded in full at
+    // booking, since this deal never split its price.
+    expect(holds).toEqual([{ amount: 5_000 }])
+  })
+
+  test('a flat deal returned on time books nothing, and is not an error', async () => {
+    const s = await seedSplitDeal({
+      amount: 100_000,
+      splitPercent: null,
+      overageRate: 5_000,
+      overageUnitSeconds: 86_400,
+    })
+
+    const { rows: [result] } = await h.db.query<{ presentment_amount: string }>(
+      `select presentment_amount from settle_deal_balance($1, 0, 0, 'flw_ref_ontime')`,
+      [s.deal],
+    )
+    expect(result.presentment_amount).toBe(100_000)
+
+    const { rows: holds } = await h.db.query<{ amount: string }>(
+      `select amount from ledger where deal_id = $1 and entry_type = 'hold'`,
+      [s.deal],
+    )
+    expect(holds).toEqual([])
+  })
+
+  test('books the balance, tops up presentment_amount, and is idempotent', async () => {
+    const s = await seedSplitDeal({ amount: 100_000, splitPercent: 50 })
+
+    const { rows: [booked] } = await h.db.query<
+      { presentment_amount: string; fee_amount: string; balance_amount: string }
+    >(
+      `select presentment_amount, fee_amount, balance_amount
+         from settle_deal_balance($1, 0, 0, 'flw_ref_1')`,
+      [s.deal],
+    )
+    expect(booked).toEqual({
+      presentment_amount: 100_000,
+      fee_amount: 10_000,
+      balance_amount: 0,
+    })
+
+    const { rows: holds } = await h.db.query<{ amount: string }>(
+      `select amount from ledger where deal_id = $1 and entry_type = 'hold'`,
+      [s.deal],
+    )
+    expect(holds).toEqual([{ amount: 50_000 }])
+
+    // A retry after a crash between the charge and this write must not book
+    // it a second time.
+    const { rows: [retried] } = await h.db.query<{ presentment_amount: string }>(
+      `select presentment_amount from settle_deal_balance($1, 0, 0, 'flw_ref_1')`,
+      [s.deal],
+    )
+    expect(retried.presentment_amount).toBe(100_000)
+
+    const { rows: holdsAfterRetry } = await h.db.query<{ amount: string }>(
+      `select amount from ledger where deal_id = $1 and entry_type = 'hold'`,
+      [s.deal],
+    )
+    expect(holdsAfterRetry).toHaveLength(1)
+  })
+
+  test('overage adds to presentment_amount, and its fee adds to fee_amount', async () => {
+    const s = await seedSplitDeal({ amount: 100_000, splitPercent: 50 })
+
+    const { rows: [booked] } = await h.db.query<
+      { presentment_amount: string; fee_amount: string }
+    >(
+      `select presentment_amount, fee_amount from settle_deal_balance($1, 5000, 500, 'flw_ref_2')`,
+      [s.deal],
+    )
+    // 100,000 base + 5,000 overage; 10,000 base fee (already locked at
+    // creation) + 500 overage fee.
+    expect(booked).toEqual({ presentment_amount: 105_000, fee_amount: 10_500 })
+
+    const { rows: holds } = await h.db.query<{ amount: string }>(
+      `select amount from ledger where deal_id = $1 and entry_type = 'hold'`,
+      [s.deal],
+    )
+    expect(holds).toEqual([{ amount: 55_000 }])
+  })
+
+  test('negative overage or its fee is refused', async () => {
+    const s = await seedSplitDeal()
+    await rejects(
+      () => h.db.query(`select settle_deal_balance($1, -1, 0, 'ref')`, [s.deal]),
+      /cannot be negative/,
+    )
+    await rejects(
+      () => h.db.query(`select settle_deal_balance($1, 0, -1, 'ref')`, [s.deal]),
+      /cannot be negative/,
+    )
+  })
+
+  test('a blank provider reference is refused', async () => {
+    const s = await seedSplitDeal()
+    await rejects(
+      () => h.db.query(`select settle_deal_balance($1, 0, 0, '')`, [s.deal]),
+      /must quote the provider/,
+    )
+  })
+
+  test('release_deal releases the full topped-up total, unchanged itself', async () => {
+    const s = await seedSplitDeal({ amount: 100_000, splitPercent: 50 })
+    await h.db.query(`select settle_deal_balance($1, 0, 0, 'flw_ref_3')`, [s.deal])
+
+    await confirm(s.deal, 'buyer')
+    await confirm(s.deal, 'seller')
+    await release(s.deal)
+
+    const { rows: released } = await h.db.query<{ amount: string }>(
+      `select amount from ledger where deal_id = $1 and entry_type = 'release'`,
+      [s.deal],
+    )
+    // The whole 100,000 — release_deal reads `presentment_amount`, which the
+    // balance charge already topped up, and needed no changes of its own to
+    // release the true total.
+    expect(released).toEqual([{ amount: -100_000 }])
+  })
+
+  test('release_deal refuses a split deal whose balance was never collected', async () => {
+    const s = await seedSplitDeal({ amount: 100_000, splitPercent: 50 })
+
+    await confirm(s.deal, 'buyer')
+    await confirm(s.deal, 'seller')
+
+    // Nobody called settle_deal_balance — the ordering `collectBalanceThenConfirm`
+    // enforces in TypeScript, not under this lock. release_deal must refuse on
+    // its own rather than release the deal for half of what it is owed.
+    await rejects(
+      () => release(s.deal),
+      /still owes its balance/,
+    )
+
+    const { rows: released } = await h.db.query<{ amount: string }>(
+      `select amount from ledger where deal_id = $1 and entry_type = 'release'`,
+      [s.deal],
+    )
+    expect(released).toEqual([])
+  })
+})
+
 describe('balances are derived from the ledger', () => {
   test('a funded deal is held and nothing else', async () => {
     const s = await seedDeal()

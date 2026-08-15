@@ -32,6 +32,7 @@
 import type {
   ChargeRequest,
   ChargeResult,
+  ChargeSavedRequest,
   PaymentProvider,
   PayoutRequest,
   PayoutResult,
@@ -137,6 +138,13 @@ interface StripeIntent {
    * it is never logged and never stored, only forwarded.
    */
   client_secret?: string
+  /**
+   * Set on every card charge — see `charge()`. Read back by `verify()` once
+   * the intent has actually succeeded, and combined with `payment_method`
+   * into `VerifiedTransaction.saved_payment_method`.
+   */
+  customer?: string | null
+  payment_method?: string | null
 }
 
 interface StripeCharge {
@@ -189,6 +197,8 @@ export class StripeProvider implements PaymentProvider {
     supportsMobileMoney: false,
     // Alipay and WeChat refunds settle out of band, up to 90 days — §7.1.6.
     supportsAsyncRefund: true,
+    // A deal-scoped Customer, created on every card charge — see `charge()`.
+    supportsSavedPaymentMethod: true,
   }
 
   constructor(
@@ -278,6 +288,21 @@ export class StripeProvider implements PaymentProvider {
       )
     }
 
+    // A Customer scoped to this one deal, never to a person — PayHold stores
+    // no buyer identity (see root CLAUDE.md), so this exists only so the card
+    // that pays this deal can be charged again later for a split deal's
+    // balance. Skipped for anything that is not a card: a wallet or bank
+    // debit here has no `chargeSaved` behind it either.
+    let customer: string | undefined
+    if (req.method === 'card') {
+      const created = await this.call<{ id: string }>('/customers', {
+        method: 'POST',
+        idempotencyKey: `${req.idempotency_key}-customer`,
+        body: { metadata: { deal_id: req.deal_id } },
+      })
+      customer = created.id
+    }
+
     const intent = await this.call<StripeIntent>('/payment_intents', {
       method: 'POST',
       idempotencyKey: req.idempotency_key,
@@ -306,6 +331,13 @@ export class StripeProvider implements PaymentProvider {
         // it; `automatic` — the default — lets Radar decide, which is the
         // silent downgrade.
         payment_method_options: { card: { request_three_d_secure: 'any' } },
+        customer,
+        // Attaches the method to `customer` once this intent succeeds, so a
+        // split deal's balance can be charged again with nobody watching.
+        // Stripe will not always honour this without friction — see
+        // `chargeSaved` — but asking is what makes the later charge possible
+        // at all.
+        setup_future_usage: customer ? 'off_session' : undefined,
       },
     })
 
@@ -398,6 +430,7 @@ export class StripeProvider implements PaymentProvider {
         method: null,
         network: null,
         fee: 0,
+        saved_payment_method: null,
       }
     }
 
@@ -431,6 +464,14 @@ export class StripeProvider implements PaymentProvider {
       ),
       network: charge?.payment_method_details?.card?.brand ?? null,
       fee,
+      // Only once the charge has actually succeeded — an authorized-but-
+      // unconfirmed method is not what "saved" is supposed to mean, and
+      // `chargeSaved` would fail against it anyway. Encoded as one opaque
+      // string, the same way a beneficiary token is opaque: `chargeSaved`
+      // is the only reader.
+      saved_payment_method: intent.status === 'succeeded' && intent.customer && intent.payment_method
+        ? `${intent.customer}:${intent.payment_method}`
+        : null,
     }
   }
 
@@ -585,6 +626,47 @@ export class StripeProvider implements PaymentProvider {
     )
 
     return { provider_ref: captured.id }
+  }
+
+  // -------------------------------------------------------------------------
+  // Charging a saved payment method — a split deal's balance, nobody watching
+  // -------------------------------------------------------------------------
+
+  /**
+   * `req.token` is `customer:payment_method`, exactly as `verify()` encoded
+   * it. `off_session: true` tells Stripe the buyer cannot be asked to do
+   * anything; if the issuer demands authentication anyway, this throws —
+   * there is no live 3DS challenge possible with nobody there to answer it,
+   * which is why this deliberately does not set `request_three_d_secure` the
+   * way every buyer-present charge in this file does. The caller
+   * (`_shared/settle-balance.ts`) turns that failure into a refused
+   * confirmation with the message attached, rather than retrying something
+   * that cannot succeed without a person present.
+   */
+  async chargeSaved(req: ChargeSavedRequest): Promise<{ provider_ref: string }> {
+    const [customer, paymentMethod] = req.token.split(':')
+    if (!customer || !paymentMethod) {
+      throw new PayHoldError(
+        'policy_violation',
+        'This deal has no saved payment method to charge',
+      )
+    }
+
+    const intent = await this.call<StripeIntent>('/payment_intents', {
+      method: 'POST',
+      idempotencyKey: req.idempotency_key,
+      body: {
+        amount: req.amount,
+        currency: req.currency.toLowerCase(),
+        customer,
+        payment_method: paymentMethod,
+        off_session: true,
+        confirm: true,
+        metadata: { kind: 'balance_charge' },
+      },
+    })
+
+    return { provider_ref: intent.id }
   }
 
   // -------------------------------------------------------------------------

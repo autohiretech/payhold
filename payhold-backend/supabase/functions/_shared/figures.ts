@@ -10,6 +10,7 @@
 
 import type { SupabaseClient } from 'npm:@supabase/supabase-js@2'
 import { convertOrThrow } from './fx.ts'
+import { feeFor, loadSettings } from './settings.ts'
 import { PayHoldError, type Deal, type Money } from './types.ts'
 
 export interface ReleaseFigures {
@@ -47,6 +48,76 @@ export async function releaseFigures(
       deal.currency,
       deal.presentment_currency,
     ).amount,
+  }
+}
+
+/**
+ * The overage surcharge — settlement currency, the same currency `amount`
+ * and `fee_amount` are in — for a rental confirmed returned at `confirmedAt`.
+ *
+ * Zero whenever there is nothing to compare: no rate/unit set, no
+ * `expected_complete_at` to be late against, or `confirmedAt` at or before
+ * it. Otherwise `ceil(secondsLate / overage_unit_seconds) * overage_rate` —
+ * a started unit is a whole unit, the same rounding a rental desk uses.
+ */
+export function overageFor(deal: Deal, confirmedAt: Date): Money {
+  if (!deal.overage_rate || !deal.overage_unit_seconds || !deal.expected_complete_at) {
+    return 0
+  }
+
+  const secondsLate = (confirmedAt.getTime() - Date.parse(deal.expected_complete_at)) / 1000
+  if (secondsLate <= 0) return 0
+
+  return Math.ceil(secondsLate / deal.overage_unit_seconds) * deal.overage_rate
+}
+
+export interface BalanceFigures {
+  /** Presentment currency — what `chargeSaved` actually sends to the rail. */
+  chargeAmount: Money
+  p_overage: Money
+  p_overage_fee: Money
+}
+
+/**
+ * Applies the seller's cap, if any, to a computed overage — before the fee
+ * and the currency conversion, so both come out consistent with the capped
+ * amount rather than the fee being charged on money that was never
+ * collected. It can only reduce: `Math.min` means a caller who names a
+ * number bigger than the real overage has no effect, and a negative one is
+ * floored at zero rather than turned into a discount on the rest of the
+ * charge. `override` comes straight off `deal.metadata`, hence the runtime
+ * type check rather than trusting the type system.
+ */
+export function clampOverage(raw: Money, override: unknown): Money {
+  return typeof override === 'number' ? Math.min(raw, Math.max(0, override)) : raw
+}
+
+/**
+ * What `settle_deal_balance` needs to book a split deal's balance (plus any
+ * overage) once the rental is confirmed returned.
+ *
+ * `deal.fee_amount` was already computed at creation off the full
+ * settlement amount, which covers the base price whether it arrives in one
+ * charge or two — only the overage is revenue with no fee counted against it
+ * yet, which is why this computes a fee on the overage alone rather than
+ * recomputing the whole thing.
+ */
+export async function balanceFigures(
+  db: SupabaseClient,
+  deal: Deal,
+  confirmedAt: Date,
+): Promise<BalanceFigures> {
+  const settings = await loadSettings(db, deal.tenant_id)
+  const overageSettlement = clampOverage(overageFor(deal, confirmedAt), deal.metadata?.overage_override)
+  const overageFee = feeFor(overageSettlement, settings)
+  const overagePresentment = overageSettlement > 0
+    ? convertOrThrow(overageSettlement, deal.currency, deal.presentment_currency).amount
+    : 0
+
+  return {
+    chargeAmount: (deal.balance_amount ?? 0) + overagePresentment,
+    p_overage: overagePresentment,
+    p_overage_fee: overageFee,
   }
 }
 

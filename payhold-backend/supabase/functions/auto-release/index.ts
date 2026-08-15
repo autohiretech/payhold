@@ -30,6 +30,7 @@ import { requireCronCaller } from '../_shared/cron-auth.ts'
 import { finishCronRun, startCronRun } from '../_shared/cron-runs.ts'
 import { releaseFigures } from '../_shared/figures.ts'
 import { handler, json } from '../_shared/http.ts'
+import { collectBalanceThenConfirm } from '../_shared/settle-balance.ts'
 import {
   PAST_HOLD_STATUSES,
   type ConfirmSide,
@@ -51,8 +52,9 @@ const BATCH = 50
 const RELEASABLE = ['funded_held', 'confirmed_buyer', 'confirmed_seller']
 
 const DEAL_COLUMNS =
-  'id, tenant_id, seller_id, amount, currency, fee_amount, ' +
-  'presentment_currency, presentment_amount, status, auto_release_at'
+  'id, tenant_id, seller_id, amount, currency, fee_amount, provider, ' +
+  'presentment_currency, presentment_amount, status, auto_release_at, ' +
+  'expected_complete_at, balance_amount, overage_rate, overage_unit_seconds, metadata'
 
 /** Returns false when the deal turned out to be settled already. */
 async function autoRelease(db: SupabaseClient, deal: Deal): Promise<boolean> {
@@ -71,12 +73,7 @@ async function autoRelease(db: SupabaseClient, deal: Deal): Promise<boolean> {
   // error, so a buyer who did confirm keeps their `user` actor and only the
   // silent side is recorded as `auto`.
   for (const side of ['buyer', 'seller'] as ConfirmSide[]) {
-    const { data, error } = await db.rpc('confirm_deal', {
-      p_deal_id: deal.id,
-      p_side: side,
-      p_actor: 'auto',
-      ...figures,
-    })
+    const { data, error } = await collectBalanceThenConfirm(db, deal, side, 'auto', figures)
 
     if (error) {
       // Two passes overlapping, or one retried after a timeout: the other

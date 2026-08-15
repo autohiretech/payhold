@@ -193,6 +193,12 @@ export function DealsPage() {
 
 // ---------------------------------------------------------------------------
 
+/** What each overage unit choice means in seconds — the only vocabulary PayHold itself needs. */
+const OVERAGE_UNIT_SECONDS: Record<'hourly' | 'daily', number> = {
+  hourly: 3600,
+  daily: 86400,
+}
+
 function CreateDealForm({ onClose }: { onClose: () => void }) {
   const sellers = useSellers()
   const settings = useSettings()
@@ -204,6 +210,10 @@ function CreateDealForm({ onClose }: { onClose: () => void }) {
   const [currency, setCurrency] = useState<Currency>('RWF')
   const [country, setCountry] = useState<Country>('RW')
   const [deposit, setDeposit] = useState('')
+  const [expectedCompleteAt, setExpectedCompleteAt] = useState('')
+  const [splitPercent, setSplitPercent] = useState('')
+  const [overageUnit, setOverageUnit] = useState<'' | 'hourly' | 'daily'>('')
+  const [overageRate, setOverageRate] = useState('')
   const [link, setLink] = useState<string | null>(null)
 
   // Country first: it decides which currencies are payable, which in turn
@@ -237,6 +247,14 @@ function CreateDealForm({ onClose }: { onClose: () => void }) {
       currency,
       buyer_country: country,
       deposit_amount: deposit ? Math.round(Number(deposit) * 100) : undefined,
+      expected_complete_at: expectedCompleteAt
+        ? new Date(expectedCompleteAt).toISOString()
+        : undefined,
+      split_percent: splitPercent ? Number(splitPercent) : undefined,
+      overage_unit_seconds: overageUnit ? OVERAGE_UNIT_SECONDS[overageUnit] : undefined,
+      overage_rate: overageUnit && overageRate
+        ? Math.round(Number(overageRate) * 100)
+        : undefined,
     }),
   )
 
@@ -278,6 +296,10 @@ function CreateDealForm({ onClose }: { onClose: () => void }) {
               setDescription('')
               setAmount('')
               setDeposit('')
+              setExpectedCompleteAt('')
+              setSplitPercent('')
+              setOverageUnit('')
+              setOverageRate('')
             }}
           >
             Create another
@@ -430,6 +452,82 @@ function CreateDealForm({ onClose }: { onClose: () => void }) {
               </>
             )}
           </div>
+        </div>
+
+        <div className="rounded-xl bg-surface-2 px-4 py-3.5">
+          <p className="text-xs font-semibold tracking-[0.06em] text-fg-muted uppercase">
+            Installment billing — optional
+          </p>
+          <div className="mt-3 grid gap-4 sm:grid-cols-3">
+            <Field
+              label="Expected return"
+              hint="When overage is measured against, and the auto-release deadline."
+            >
+              <Input
+                type="datetime-local"
+                value={expectedCompleteAt}
+                onChange={(e) => setExpectedCompleteAt(e.target.value)}
+              />
+            </Field>
+
+            <Field
+              label="Charge now"
+              hint="Leave empty to charge the full amount at booking, as usual."
+            >
+              <Select
+                value={splitPercent}
+                onChange={(e) => setSplitPercent(e.target.value)}
+              >
+                <option value="">Everything, now</option>
+                <option value="50">50% now, rest on return</option>
+              </Select>
+            </Field>
+
+            <Field label="Late-return surcharge">
+              <Select
+                value={overageUnit}
+                onChange={(e) => setOverageUnit(e.target.value as '' | 'hourly' | 'daily')}
+              >
+                <option value="">None</option>
+                <option value="hourly">Per hour late</option>
+                <option value="daily">Per day late</option>
+              </Select>
+            </Field>
+          </div>
+
+          {overageUnit && (
+            <div className="mt-3 grid gap-4 sm:grid-cols-3">
+              <Field
+                label={`Rate (${currency} per ${overageUnit === 'hourly' ? 'hour' : 'day'})`}
+                hint={
+                  !expectedCompleteAt
+                    ? 'Needs an expected return time above — otherwise nothing is ever late.'
+                    : undefined
+                }
+              >
+                <Input
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  value={overageRate}
+                  onChange={(e) => setOverageRate(e.target.value)}
+                  placeholder="0"
+                />
+              </Field>
+            </div>
+          )}
+
+          {splitPercent && (
+            <p className="mt-3 text-xs text-fg-muted">
+              {formatMoney(
+                Math.round((Number(amount) || 0) * 100 * Number(splitPercent) / 100),
+                currency,
+              )}{' '}
+              charged now, the rest charged automatically the moment the rental is
+              confirmed returned — no review step, since it is the price already
+              agreed.
+            </p>
+          )}
         </div>
 
         {create.isError && <ErrorNote message={(create.error as Error).message} />}

@@ -179,6 +179,23 @@ How much has gone back is `deal_amounts.refunded`.
 (Security deposits were always partially capturable — `capture_deposit`, spec
 §22, a different thing from a refund.)
 
+**Installment billing is a client-opt-in addition, not a spec section** — no
+§ number, added directly at a client's request rather than tracked through
+`PAYHOLD_V2_PLAN.md`. A deal may set `split_percent` (charge that percentage
+now, the rest when confirmed returned) and, independently, `overage_rate` +
+`overage_unit_seconds` (extra time × the booked rate, past
+`expected_complete_at`) — a flat, non-split deal can owe overage on its own,
+which is not the same fact as owing a balance. Both are optional and null by
+default, so an existing deal shape is unaffected. The second charge fires
+automatically at the completing confirmation, on a saved payment method —
+card only; MoMo has no reusable credential and refuses cleanly rather than
+silently skipping it. The seller can reduce or waive the overage before it
+is charged, via their own confirm call — the one point of human judgement in
+an otherwise automatic charge; it can only lower the amount, never raise it.
+See `payhold-backend/CLAUDE.md`'s "Installment billing" section for the
+mechanism, including the release-time guard that refuses to release a deal
+whose balance was never collected.
+
 ## Invariants — every money path must satisfy all of these
 
 1. **Service-role only.** All money writes happen in Edge Functions using the
@@ -239,9 +256,17 @@ One interface, all rails behind it:
 
 ```ts
 interface PaymentProvider {
-  charge, release, refund, preauth, capture
+  charge, release, refund, preauth, capture, chargeSaved?
 }
 ```
+
+`chargeSaved` is optional and additive — installment billing's second charge,
+off a card saved at the first. It does not touch `preauth`/`capture`, which
+stay exactly what §22 deposits have always used. Each adapter's own
+`capabilities.supportsSavedPaymentMethod` (TypeScript, not the SQL
+`provider_capabilities` table) says whether it can do it at all; MoMo cannot
+and never will, since there is no reusable credential behind a mobile money
+charge.
 
 - `FlutterwaveProvider` — full implementation. Cards + MTN MoMo + Airtel Money.
   Payouts via Transfers API to tokenized beneficiaries.

@@ -169,6 +169,9 @@ export class PayPalProvider implements PaymentProvider {
     supportsMobileMoney: false,
     // A PayPal refund is terminal when their API returns COMPLETED.
     supportsAsyncRefund: false,
+    // No adapter for this — `chargeSaved` is absent, and this class isn't
+    // enabled anyway (see `payhold-backend/CLAUDE.md`: no signed agreement).
+    supportsSavedPaymentMethod: false,
   }
 
   /** Cached bearer token and the moment it stops being usable. */
@@ -399,6 +402,10 @@ export class PayPalProvider implements PaymentProvider {
       method: 'wallet',
       network: 'paypal',
       fee,
+      // No adapter here saves a payment method — `supportsSavedPaymentMethod`
+      // is false on this class, and no caller should ever read this as
+      // anything but null.
+      saved_payment_method: null,
     }
   }
 

@@ -577,6 +577,91 @@ Deno.test('verify derives the provider fee from what actually settled', async ()
   }
 })
 
+Deno.test('verify surfaces a card token only once the charge has succeeded', async () => {
+  const { restore } = intercept({
+    data: {
+      id: 12347,
+      tx_ref: 'tx_3',
+      amount: 1000,
+      currency: 'RWF',
+      status: 'successful',
+      payment_type: 'card',
+      card: { type: 'VISA', token: 'flw-token-1' },
+    },
+  })
+
+  try {
+    const v = await new FlutterwaveProvider(CREDS, '').verify('tx_3')
+    assertEquals(v.saved_payment_method, 'flw-token-1')
+  } finally {
+    restore()
+  }
+})
+
+Deno.test('mobile money never carries a saved payment method, even if a rail sent one', async () => {
+  const { restore } = intercept({
+    data: {
+      id: 12348,
+      tx_ref: 'tx_4',
+      amount: 1000,
+      currency: 'RWF',
+      status: 'successful',
+      payment_type: 'mobilemoney',
+    },
+  })
+
+  try {
+    const v = await new FlutterwaveProvider(CREDS, '').verify('tx_4')
+    assertEquals(v.saved_payment_method, null)
+  } finally {
+    restore()
+  }
+})
+
+Deno.test('an unsuccessful charge never reports a saved payment method', async () => {
+  const { restore } = intercept({
+    data: {
+      id: 12349,
+      tx_ref: 'tx_5',
+      amount: 1000,
+      currency: 'RWF',
+      status: 'pending',
+      payment_type: 'card',
+      card: { type: 'VISA', token: 'flw-token-2' },
+    },
+  })
+
+  try {
+    const v = await new FlutterwaveProvider(CREDS, '').verify('tx_5')
+    assertEquals(v.saved_payment_method, null)
+  } finally {
+    restore()
+  }
+})
+
+Deno.test('chargeSaved sends the saved token to the tokenized-charges endpoint', async () => {
+  const { seen, restore } = intercept({ data: { id: 999, status: 'successful' } })
+
+  try {
+    const out = await new FlutterwaveProvider(CREDS, '').chargeSaved({
+      token: 'flw-token-1',
+      amount: 45_000,
+      currency: 'RWF',
+      idempotency_key: 'balance:deal_1',
+    })
+    assertEquals(out.provider_ref, '999')
+  } finally {
+    restore()
+  }
+
+  assertEquals(seen.url?.includes('/tokenized-charges'), true, seen.url)
+  const body = JSON.parse(seen.body!)
+  assertEquals(body.token, 'flw-token-1')
+  // RWF is zero-decimal, so major and minor units are the same number here —
+  // the case that has already caught a wrong divide-by-100 once in this file.
+  assertEquals(body.amount, 45_000)
+})
+
 Deno.test('verify falls back to app_fee when settlement is absent', async () => {
   const { restore } = intercept({
     data: {

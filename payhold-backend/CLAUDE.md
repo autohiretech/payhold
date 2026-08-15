@@ -1460,6 +1460,125 @@ roster is not that. Wiring inactivity into the eligibility gate is a real
 option for later, but it is a deliberate policy decision that belongs next to
 `screen_payout`'s other conditions, not a side effect of this column shipping.
 
+## Installment billing — pay-to-book + pay-on-return, migrations `20260815000004` and `20260815000005`
+
+A deal has always been funded in one charge. This adds two independent,
+optional behaviours a client turns on per deal by sending numbers at
+creation, deliberately generic rather than a literal "hourly vs daily"
+concept — the spec gives a client ownership of its own pricing, and
+PayHold's job is to stay agnostic to deal type:
+
+- **`split_percent`** — charge this percentage now, the rest when the
+  rental is confirmed returned. Null means "all of it now," today's
+  behaviour, unaffected.
+- **`overage_rate` + `overage_unit_seconds`** — a per-unit price and how
+  long a unit is (3600 for hourly, 86400 for daily, or anything else),
+  charged only if the deal is confirmed returned after
+  `expected_complete_at`. Null means overage is never charged.
+
+**`presentment_amount` means the first installment for a split deal, not
+the whole booking.** `balance_amount` is the rest, derived once at creation
+and frozen the same way `fee_amount` is — a rate change mid-rental must not
+reprice a deal that already exists. This is what lets `fund_deal` and
+`startCharge` need zero changes: a split deal simply asks for a smaller
+number first.
+
+**A flat, non-split deal can still owe overage on its own** — a daily
+rental sets `overage_rate` with no `split_percent` at all, so
+`balance_amount` stays null its whole life while overage is still real
+money if the return is late. This shipped broken the first time: the
+original guard read `balance_amount is null` as "nothing to do here," which
+is true for a plain deal but not for a daily one, so overage was silently
+never collected for anything but a split deal. Fixed by checking
+`overage_rate` too, everywhere `balance_amount` alone used to be the
+signal — `collectBalanceThenConfirm`'s gate, and `settle_deal_balance`'s own
+refusal and no-op checks, both now read `coalesce(balance_amount, 0)`
+rather than the column bare. `tests/migrations.test.ts` pins a flat deal
+booking only its overage, and a flat deal returned on time booking nothing
+and raising no error.
+
+`settle_deal_balance` books the second charge, once, under the deal's row
+lock: refuses a deal with nothing owed at all — no split *and* no overage
+terms — is a no-op when there is genuinely nothing to collect this pass
+(covers both the idempotent retry of an already-settled split deal and an
+on-time flat deal, via the `coalesce`), refuses a negative overage or fee,
+and refuses a blank provider reference. It adds `balance_amount + overage`
+to `presentment_amount` and the overage's own fee to `fee_amount` — the
+base fee was already computed off the full settlement amount at creation,
+so only the overage's fee is new. Overage itself is computed in TypeScript
+(`_shared/figures.ts`'s `overageFor` and `balanceFigures`), the same
+division of labour as every other FX and fee figure:
+`ceil(secondsLate / overage_unit_seconds) * overage_rate`, zero if on time
+or if either column is unset. `collectBalance` (`_shared/settle-balance.ts`)
+checks the computed charge amount before asking for a saved payment method
+at all — so a MoMo-funded flat deal that came back on time is never
+wrongly refused over a capability it never needed.
+
+**The seller can reduce or waive the overage before it is charged** — the
+one point of human judgement in an otherwise fully automatic charge.
+`deals.metadata.overage_override`, set only via the seller's own
+`POST /deals/:id/confirm` (never a separate endpoint, and refused from the
+buyer's side), caps what `overageFor` would otherwise charge:
+`_shared/figures.ts`'s `clampOverage` is a small pure function —
+`Math.min(raw, Math.max(0, override))` — applied before the fee and the FX
+conversion, so a reduced charge produces a correspondingly reduced fee
+rather than fee-on-money-never-collected. It is persisted on the deal
+rather than passed through only the one call that sets it, because the
+confirmation that actually completes the pair — and triggers the charge —
+may be the *other* side's, arriving later. `setOverageOverride` refuses a
+deal with no overage terms to adjust, the same instinct as every other
+"refuse a no-op dressed up as an action" check in this codebase.
+
+**Card-on-file is additive to the provider interface, not a replacement of
+it.** `chargeSaved` is a new, optional method alongside `preauth`/`capture` —
+deposits are untouched. Stripe creates a `Customer` at the first charge
+(`setup_future_usage: 'off_session'`) and later charges it with
+`off_session: true, confirm: true` and no `request_three_d_secure`, since
+there is nobody present to complete a challenge. Flutterwave's equivalent
+reads a card token off the verified transaction and posts to
+`/tokenized-charges` — flagged in the adapter as unconfirmed against
+Flutterwave's own current documentation, the same caveat every unexercised
+live-call path in this file carries. **MoMo has no reusable credential and
+never will**; a MoMo-funded split deal cannot collect its balance
+automatically, and `collectBalance` (`_shared/settle-balance.ts`) refuses it
+by name rather than silently doing nothing.
+
+**The charge has to land before release, not after.** `collectBalanceThenConfirm`
+is the shared helper both `POST /deals/:id/confirm` and the `auto-release`
+cron call in place of a bare `confirm_deal`, whenever this confirmation
+would complete the pair and a balance is still owed: it calls
+`provider.chargeSaved`, books the result via `settle_deal_balance`, and only
+then calls `confirm_deal` — which releases normally, now against the
+topped-up total. If the charge fails (no saved method, or an off-session
+decline), the confirmation is refused with an audit row and an
+`order.balance_charge_failed` webhook rather than silently dropped; there is
+no automatic retry ladder for this charge, on purpose — a smaller, safer
+scope than duplicating the payout retry machinery for a charge a tenant can
+just prompt the renter to retry out of band.
+
+**That ordering lived entirely in TypeScript until `20260815000005`, and
+that was a gap worth closing rather than trusting.** Nothing stopped a
+future caller of `confirm_deal` — a correction run by hand, a code path this
+migration cannot see — from completing the pair without ever collecting the
+balance, which `release_deal` would have released anyway, reading whatever
+`presentment_amount` said. `release_deal` now carries one new guard, checked
+under the same lock as its refusal of a refunded deal a few lines above: it
+refuses outright while `balance_amount` is still positive. Every other
+release guard in this codebase lives under the row lock for the same reason
+— a TypeScript caller always doing the right thing is a convention, not a
+guarantee.
+
+Reconstructing `release_deal`'s body for that migration is what caught two
+things worth naming as a lesson rather than just fixing: writing a `create
+or replace` from memory instead of reading the live definition first
+silently dropped the `deposit_release` ledger write (deposits are supposed
+to be untouched by this feature entirely) and invented a `damage_claim_id`
+predicate left over from the fully-reverted damage-claims feature, which
+does not exist in this schema. `tests/migrations.test.ts`'s full `release`
+suite catching both on the first run is the argument for running the whole
+suite after touching a shared function, not just the new test written for
+the change.
+
 ## The auto-release timer
 
 `auto-release` has no release path of its own. It writes the missing

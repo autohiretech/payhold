@@ -16,6 +16,7 @@ import forge from 'npm:node-forge@1.3.1'
 import type {
   ChargeRequest,
   ChargeResult,
+  ChargeSavedRequest,
   PaymentProvider,
   PayoutRequest,
   PayoutResult,
@@ -203,6 +204,11 @@ export class FlutterwaveProvider implements PaymentProvider {
     supportsMobileMoney: true,
     // Transfers and refunds settle out of band; the webhook is what confirms.
     supportsAsyncRefund: true,
+    // Card only, and only once a charge has actually verified — see
+    // `verify()`. A MoMo transaction never carries a token, whatever this
+    // flag says: there is no reusable credential a mobile money charge
+    // produces, only a one-time approval push.
+    supportsSavedPaymentMethod: true,
   }
 
   constructor(
@@ -660,7 +666,15 @@ export class FlutterwaveProvider implements PaymentProvider {
       currency: string
       status: string
       payment_type?: string
-      card?: { type?: string }
+      /**
+       * `token` is present only when tokenization is switched on for this
+       * Flutterwave account and this transaction was a card — never for
+       * mobile money, which has no equivalent. Read into
+       * `VerifiedTransaction.saved_payment_method` below. **Unverified
+       * against Flutterwave's own current documentation** — confirm the
+       * exact field name before this carries live money.
+       */
+      card?: { type?: string; token?: string }
       /**
        * What Flutterwave charged us for this collection. `amount_settled` is the
        * amount that actually landed in the merchant balance, so the fee is
@@ -698,6 +712,7 @@ export class FlutterwaveProvider implements PaymentProvider {
       method: toMethod(data.payment_type),
       network: data.card?.type ?? null,
       fee,
+      saved_payment_method: data.status === 'successful' ? data.card?.token ?? null : null,
     }
   }
 
@@ -774,6 +789,42 @@ export class FlutterwaveProvider implements PaymentProvider {
       method: 'POST',
       body: JSON.stringify({ amount: toMajor(amount, tx.currency) }),
     })
+    return { provider_ref: String(data.id) }
+  }
+
+  // -------------------------------------------------------------------------
+  // Charging a saved card — a split deal's balance, nobody watching
+  // -------------------------------------------------------------------------
+
+  /**
+   * `req.token` is `card.token` from a prior verified charge (see `verify()`)
+   * — present only when tokenization is enabled on this Flutterwave account
+   * and the funding charge was a card. Never reachable for a MoMo-funded
+   * deal: `verify()` never sets a token for one, so `deals.metadata` never
+   * carries one to read, and the caller (`_shared/settle-balance.ts`)
+   * refuses before it ever gets here.
+   *
+   * **Unverified against Flutterwave's own current documentation** — same
+   * posture every other rail claim in this file takes. Confirm the
+   * `/tokenized-charges` endpoint and field names before this carries live
+   * money.
+   */
+  async chargeSaved(req: ChargeSavedRequest): Promise<{ provider_ref: string }> {
+    const data = await this.call<{ id: number; tx_ref?: string; status?: string }>(
+      '/tokenized-charges',
+      {
+        method: 'POST',
+        idempotencyKey: req.idempotency_key,
+        body: JSON.stringify({
+          token: req.token,
+          currency: req.currency,
+          amount: toMajor(req.amount, req.currency),
+          email: 'balance-charge@payhold.invalid',
+          tx_ref: req.idempotency_key,
+        }),
+      },
+    )
+
     return { provider_ref: String(data.id) }
   }
 

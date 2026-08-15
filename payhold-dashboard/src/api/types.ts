@@ -206,6 +206,23 @@ export interface Deal {
   /** §6.1's new-seller carve-out, decided at release. Zero when none applies. */
   reserve_amount: Money
   reserve_until: Timestamp | null
+  /**
+   * Installment billing. Null means "charge it all now" — today's default,
+   * unaffected. When set, `presentment_amount` is the FIRST installment
+   * only; `balance_amount` is what's still owed, charged automatically the
+   * moment the rental is confirmed returned.
+   */
+  split_percent: number | null
+  /** What's still owed after the first charge. Zero once collected. */
+  balance_amount: Money | null
+  balance_provider_ref: string | null
+  /**
+   * A per-unit price and unit length (seconds) for a late-return surcharge —
+   * e.g. 3600 for hourly, 86400 for daily. Charged only when confirmed
+   * returned after `expected_complete_at`. Independent of `split_percent`.
+   */
+  overage_rate: Money | null
+  overage_unit_seconds: number | null
   completion_policy: CompletionPolicy
   confirmations: Confirmation[]
   metadata: Record<string, string>
@@ -1712,6 +1729,16 @@ export interface CreateDealInput {
   /** §7, presentment currency. The client knows its own tax rules; we do not. */
   tax_amount?: Money
   discount_amount?: Money
+  /**
+   * Installment billing. `split_percent` charges that percentage now and
+   * the rest on return; `overage_rate` + `overage_unit_seconds` charge a
+   * late-return surcharge, independent of whether the deal is split at all.
+   * `overage_rate` needs `expected_complete_at` set — there is otherwise
+   * nothing to be late against.
+   */
+  split_percent?: number
+  overage_rate?: Money
+  overage_unit_seconds?: number
   metadata?: Record<string, string>
 }
 

@@ -412,6 +412,14 @@ function Breakdown({
               muted
             />
           )}
+          {deal.split_percent !== null && (
+            <Row
+              label="Due on return"
+              value={formatMoney(deal.balance_amount ?? 0, deal.presentment_currency)}
+              muted
+              hint="Charged automatically once the rental is confirmed returned — no review step."
+            />
+          )}
         </dl>
       </>
     )
@@ -465,6 +473,22 @@ function Breakdown({
             label="Security deposit"
             value={formatMoney(deal.deposit_amount, deal.currency)}
             muted
+          />
+        )}
+        {deal.split_percent !== null && (
+          <Row
+            label={deal.balance_amount ? 'Balance still due on return' : 'Balance'}
+            value={
+              deal.balance_amount
+                ? formatMoney(deal.balance_amount, deal.presentment_currency)
+                : 'Collected'
+            }
+            muted
+            hint={
+              deal.balance_amount
+                ? 'Charged automatically once the rental is confirmed returned, plus overage if it comes back late.'
+                : 'Charged when the rental was confirmed returned. Any overage is folded into what was collected.'
+            }
           />
         )}
       </dl>

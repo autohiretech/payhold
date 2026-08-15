@@ -110,6 +110,33 @@ export interface Settlement {
 }
 
 /**
+ * Persist a reusable payment-method reference onto a deal's own metadata —
+ * the only place a split deal's later balance charge (`chargeSaved`) can
+ * read it back from. Every caller of `fund_deal` reaches this: this file's
+ * own poll/sweep path, and both inbound webhooks, which fund deals directly
+ * rather than through here.
+ *
+ * A merge, not an overwrite: `deals.metadata` may already carry other keys a
+ * caller set at creation, and clobbering them here would make this a second
+ * writer stepping on the first.
+ */
+export async function persistSavedPaymentMethod(
+  db: SupabaseClient,
+  dealId: string,
+  token: string | null,
+): Promise<void> {
+  if (!token) return
+
+  const { data } = await db.from('deals').select('metadata').eq('id', dealId).maybeSingle()
+  const metadata = (data?.metadata ?? {}) as Record<string, unknown>
+
+  await db
+    .from('deals')
+    .update({ metadata: { ...metadata, saved_payment_method: token } })
+    .eq('id', dealId)
+}
+
+/**
  * Ask the rail whether this deal's charge landed, and book the hold if it did.
  *
  * `hint` carries what the checkout session knows and the deal row does not yet.
@@ -251,6 +278,10 @@ export async function settleDeal(
   const written = data as unknown as { status: DealStatus } | null
   const status = written?.status ?? deal.status
   const held = status === 'funded_held'
+
+  if (held) {
+    await persistSavedPaymentMethod(db, deal.id, verified.saved_payment_method)
+  }
 
   return { status, funded: held, reason: held ? null : 'mismatch' }
 }

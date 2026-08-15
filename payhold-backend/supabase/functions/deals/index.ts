@@ -28,6 +28,7 @@ import type { SupabaseClient } from 'npm:@supabase/supabase-js@2'
 import { assertPayoutsNotFrozen, resolveCaller, type Caller } from '../_shared/auth.ts'
 import { serviceClient } from '../_shared/auth.ts'
 import { releaseFigures } from '../_shared/figures.ts'
+import { collectBalanceThenConfirm, setOverageOverride } from '../_shared/settle-balance.ts'
 import { convertOrThrow, presentmentCurrencyFor } from '../_shared/fx.ts'
 import { handler, json, readJson, required } from '../_shared/http.ts'
 import { startCharge } from '../_shared/checkout.ts'
@@ -58,6 +59,8 @@ const DEAL_COLUMNS = `
   status, expected_complete_at, auto_release_at, released_at, payout_due_at,
   fee_amount, tax_amount, discount_amount, provider_fee_amount,
   reserve_amount, reserve_until,
+  split_percent, balance_amount, balance_provider_ref,
+  overage_rate, overage_unit_seconds,
   completion_event, auto_complete_after_hours, clearing_days,
   metadata, created_at, updated_at
 `
@@ -143,6 +146,43 @@ async function create(
     }
   }
 
+  // Installment billing. `split_percent` alone charges that percentage now
+  // and the rest on return; `overage_rate`/`overage_unit_seconds` alone
+  // charges a late-return surcharge with no split at all. Independent knobs
+  // — a deal may set either, both, or neither.
+  if (body.split_percent !== undefined && body.split_percent !== null) {
+    if (
+      !Number.isInteger(body.split_percent) ||
+      body.split_percent < 1 || body.split_percent > 99
+    ) {
+      throw new PayHoldError(
+        'policy_violation',
+        'split_percent must be an integer between 1 and 99',
+      )
+    }
+  }
+
+  const hasOverageRate = body.overage_rate !== undefined && body.overage_rate !== null
+  const hasOverageUnit = body.overage_unit_seconds !== undefined && body.overage_unit_seconds !== null
+  if (hasOverageRate || hasOverageUnit) {
+    if (
+      !hasOverageRate || !hasOverageUnit ||
+      !Number.isInteger(body.overage_rate) || body.overage_rate! <= 0 ||
+      !Number.isInteger(body.overage_unit_seconds) || body.overage_unit_seconds! <= 0
+    ) {
+      throw new PayHoldError(
+        'policy_violation',
+        'overage_rate and overage_unit_seconds must both be set together, as positive integers',
+      )
+    }
+    if (!body.expected_complete_at) {
+      throw new PayHoldError(
+        'policy_violation',
+        'overage_rate needs expected_complete_at — otherwise there is nothing to be late against',
+      )
+    }
+  }
+
   const settings = await loadSettings(db, caller.tenant_id)
 
   if (settings.currencies.length > 0 && !settings.currencies.includes(body.currency)) {
@@ -204,6 +244,16 @@ async function create(
   // locked from the provider's rate at funding.
   const converted = convertOrThrow(body.amount, body.currency, presentmentCurrency)
 
+  // `presentment_amount` becomes the FIRST installment for a split deal —
+  // `fund_deal` needs no changes because it already just funds whatever this
+  // column says. `balanceAmount` is the remainder, derived rather than a
+  // second percentage of the total, so the two always add back up exactly
+  // even when the split does not divide evenly.
+  const firstInstallment = body.split_percent
+    ? Math.round(converted.amount * body.split_percent / 100)
+    : converted.amount
+  const balanceAmount = body.split_percent ? converted.amount - firstInstallment : null
+
   const { data, error } = await db
     .from('deals')
     .insert({
@@ -214,7 +264,11 @@ async function create(
       amount: body.amount,
       currency: body.currency,
       presentment_currency: presentmentCurrency,
-      presentment_amount: converted.amount,
+      presentment_amount: firstInstallment,
+      split_percent: body.split_percent ?? null,
+      balance_amount: balanceAmount,
+      overage_rate: body.overage_rate ?? null,
+      overage_unit_seconds: body.overage_unit_seconds ?? null,
       deposit_amount: body.deposit_amount ?? null,
       buyer_country: buyerCountry,
       provider: defaultProviderFor(buyerCountry, presentmentCurrency),
@@ -439,24 +493,35 @@ async function confirm(
   caller: Caller,
   id: string,
 ): Promise<Response> {
-  const body = await readJson<{ side: ConfirmSide }>(req)
+  const body = await readJson<{ side: ConfirmSide; overage_override?: number }>(req)
   required(body as unknown as Record<string, unknown>, 'side')
 
   if (body.side !== 'buyer' && body.side !== 'seller') {
     throw new PayHoldError('policy_violation', 'side must be "buyer" or "seller"')
   }
 
-  const deal = await getDeal(db, caller, id)
+  let deal = await getDeal(db, caller, id)
+
+  // The host's one lever on the late charge: reduce or waive it before it is
+  // charged. Only the seller's own confirm call may carry it — the renter
+  // deciding their own late fee is the thing this would otherwise let happen.
+  if (body.overage_override !== undefined && body.overage_override !== null) {
+    if (body.side !== 'seller') {
+      throw new PayHoldError('policy_violation', 'only the seller can adjust the overage charge')
+    }
+    deal = await setOverageOverride(db, deal, body.overage_override)
+  }
 
   // Everything about whether this releases is decided inside the SQL function,
   // under a row lock. This side only supplies the figures a release needs, and
   // supplies them whether or not one happens.
-  const { error } = await db.rpc('confirm_deal', {
-    p_deal_id: deal.id,
-    p_side: body.side,
-    p_actor: 'user',
-    ...(await releaseFigures(db, deal)),
-  })
+  const { error } = await collectBalanceThenConfirm(
+    db,
+    deal,
+    body.side,
+    'user',
+    await releaseFigures(db, deal),
+  )
 
   if (error) throw rpcError(error, 'confirm')
 
@@ -586,7 +651,7 @@ async function captureDeposit(
 
   if (depositRef) {
     const { provider } = await loadProvider(db, caller.tenant_id, deal.provider)
-    await provider.capture(depositRef, body.amount)
+    await provider.capture(String(depositRef), body.amount)
   }
 
   // The guards — has a deposit, not already settled, never more than was held

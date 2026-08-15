@@ -137,6 +137,147 @@ Deno.test('the idempotency key is a header, so a retry is not a second charge', 
   assertEquals(seen.headers?.get('idempotency-key'), 'payout:abc')
 })
 
+Deno.test('a card charge creates a deal-scoped Customer and asks to save the method', async () => {
+  let call = 0
+  const original = globalThis.fetch
+  const bodies: string[] = []
+
+  globalThis.fetch = ((url: string | URL | Request, init?: RequestInit) => {
+    call += 1
+    bodies.push(init?.body ? String(init.body) : '')
+    return Promise.resolve(
+      new Response(
+        JSON.stringify(
+          call === 1
+            ? { id: 'cus_1' }
+            : { id: 'pi_2', client_secret: 'pi_2_secret_x' },
+        ),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      ),
+    )
+  }) as typeof fetch
+
+  try {
+    await new StripeProvider(CREDS, '').charge({
+      deal_id: 'deal_2',
+      amount: 50_000,
+      currency: 'USD',
+      method: 'card',
+      return_url: 'https://app/return',
+      three_d_secure: true,
+      idempotency_key: 'k2',
+    })
+  } finally {
+    globalThis.fetch = original
+  }
+
+  const customerBody = decodeURIComponent(bodies[0] ?? '')
+  assertEquals(customerBody.includes('metadata[deal_id]=deal_2'), true, customerBody)
+
+  const intentBody = decodeURIComponent(bodies[1] ?? '')
+  assertEquals(intentBody.includes('customer=cus_1'), true, intentBody)
+  // What later lets a split deal's balance be charged off-session.
+  assertEquals(intentBody.includes('setup_future_usage=off_session'), true, intentBody)
+})
+
+Deno.test('a mobile money charge never creates a Customer', async () => {
+  const { seen, restore } = intercept({ id: 'pi_3', client_secret: 'pi_3_secret_x' })
+
+  try {
+    await new StripeProvider(CREDS, '').charge({
+      deal_id: 'deal_3',
+      amount: 1000,
+      currency: 'USD',
+      method: 'wallet',
+      network: 'cashapp',
+      return_url: 'https://app/return',
+      three_d_secure: false,
+      idempotency_key: 'k3',
+    })
+  } finally {
+    restore()
+  }
+
+  const body = decodeURIComponent(seen.body ?? '')
+  assertEquals(body.includes('customer='), false, body)
+  assertEquals(body.includes('setup_future_usage'), false, body)
+})
+
+Deno.test('chargeSaved sends an off-session, pre-confirmed charge against the saved token', async () => {
+  const { seen, restore } = intercept({ id: 'pi_4' })
+
+  try {
+    const result = await new StripeProvider(CREDS, '').chargeSaved({
+      token: 'cus_1:pm_1',
+      amount: 45_000,
+      currency: 'USD',
+      idempotency_key: 'balance:deal_1',
+    })
+    assertEquals(result.provider_ref, 'pi_4')
+  } finally {
+    restore()
+  }
+
+  const body = decodeURIComponent(seen.body ?? '')
+  assertEquals(body.includes('customer=cus_1'), true, body)
+  assertEquals(body.includes('payment_method=pm_1'), true, body)
+  assertEquals(body.includes('off_session=true'), true, body)
+  assertEquals(body.includes('confirm=true'), true, body)
+  // Off-session has nobody to answer a live 3DS challenge — asking for one
+  // would just make every balance charge fail.
+  assertEquals(body.includes('request_three_d_secure'), false, body)
+})
+
+Deno.test('chargeSaved refuses a deal with no saved payment method', async () => {
+  await assertRejects(
+    () =>
+      new StripeProvider(CREDS, '').chargeSaved({
+        token: '',
+        amount: 1000,
+        currency: 'USD',
+        idempotency_key: 'balance:deal_2',
+      }),
+    PayHoldError,
+    'no saved payment method',
+  )
+})
+
+Deno.test('verify surfaces a saved payment method only once the charge has succeeded', async () => {
+  const { restore } = intercept({
+    id: 'pi_5',
+    amount: 1000,
+    currency: 'usd',
+    status: 'succeeded',
+    customer: 'cus_5',
+    payment_method: 'pm_5',
+  })
+
+  try {
+    const verified = await new StripeProvider(CREDS, '').verify('pi_5')
+    assertEquals(verified.saved_payment_method, 'cus_5:pm_5')
+  } finally {
+    restore()
+  }
+})
+
+Deno.test('an unsucceeded intent never reports a saved payment method', async () => {
+  const { restore } = intercept({
+    id: 'pi_6',
+    amount: 1000,
+    currency: 'usd',
+    status: 'processing',
+    customer: 'cus_6',
+    payment_method: 'pm_6',
+  })
+
+  try {
+    const verified = await new StripeProvider(CREDS, '').verify('pi_6')
+    assertEquals(verified.saved_payment_method, null)
+  } finally {
+    restore()
+  }
+})
+
 Deno.test('a deposit is held rather than taken', async () => {
   const { seen, restore } = intercept({ id: 'cs_2', url: 'https://checkout/y' })
 
