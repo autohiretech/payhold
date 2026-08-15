@@ -125,6 +125,38 @@ export async function dispatchPayout(
     return 'frozen'
   }
 
+  const { data: dealRow } = await db
+    .from('deals')
+    .select('id, tenant_id, seller_id, amount, currency, fee_amount, ' +
+      'presentment_currency, presentment_amount, provider, status')
+    .eq('id', payout.deal_id)
+    .maybeSingle()
+
+  if (!dealRow) throw new PayHoldError('not_found', `Deal ${payout.deal_id} not found`)
+  const deal = dealRow as unknown as Deal
+
+  // §8: a dispute freezes payout. `settle_payout` refuses a disputed deal under
+  // the row lock, which is the guarantee; this is the same check made early so
+  // the cron reports it as skipped rather than as an error, and so we do not
+  // ask a provider to send money we are about to refuse to book. A deal that is
+  // over — refunded, canceled, expired — is the same argument; see
+  // `PAYABLE_DEAL_STATUSES`.
+  //
+  // This has to run before `screen_payout` below, not after it — it used to
+  // run after, which meant a dead deal's payout could still be held by a risk
+  // rule and shown to an operator as "needs review" or "approve and send".
+  // Found live: `refund_deal`'s own cleanup missed a payout once (see
+  // migration `20260816000001`), a person's "Retry" put it back in front of
+  // `screen_payout`, a rule held it for review, and the same person's
+  // "Approve and send" set it back to `scheduled` — for a deal that had been
+  // fully refunded days earlier. Nothing was ever actually sent (this check
+  // still ran, just too late to stop the round trip through review), but nor
+  // should a human ever have been asked to clear a hold on money that could
+  // never move.
+  if (!(PAYABLE_DEAL_STATUSES as readonly string[]).includes(deal.status)) {
+    return 'skipped'
+  }
+
   // A payout already with the provider has been screened and routed once, and
   // the money is in flight. Re-running the rules could only hold something we
   // can no longer stop, which would misreport it to an operator as prevented;
@@ -183,26 +215,6 @@ export async function dispatchPayout(
     // Nothing eligible. The amount stays where it is and the reason is on the
     // payout — §5.1 is emphatic that funds are never discarded or rerouted.
     if (decision.reason_code !== 'routed') return 'blocked'
-  }
-
-  const { data: dealRow } = await db
-    .from('deals')
-    .select('id, tenant_id, seller_id, amount, currency, fee_amount, ' +
-      'presentment_currency, presentment_amount, provider, status')
-    .eq('id', payout.deal_id)
-    .maybeSingle()
-
-  if (!dealRow) throw new PayHoldError('not_found', `Deal ${payout.deal_id} not found`)
-  const deal = dealRow as unknown as Deal
-
-  // §8: a dispute freezes payout. `settle_payout` refuses a disputed deal under
-  // the row lock, which is the guarantee; this is the same check made early so
-  // the cron reports it as skipped rather than as an error, and so we do not
-  // ask a provider to send money we are about to refuse to book. A deal that is
-  // over — refunded, canceled, expired — is the same argument; see
-  // `PAYABLE_DEAL_STATUSES`.
-  if (!(PAYABLE_DEAL_STATUSES as readonly string[]).includes(deal.status)) {
-    return 'skipped'
   }
 
   // The destination the routing engine chose — §5.1's record of where this
