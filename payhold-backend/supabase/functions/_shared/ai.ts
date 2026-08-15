@@ -39,7 +39,7 @@ export interface AiUsage extends AiSettings {
   /**
    * Can this deployment answer at all?
    *
-   * That is `SUPABASE_JWT_SECRET` and nothing else. A missing model key is no
+   * That is `AI_JWT_SECRET` and nothing else. A missing model key is no
    * longer a blocker — `askClaude` serves `ai-demo.ts`'s stand-in — but the
    * `payhold_ai` role has no stand-in and must not get one: minting that token
    * is what keeps invariant 9 a grant list rather than a convention, and the
@@ -168,13 +168,13 @@ export async function assertAiAvailable(
 ): Promise<AiUsage> {
   // A missing model key is *not* checked here any more: `askClaude` answers
   // from the stand-in, which is what makes §12 demonstrable with zero keys. A
-  // missing `SUPABASE_JWT_SECRET` still refuses, and always will — there is no
+  // missing `AI_JWT_SECRET` still refuses, and always will — there is no
   // stand-in for a Postgres role, and the only fallback on offer would be the
   // service role, which is precisely what invariant 9 exists to deny this path.
   if (!aiDbConfigured()) {
     throw new PayHoldError(
       'policy_violation',
-      'Intelligence cannot run on this deployment: SUPABASE_JWT_SECRET is not ' +
+      'Intelligence cannot run on this deployment: AI_JWT_SECRET is not ' +
         'set, so the read-only AI role cannot be reached. Money paths are unaffected.',
     )
   }

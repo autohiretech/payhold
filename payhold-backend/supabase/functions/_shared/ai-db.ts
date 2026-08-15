@@ -42,9 +42,16 @@ function encodeSegment(value: unknown): string {
  * Signed with the project's JWT secret, which is what PostgREST verifies
  * against before it switches roles. The `tenant_id` claim is not a Supabase
  * convention — it is ours, read by `current_ai_tenant_id()` in the policies.
+ *
+ * The secret lives in `AI_JWT_SECRET`, not `SUPABASE_JWT_SECRET` — the
+ * Supabase CLI refuses to let a function secret start with `SUPABASE_`, that
+ * prefix being reserved for the values it auto-injects (`SUPABASE_URL`,
+ * `SUPABASE_ANON_KEY`, …). Its *value* must still be the project's real JWT
+ * secret, copied from the dashboard — this is a rename of the env var name,
+ * not a new secret.
  */
 async function mintAiToken(tenantId: string): Promise<string> {
-  const secret = Deno.env.get('SUPABASE_JWT_SECRET')
+  const secret = Deno.env.get('AI_JWT_SECRET')
   if (!secret) {
     // Nothing falls back to the service role here. A missing secret means the
     // AI layer is unconfigured, and the safe reading of "unconfigured" is
@@ -106,5 +113,5 @@ export async function aiReadClient(tenantId: string): Promise<SupabaseClient> {
 
 /** Is the AI layer's database access configured? */
 export function aiDbConfigured(): boolean {
-  return Boolean(Deno.env.get('SUPABASE_JWT_SECRET'))
+  return Boolean(Deno.env.get('AI_JWT_SECRET'))
 }

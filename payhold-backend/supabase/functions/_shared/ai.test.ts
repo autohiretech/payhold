@@ -224,8 +224,8 @@ Deno.test('retrieval is bounded so one question cannot drag in the whole corpus'
 // ---------------------------------------------------------------------------
 
 Deno.test('a deployment that cannot reach the read-only role refuses cleanly', async () => {
-  const secret = Deno.env.get('SUPABASE_JWT_SECRET')
-  Deno.env.delete('SUPABASE_JWT_SECRET')
+  const secret = Deno.env.get('AI_JWT_SECRET')
+  Deno.env.delete('AI_JWT_SECRET')
 
   try {
     const { assertAiAvailable } = await import('./ai.ts')
@@ -234,10 +234,10 @@ Deno.test('a deployment that cannot reach the read-only role refuses cleanly', a
       // first, which is what keeps this a 422 rather than a 500.
       () => assertAiAvailable(null as never, 'tenant-1'),
       PayHoldError,
-      'SUPABASE_JWT_SECRET',
+      'AI_JWT_SECRET',
     )
   } finally {
-    if (secret) Deno.env.set('SUPABASE_JWT_SECRET', secret)
+    if (secret) Deno.env.set('AI_JWT_SECRET', secret)
   }
 })
 

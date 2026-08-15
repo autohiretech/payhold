@@ -316,12 +316,12 @@ never tries to run a `Deno.test` file.
 | `PUBLIC_URL` | where buyers are sent to pay |
 | `CRON_SECRET` | sent by pg_cron as `x-cron-secret`. The scheduled jobs are not tenant-scoped, so no API key may trigger them. Unset means they refuse every caller. |
 | `ANTHROPIC_API_KEY` | the Intelligence layer's model key. **Unset is demo mode, not off** — `askClaude` answers from `_shared/ai-demo.ts`'s stand-in, so §12 works end to end with zero keys. |
-| `SUPABASE_JWT_SECRET` | the project's JWT secret, used to mint the short-lived `payhold_ai` token in `_shared/ai-db.ts`. **The one secret §12 cannot do without**, and for the reason it has no fallback: falling back would mean running the AI layer with the service role. |
+| `AI_JWT_SECRET` | the project's own JWT secret (from the dashboard), used to mint the short-lived `payhold_ai` token in `_shared/ai-db.ts`. **The one secret §12 cannot do without**, and for the reason it has no fallback: falling back would mean running the AI layer with the service role. **Not named `SUPABASE_JWT_SECRET`** — the CLI refuses to set any secret with that prefix, since it is reserved for the values Supabase auto-injects (`SUPABASE_URL`, `SUPABASE_ANON_KEY`, …). |
 
 Set with `npx supabase secrets set NAME=value`. Generate the master key with
 `openssl rand -base64 32`. Nothing falls back to a default — a missing
 `CREDENTIALS_KEY` throws rather than silently encrypting with something
-guessable, and a missing `ANTHROPIC_API_KEY` or `SUPABASE_JWT_SECRET` refuses
+guessable, and a missing `ANTHROPIC_API_KEY` or `AI_JWT_SECRET` refuses
 the AI call rather than reaching for a wider credential.
 
 ## The database is the money engine
@@ -411,10 +411,13 @@ approve demonstrates nothing — and otherwise `escalate`s, which is the honest
 output of a rule that cannot weigh anything. Confidence is 0, and every answer
 names itself a stand-in in its own text.
 
-**`SUPABASE_JWT_SECRET` has no equivalent and must never get one.** There is no
+**`AI_JWT_SECRET` has no equivalent and must never get one.** There is no
 stand-in for a Postgres role: the only fallback available is the service role,
 which is exactly what invariant 9's grant list exists to deny this path. So
 `assertAiAvailable` still refuses without it, and says which secret is missing.
+It carries the project's real JWT secret under a name the Supabase CLI will
+actually let you set — `SUPABASE_JWT_SECRET` is refused outright, reserved for
+the values Supabase auto-injects into every function.
 
 `decide_ai_suggestion` is the single bridge across. It locks the suggestion
 `for update`, requires a `decided_by`, and only reaches `resolve_dispute` for an

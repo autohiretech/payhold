@@ -265,7 +265,7 @@ way, and that is checkable on any account.
 **Off has three causes and one sentence each.** `aiOffReason` in
 `components/ai.tsx` is the only place that is decided, shared by `AiUnavailable`
 and the assistant panel so the two cannot disagree. `configured: false` means
-the *deployment* cannot reach the read-only AI role — `SUPABASE_JWT_SECRET` is
+the *deployment* cannot reach the read-only AI role — `AI_JWT_SECRET` is
 unset — and no toggle on Settings can help; `enabled: false` with
 `configured: true` is the company's own switch; `over_budget` is the third. They
 used to collapse into one, and the sentence the unconfigured case got — "turn it

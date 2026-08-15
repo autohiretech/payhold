@@ -484,8 +484,11 @@ for the rails. With no `ANTHROPIC_API_KEY`, `askClaude` answers from
 by the same validator a model's answer goes through, written with
 `model = 'demo-stand-in'` and `cost_usd = 0` so no row ever claims a model
 produced it. It advises exactly as the model does, and a person still approves.
-The one secret with no stand-in is `SUPABASE_JWT_SECRET`: a Postgres role cannot
-be faked, and the only fallback would be the service role.
+The one secret with no stand-in is `AI_JWT_SECRET`: a Postgres role cannot
+be faked, and the only fallback would be the service role. It is not named
+`SUPABASE_JWT_SECRET` — the Supabase CLI reserves that prefix for the values it
+auto-injects and refuses to let a project set one — but its value is still the
+project's own JWT secret, copied from the dashboard.
 
 **Built** — `payhold-backend/supabase/migrations/20260806000004_intelligence.sql`
 and `functions/ai-*`. Invariant 9 is enforced by a Postgres role rather than by
