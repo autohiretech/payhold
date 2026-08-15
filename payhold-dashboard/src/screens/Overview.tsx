@@ -16,15 +16,17 @@ import {
   DEAL_STATUS_META,
   formatMoney,
   formatMoneyShort,
+  formatPercent,
   formatRelative,
 } from '@/lib/format'
-import { useBalance, useDeals, useDisputes, usePayouts } from '@/lib/queries'
+import { useBalance, useDeals, useDisputes, usePayouts, useSettings } from '@/lib/queries'
 
 export function OverviewPage() {
   const balance = useBalance()
   const deals = useDeals({ limit: 8 })
   const payouts = usePayouts()
   const disputes = useDisputes()
+  const settings = useSettings()
 
   const now = new Date()
   const openDisputes = disputes.data?.filter((d) => d.status === 'open') ?? []
@@ -75,6 +77,26 @@ export function OverviewPage() {
                   label="Paid out"
                   value={formatMoneyShort(b.paid_out, b.currency)}
                   hint="Lifetime total sent to sellers"
+                />
+              </div>
+
+              {/* Deliberately separate from the four tiles above, not a fifth
+                  one in the same row: those are money moving toward a seller,
+                  this is money that already stopped being theirs — the same
+                  reason a seller's own wallet never shows fees_retained at
+                  all. It is still sitting in the provider balance rather than
+                  anywhere PayHold can pay it out to — there is no sweep, and
+                  no button here changes that. */}
+              <div className="mt-3 max-w-xs">
+                <StatTile
+                  label="Your revenue"
+                  tone="confirmed"
+                  value={formatMoneyShort(b.fees_retained, b.currency)}
+                  hint={
+                    settings.data
+                      ? `${formatPercent(settings.data.service_fee_rate)} service fee, plus any tax collected — still at the provider, not swept out anywhere`
+                      : 'Service fee plus any tax collected — still at the provider, not swept out anywhere'
+                  }
                 />
               </div>
             </section>
