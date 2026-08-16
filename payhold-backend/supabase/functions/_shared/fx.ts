@@ -76,6 +76,25 @@ export interface Conversion {
   rate: number
 }
 
+/**
+ * ISO 4217 currencies with no minor unit — 1 unit is the smallest, there is no
+ * "cents" to divide into. `PER_USD` above is quoted in **major** units either
+ * way (1400 RWF per USD is a fact about whole Francs), and `Money` is minor
+ * units everywhere else in PayHold — RWF's happen to be the same number, a
+ * card-charged USD's do not. `convert` has to know which currencies collapse
+ * that distinction and which don't, or a conversion crossing the boundary is
+ * short by exactly this set's multiplier.
+ */
+const ZERO_DECIMAL = new Set(['RWF', 'UGX', 'XAF', 'XOF', 'JPY', 'BIF'])
+
+function toMajor(amount: number, currency: Currency): number {
+  return ZERO_DECIMAL.has(currency) ? amount : amount / 100
+}
+
+function toMinor(major: number, currency: Currency): Money {
+  return Math.round(ZERO_DECIMAL.has(currency) ? major : major * 100)
+}
+
 export function canConvert(from: Currency, to: Currency): boolean {
   return PER_USD[from] !== undefined && PER_USD[to] !== undefined
 }
@@ -85,6 +104,13 @@ export function canConvert(from: Currency, to: Currency): boolean {
  *
  * Returns null when either side has no rate. "We cannot price this" is a better
  * answer than a number we invented and then moved money against.
+ *
+ * `PER_USD`'s rate is major-to-major, so the amount has to cross into major
+ * units before it is applied and back into `to`'s minor units after —
+ * skipping that (as this used to) is invisible between two currencies with
+ * the same decimal convention and silently short by 100× crossing into or
+ * out of a `ZERO_DECIMAL` one. Found on a live RWF→USD deal: RWF 53,892
+ * (~$38.49) priced as `presentment_amount: 38` — thirty-eight *cents*.
  */
 export function convert(amount: Money, from: Currency, to: Currency): Conversion | null {
   if (from === to) return { amount, rate: 1 }
@@ -94,7 +120,7 @@ export function convert(amount: Money, from: Currency, to: Currency): Conversion
   if (fromRate === undefined || toRate === undefined) return null
 
   const rate = toRate / fromRate
-  return { amount: Math.round(amount * rate), rate }
+  return { amount: toMinor(toMajor(amount, from) * rate, to), rate }
 }
 
 /** Same, but a missing rate is a refusal rather than a null to forget to check. */
@@ -116,18 +142,27 @@ export function convertOrThrow(
 /**
  * Convert using the rate a deal locked when it was funded.
  *
- * `rate` is presentment per settlement, so settlement → presentment multiplies
- * and the reverse divides. Using today's rate on a deal funded last week would
- * silently reprice money that has already been collected.
+ * `rate` is presentment per settlement, in major units — the same figure
+ * `convert`'s own `.rate` returns — so settlement → presentment multiplies
+ * and the reverse divides. Using today's rate on a deal funded last week
+ * would silently reprice money that has already been collected.
+ *
+ * Both currencies are required for the same reason `convert` needs them:
+ * the rate is major-to-major, and `amount` is minor units of whichever side
+ * is the input, so crossing a `ZERO_DECIMAL` boundary needs the same
+ * toMajor/toMinor step `convert` applies.
  */
 export function atLockedRate(
   amount: Money,
   rate: number,
+  settlementCurrency: Currency,
+  presentmentCurrency: Currency,
   direction: 'settlement_to_presentment' | 'presentment_to_settlement',
 ): Money {
-  return Math.round(
-    direction === 'settlement_to_presentment' ? amount * rate : amount / rate,
-  )
+  if (direction === 'settlement_to_presentment') {
+    return toMinor(toMajor(amount, settlementCurrency) * rate, presentmentCurrency)
+  }
+  return toMinor(toMajor(amount, presentmentCurrency) / rate, settlementCurrency)
 }
 
 /**

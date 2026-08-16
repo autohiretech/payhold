@@ -35,6 +35,18 @@ Deno.test('a converted amount is always a whole number of minor units', () => {
   }
 })
 
+Deno.test('a zero-decimal amount converts into real cents, not raw minor units', () => {
+  // Live bug: an hourly AutoHire booking, RWF 53,892 (~$38.49), quoted a
+  // renter paying by US card presentment_amount: 38 — thirty-eight *cents*,
+  // not thirty-eight dollars — because the old convert() applied a
+  // major-to-major rate straight to RWF's minor units (RWF has none to
+  // convert past) without ever multiplying back up to USD's.
+  const result = convert(53_892, 'RWF', 'USD')
+  assert(result)
+  // 53,892 / 1400 ≈ 38.49 major dollars = 3849 minor units (cents).
+  assertEquals(result.amount, 3_849)
+})
+
 Deno.test('an unknown currency refuses rather than guessing', () => {
   assertEquals(convert(1000, 'USD', 'XXX'), null)
   assertEquals(convert(1000, 'XXX', 'USD'), null)
@@ -50,18 +62,27 @@ Deno.test('convertOrThrow turns that refusal into a client error', () => {
 })
 
 Deno.test('a locked rate is honoured in both directions', () => {
-  // A deal quoted at 140,000 RWF, charged to a foreign card as 100.00 USD.
+  // A deal quoted at 140,000 RWF, charged to a foreign card as 100.00 USD —
+  // 10,000 minor units, RWF being zero-decimal and USD not.
   const rate = 100 / 140_000
 
-  assertEquals(atLockedRate(140_000, rate, 'settlement_to_presentment'), 100)
-  assertEquals(atLockedRate(100, rate, 'presentment_to_settlement'), 140_000)
+  assertEquals(atLockedRate(140_000, rate, 'RWF', 'USD', 'settlement_to_presentment'), 10_000)
+  assertEquals(atLockedRate(10_000, rate, 'RWF', 'USD', 'presentment_to_settlement'), 140_000)
 })
 
 Deno.test('a locked rate does not drift with the table', () => {
   // The point of storing the rate: a deal funded last week must convert the
   // same way today, whatever the current table says.
   const stale = 0.0005
-  assertEquals(atLockedRate(140_000, stale, 'settlement_to_presentment'), 70)
+  assertEquals(atLockedRate(140_000, stale, 'RWF', 'USD', 'settlement_to_presentment'), 7_000)
+})
+
+Deno.test('a locked rate between two decimal currencies needs no unit crossing', () => {
+  // Both minor units are cents, so this is the case the old signature
+  // happened to get right — pinned so the currency-aware rewrite cannot
+  // regress the case nobody noticed was ever correct.
+  const rate = 0.92 // USD -> EUR, indicative
+  assertEquals(atLockedRate(10_000, rate, 'USD', 'EUR', 'settlement_to_presentment'), 9_200)
 })
 
 Deno.test('a buyer who can pay the settlement currency is charged it', () => {
