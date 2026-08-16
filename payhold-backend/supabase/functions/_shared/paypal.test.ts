@@ -445,6 +445,49 @@ Deno.test('an unfinished order verifies as pending, never as failed', async () =
   }
 })
 
+Deno.test('an approved-but-uncaptured order verifies as pending, never as successful', async () => {
+  // APPROVED is an *order* status — the buyer said yes, the merchant has not
+  // captured yet — and has no equivalent in a capture's own status
+  // vocabulary. Reporting it as 'successful' with no capture id to hand back
+  // is what let `fund_deal` book the *order* id as `provider_ref`, which a
+  // later refund then 404s against — a refund is only ever valid on a
+  // capture. A capture id 404s first, so this falls through to the order,
+  // the same path `verify` takes for any caller holding a `charge` result.
+  const original = globalThis.fetch
+  let first = true
+  globalThis.fetch = ((url: string | URL | Request) => {
+    const target = String(url)
+    if (target.endsWith('/v1/oauth2/token')) {
+      return Promise.resolve(
+        new Response(JSON.stringify({ access_token: 't', expires_in: 32400 }), { status: 200 }),
+      )
+    }
+    if (first) {
+      first = false
+      return Promise.resolve(new Response('{}', { status: 404 }))
+    }
+    return Promise.resolve(
+      new Response(
+        JSON.stringify({
+          id: 'ORDER-2',
+          status: 'APPROVED',
+          purchase_units: [{ amount: { currency_code: 'USD', value: '100.00' } }],
+        }),
+        { status: 200 },
+      ),
+    )
+  }) as typeof fetch
+
+  try {
+    const pp = new PayPalProvider(CREDS, 'https://pay.example')
+    const v = await pp.verify('ORDER-2')
+    assertEquals(v.status, 'pending')
+    assertEquals(v.provider_ref, 'ORDER-2')
+  } finally {
+    globalThis.fetch = original
+  }
+})
+
 Deno.test('a payout is one item, and acceptance is not settlement', async () => {
   const { seen, restore } = intercept([
     { batch_header: { payout_batch_id: 'BATCH-1', batch_status: 'PENDING' } },

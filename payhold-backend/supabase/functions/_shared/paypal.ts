@@ -98,16 +98,24 @@ export function fromValue(value: string, currency: Currency): Money {
 function toStatus(status: string | undefined): VerifiedTransaction['status'] {
   switch (status) {
     case 'COMPLETED':
-    case 'APPROVED':
       return 'successful'
     case 'DECLINED':
     case 'FAILED':
     case 'VOIDED':
     case 'EXPIRED':
       return 'failed'
-    // CREATED, SAVED, PAYER_ACTION_REQUIRED, PENDING — the buyer has not
-    // finished. Deliberately not 'failed': an abandoned order that later
-    // completes must be able to fund the deal.
+    // CREATED, SAVED, PAYER_ACTION_REQUIRED, APPROVED, PENDING — the buyer
+    // has not finished, or has said yes but the merchant has not captured
+    // yet. Deliberately not 'failed': an abandoned order that later
+    // completes must be able to fund the deal. **APPROVED must stay here,
+    // never join COMPLETED above** — it is an *order* status meaning "the
+    // buyer approved," not a capture status meaning "the money moved" (a
+    // capture's own status vocabulary has no APPROVED at all). Grouping it
+    // with COMPLETED let `verify()`'s order-lookup fallback report an
+    // approved-but-uncaptured order as 'successful' with no capture id to
+    // give back — `fund_deal` then stored the *order* id as `provider_ref`,
+    // and every later refund 404s against it, since a refund is only ever
+    // valid against a capture.
     default:
       return 'pending'
   }
