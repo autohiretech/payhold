@@ -303,7 +303,9 @@ describe('the §7 breakdown', () => {
       `select * from deal_amounts($1)`, [d.id],
     )
     expect(Number(a.provider_fee)).toBe(56)
-    expect(Number(a.refunded)).toBe(196)
+    // 196 - 56: refund_deal's own "everything" now nets out the fee too —
+    // see refund-nets-out-the-provider-fee.test.ts for that behaviour itself.
+    expect(Number(a.refunded)).toBe(140)
     expect(Number(a.platform_fee)).toBe(0)
     expect(Number(a.seller_net)).toBe(0)
   })

@@ -575,18 +575,38 @@ async function refund(
       )
     }
 
-    await provider.refund({
-      provider_ref: deal.provider_ref,
-      // The whole thing when no amount was named. `refund_deal` decides what
-      // "the whole thing" means against its own cumulative guard; this is the
-      // provider call, and a rail asked for more than it holds refuses loudly.
-      amount: body.amount ?? deal.presentment_amount,
-      currency: deal.presentment_currency,
-      // Partial refunds are not one event per deal, so the key cannot be one
-      // per deal either. Two different amounts must not collapse into one
-      // provider-side refund.
-      idempotency_key: `refund:${deal.id}:${body.amount ?? 'full'}`,
-    })
+    // The whole thing when no amount was named — mirroring exactly what
+    // `refund_deal` computes for the same case, under its own row lock: the
+    // provider's own fee never comes back on a refund, so it was never
+    // really refundable, and asking the rail for it too either refuses
+    // outright or just leaves the tenant's own provider balance quietly
+    // short by it. An amount named explicitly is untouched — an operator
+    // may still choose to refund the full, un-netted amount deliberately.
+    let amount = body.amount
+    if (amount === undefined) {
+      const [{ data: heldRows }, { data: refundRows }] = await Promise.all([
+        db.from('ledger').select('amount').eq('deal_id', deal.id).eq('entry_type', 'hold'),
+        db.from('refunds').select('amount').eq('deal_id', deal.id).neq('status', 'failed'),
+      ])
+      const paid = (heldRows ?? []).reduce((sum, r) => sum + (r.amount as number), 0)
+      const already = (refundRows ?? []).reduce((sum, r) => sum + (r.amount as number), 0)
+      amount = Math.max(0, paid - already - deal.provider_fee_amount)
+    }
+
+    // Nothing left to send once the fee has consumed the remainder —
+    // `refund_deal` still closes the deal out below with a zero-amount
+    // refund; there is no rail call left to make for it.
+    if (amount > 0) {
+      await provider.refund({
+        provider_ref: deal.provider_ref,
+        amount,
+        currency: deal.presentment_currency,
+        // Partial refunds are not one event per deal, so the key cannot be one
+        // per deal either. Two different amounts must not collapse into one
+        // provider-side refund.
+        idempotency_key: `refund:${deal.id}:${body.amount ?? 'full'}`,
+      })
+    }
   }
 
   const { error } = await db.rpc('refund_deal', {
