@@ -4,6 +4,7 @@ import {
   api,
   HOLDING_STATUSES,
   PAST_HOLD_STATUSES,
+  PRE_FUNDING_STATUSES,
   type CheckoutSession,
   type ConfirmSide,
   type Deal,
@@ -897,6 +898,7 @@ function Actions({ deal }: { deal: Deal }) {
   // the safety window is most of what it is for.
   const canDispute = canConfirm || deal.status === 'clearing'
   const hasDeposit = deal.deposit_amount !== null && deal.deposit_amount > 0
+  const isPreFunding = PRE_FUNDING_STATUSES.includes(deal.status)
 
   const error =
     confirmMutation.error ?? refund.error ?? dispute.error ?? capture.error ?? releaseDeposit.error
@@ -907,7 +909,9 @@ function Actions({ deal }: { deal: Deal }) {
 
       {!canConfirm && !canRefund && !hasDeposit && (
         <p className="mt-2 text-sm text-fg-muted">
-          This deal is settled. Nothing further can be done to it.
+          {isPreFunding
+            ? "Waiting for the buyer to pay. There's nothing to do here yet."
+            : 'This deal is settled. Nothing further can be done to it.'}
         </p>
       )}
 

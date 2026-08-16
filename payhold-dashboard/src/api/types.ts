@@ -102,6 +102,21 @@ export const DEAL_STATUSES = [
 
 export type DealStatus = (typeof DEAL_STATUSES)[number]
 
+/**
+ * Before any money has moved at all — no hold, no refund, nothing to
+ * confirm or dispute yet. Distinct from `TERMINAL_STATUSES`: both are
+ * outside `HOLDING_STATUSES`/`PAST_HOLD_STATUSES`, but one means "hasn't
+ * started" and the other means "is over" — a screen that collapses them
+ * into one "nothing more to do here" reads a deal waiting on the buyer to
+ * pay as though it had already finished.
+ */
+export const PRE_FUNDING_STATUSES: readonly DealStatus[] = [
+  'created',
+  'checkout_started',
+  'payment_pending',
+  'payment_failed',
+]
+
 /** Statuses where money is sitting in the provider vault under our control. */
 export const HOLDING_STATUSES: readonly DealStatus[] = [
   'funded_held',
