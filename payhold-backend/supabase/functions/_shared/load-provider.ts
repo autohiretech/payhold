@@ -55,6 +55,23 @@ export async function loadProvider(
   db: SupabaseClient,
   tenantId: string,
   rail: Provider,
+  /**
+   * The mode a specific deal actually charged under, when the caller has one
+   * (`deals.provider_mode`). Every PayPal call is a routing decision — sandbox
+   * and live are different hosts — and `tenant_provider_accounts.mode` is the
+   * tenant's *current* setting, which can drift after a reconnect. A refund or
+   * a deposit capture against an old deal must follow that deal's own history,
+   * not today's setting, or it 404s at PayPal against an id that only exists
+   * on the other host.
+   *
+   * This does not fully repair a mode change: `tenant_provider_accounts` keeps
+   * one credential row per provider, so a reconnect overwrites the old mode's
+   * client id/secret along with the mode itself. Passed here, a stale mode at
+   * least routes to the right host and fails with an honest 401 ("PayPal
+   * rejected these credentials") instead of a misleading 404 ("does not
+   * exist") when the credentials underneath have since moved on too.
+   */
+  explicitMode?: 'test' | 'live',
 ): Promise<LoadedProvider> {
   if (rail === 'fake') {
     return { provider: new FakeProvider(publicUrl()), mode: 'test', connected: false }
@@ -116,19 +133,21 @@ export async function loadProvider(
         mode: data.mode,
         connected: true,
       }
-    case 'paypal':
+    case 'paypal': {
+      const mode = explicitMode ?? data.mode
       return {
         provider: new PayPalProvider(
           // The mode is carried on the credentials rather than read from the
           // row inside the adapter, because sandbox and live are different
           // *hosts* on this rail — not a flag on a request, the way they are
           // on the other two.
-          { ...(credentials as unknown as PayPalCredentials), mode: data.mode },
+          { ...(credentials as unknown as PayPalCredentials), mode },
           publicUrl(),
         ),
-        mode: data.mode,
+        mode,
         connected: true,
       }
+    }
     default:
       // An adapter with an enum value, a live capability row and no class here.
       // Unreachable while the two stay in step, and a loud failure if they do

@@ -25,6 +25,13 @@ import { PayHoldError, type Deal, type PaymentMethod, type Provider } from './ty
 export interface StartedCharge {
   /** The rail that actually took it — the deal's provisional one may not survive. */
   rail: Provider
+  /**
+   * Sandbox or live, as the charge actually ran. Persisted onto the deal so a
+   * later refund or deposit capture routes back to the same host instead of
+   * whatever the tenant's provider account happens to be connected as by
+   * then — see `_shared/load-provider.ts`'s `explicitMode`.
+   */
+  mode: 'test' | 'live'
   provider_ref: string
   payment_link: string
   /**
@@ -194,7 +201,7 @@ export async function startCharge(
     funding = data as Deal
   }
 
-  const { provider } = await loadProvider(db, tenantId, chosen.provider)
+  const { provider, mode } = await loadProvider(db, tenantId, chosen.provider)
   const publicUrl = Deno.env.get('PUBLIC_URL') ?? 'https://app.payhold.local'
 
   const charge = await provider.charge({
@@ -217,6 +224,7 @@ export async function startCharge(
 
   return {
     rail: chosen.provider,
+    mode,
     provider_ref: charge.provider_ref,
     payment_link: charge.payment_link,
     next_action: charge.next_action ?? { type: 'redirect', url: charge.payment_link },

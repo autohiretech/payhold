@@ -162,6 +162,12 @@ export interface Deal {
   deposit_amount: Money | null
   buyer_country: Country
   provider: Provider
+  /**
+   * Sandbox or live, locked at charge time like `fx_rate`. Null for a deal
+   * that predates this column or never reached a provider. See
+   * `_shared/load-provider.ts`'s `explicitMode`.
+   */
+  provider_mode: 'test' | 'live' | null
   payment_method: PaymentMethod | null
   payment_network: string | null
   provider_ref: string | null

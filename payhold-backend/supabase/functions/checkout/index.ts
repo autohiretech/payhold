@@ -270,8 +270,8 @@ async function bySession(
   const { data: deal } = await db
     .from('deals')
     .select('id, tenant_id, description, currency, presentment_amount, ' +
-      'presentment_currency, buyer_country, status, seller_id, provider, provider_ref, ' +
-      'split_percent, balance_amount')
+      'presentment_currency, buyer_country, status, seller_id, provider, provider_mode, ' +
+      'provider_ref, split_percent, balance_amount')
     .eq('id', session.deal_id)
     .maybeSingle()
 
@@ -385,6 +385,7 @@ async function payPublic(
     p_provider: charge.rail,
     p_provider_ref: charge.provider_ref,
     p_payment_link: charge.payment_link,
+    p_provider_mode: charge.mode,
   })
 
   if (error) throw rpcError(error, 'complete this checkout')
@@ -509,7 +510,12 @@ async function capturePublic(
     )
   }
 
-  const { provider } = await loadProvider(db, deal.tenant_id, 'paypal')
+  const { provider } = await loadProvider(
+    db,
+    deal.tenant_id,
+    'paypal',
+    deal.provider_mode ?? undefined,
+  )
   const paypal = provider as unknown as {
     captureOrder?: (orderId: string, key: string) => Promise<unknown>
   }

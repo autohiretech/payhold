@@ -55,7 +55,7 @@ import {
 const DEAL_COLUMNS = `
   id, tenant_id, buyer_ref, seller_id, description, amount, currency,
   presentment_currency, presentment_amount, fx_rate, deposit_amount,
-  buyer_country, provider, payment_method, payment_network, provider_ref,
+  buyer_country, provider, provider_mode, payment_method, payment_network, provider_ref,
   status, expected_complete_at, auto_release_at, released_at, payout_due_at,
   fee_amount, tax_amount, discount_amount, provider_fee_amount,
   reserve_amount, reserve_until,
@@ -436,7 +436,7 @@ async function pay(
   // refused it would be unretryable — `/pay` declines that state on purpose.
   await db
     .from('deals')
-    .update({ provider: rail, status: 'payment_pending' })
+    .update({ provider: rail, provider_mode: charge.mode, status: 'payment_pending' })
     .eq('id', deal.id)
 
   await db.rpc('write_audit', {
@@ -560,7 +560,12 @@ async function refund(
   // because there is nothing left at the provider to send and asking a rail to
   // refund money it no longer holds fails in a way that helps nobody.
   if (deal.provider_ref && deal.status !== 'paid_out') {
-    const { provider } = await loadProvider(db, caller.tenant_id, deal.provider)
+    const { provider } = await loadProvider(
+      db,
+      caller.tenant_id,
+      deal.provider,
+      deal.provider_mode ?? undefined,
+    )
 
     if (body.amount !== undefined && !provider.capabilities.supportsPartialRefund) {
       throw new PayHoldError(
@@ -650,7 +655,12 @@ async function captureDeposit(
   const depositRef = deal.metadata?.deposit_provider_ref
 
   if (depositRef) {
-    const { provider } = await loadProvider(db, caller.tenant_id, deal.provider)
+    const { provider } = await loadProvider(
+      db,
+      caller.tenant_id,
+      deal.provider,
+      deal.provider_mode ?? undefined,
+    )
     await provider.capture(String(depositRef), body.amount)
   }
 
