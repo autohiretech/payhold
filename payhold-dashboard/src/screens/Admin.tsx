@@ -6,7 +6,13 @@
 
 import { Fragment, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { api, type ReconciliationRun, type Tenant, type TenantStatus } from '@/api'
+import {
+  api,
+  PayHoldError,
+  type ReconciliationRun,
+  type Tenant,
+  type TenantStatus,
+} from '@/api'
 import { useAuth } from '@/auth/AuthProvider'
 import {
   Badge,
@@ -18,6 +24,7 @@ import {
   Field,
   Mono,
   PageHeader,
+  RestrictedState,
   Skeleton,
   Table,
   Td,
@@ -77,6 +84,13 @@ export function AdminPage() {
 
   const openAlerts = alerts.data?.filter((a) => !a.resolved_at) ?? []
 
+  // Same 404 `platformAdminFromJwt` gives every one of these calls for a
+  // signed-in tenant session as it would for a resource that genuinely does
+  // not exist. Left unchecked, that reads as "Everything reconciles" and "No
+  // passes recorded" — a healthy, quiet platform rather than an account this
+  // session cannot see.
+  const restricted = tenants.error instanceof PayHoldError && tenants.error.code === 'not_found'
+
   return (
     <>
       <PageHeader
@@ -84,6 +98,15 @@ export function AdminPage() {
         subtitle="PayHold staff only. Every company on the platform, and anything that needs a human."
       />
 
+      {restricted ? (
+        <Card>
+          <RestrictedState
+            title="PayHold staff only"
+            body="Master admin is scoped to platform_admins, a separate axis from your role on this tenant — signing in as an owner, staff member or viewer here does not carry it. Ask someone with platform-admin access if you need this page."
+          />
+        </Card>
+      ) : (
+      <>
       <Card className="mb-5">
         <CardHeader
           title="Reconciliation"
@@ -221,6 +244,8 @@ export function AdminPage() {
         open. Sign off the pass that raised the drift instead — that is the path that
         leaves a name, a note, and an answer to “who said this was accounted for”.
       </p>
+      </>
+      )}
     </>
   )
 }

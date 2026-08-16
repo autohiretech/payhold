@@ -4,6 +4,7 @@ import { api } from '@/api'
 import { useAuth } from '@/auth/AuthProvider'
 import { cx, LogoMark } from '@/components/ui'
 import { AssistantProvider } from '@/components/assistant'
+import { keys } from '@/lib/queries'
 
 const NAV = [
   { to: '/', label: 'Overview', end: true, icon: IconHome },
@@ -36,13 +37,26 @@ export function AppShell() {
     queryKey: ['disputes'],
     queryFn: () => api.listDisputes(),
   })
+  // Same probe Cron and Master admin gate their own content on
+  // (`platformAdminFromJwt` 404s this identically for a tenant session), read
+  // here only to decide whether the nav section under it is worth showing at
+  // all — a link to a page that will just explain it is not for you is a link
+  // that should not have been there.
+  const platformAdmin = useQuery({
+    queryKey: keys.tenants,
+    queryFn: () => api.admin.listTenants(),
+  })
 
   const openDisputes = disputes?.filter((d) => d.status === 'open').length ?? 0
 
   return (
     <AssistantProvider>
     <div className="flex min-h-svh flex-col lg:flex-row">
-      <Sidebar tenantName={tenant?.name} openDisputes={openDisputes} />
+      <Sidebar
+        tenantName={tenant?.name}
+        openDisputes={openDisputes}
+        showPlatformAdmin={platformAdmin.isSuccess}
+      />
 
       <main className="min-w-0 flex-1">
         {tenant?.status === 'payouts_frozen' && (
@@ -77,9 +91,11 @@ export function AppShell() {
 function Sidebar({
   tenantName,
   openDisputes,
+  showPlatformAdmin,
 }: {
   tenantName?: string
   openDisputes: number
+  showPlatformAdmin: boolean
 }) {
   return (
     <aside className="shrink-0 border-b border-line bg-surface lg:sticky lg:top-0 lg:flex lg:h-svh lg:w-64 lg:flex-col lg:border-r lg:border-b-0">
@@ -111,9 +127,13 @@ function Sidebar({
           <NavItem key={item.to} {...item} />
         ))}
 
-        <Divider label="PayHold staff" />
-        <NavItem to="/admin" label="Master admin" icon={IconAdmin} />
-        <NavItem to="/cron" label="Cron" icon={IconCron} />
+        {showPlatformAdmin && (
+          <>
+            <Divider label="PayHold staff" />
+            <NavItem to="/admin" label="Master admin" icon={IconAdmin} />
+            <NavItem to="/cron" label="Cron" icon={IconCron} />
+          </>
+        )}
       </nav>
 
       <AccountBlock />

@@ -18,6 +18,7 @@ import { Link } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import {
   api,
+  PayHoldError,
   type AdminPayout,
   type AdminWebhookDelivery,
   type CronJobName,
@@ -32,6 +33,7 @@ import {
   ErrorNote,
   Mono,
   PageHeader,
+  RestrictedState,
   Skeleton,
   Table,
   Td,
@@ -160,6 +162,13 @@ export function CronPage() {
 
   const failure = reconcile.error ?? retryPayout.error ?? retryDelivery.error
 
+  // `platformAdminFromJwt` 404s every one of these calls identically for a
+  // signed-in tenant session — the same response an operator would get for a
+  // resource that genuinely does not exist. Without this check that reads as
+  // "Never" and "No runs yet" on every card below: an empty, healthy log
+  // rather than a page this account was never going to be able to see.
+  const restricted = tenants.error instanceof PayHoldError && tenants.error.code === 'not_found'
+
   return (
     <>
       <PageHeader
@@ -167,6 +176,15 @@ export function CronPage() {
         subtitle="The five scheduled jobs, what each pass did, and the payouts and webhooks a person still has to see to."
       />
 
+      {restricted ? (
+        <Card>
+          <RestrictedState
+            title="PayHold staff only"
+            body="Cron is scoped to platform_admins, a separate axis from your role on this tenant — signing in as an owner, staff member or viewer here does not carry it. Ask someone with platform-admin access if you need this page."
+          />
+        </Card>
+      ) : (
+      <>
       <Card className="mb-5">
         <CardHeader
           title="Schedules"
@@ -398,6 +416,8 @@ export function CronPage() {
       )}
 
       {failure && <ErrorNote message={failure.message} />}
+      </>
+      )}
     </>
   )
 }

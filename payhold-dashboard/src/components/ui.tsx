@@ -302,6 +302,33 @@ export function EmptyState({
   )
 }
 
+/**
+ * A page whose data the signed-in session is not entitled to at all —
+ * distinct from `EmptyState`, which means the data exists and there is
+ * genuinely none of it yet. Reading the two the same way is exactly the bug
+ * this exists to prevent: PayHold staff-only endpoints 404 a tenant session
+ * identically to a resource that does not exist, and `!data?.length` cannot
+ * tell "nothing happened" from "you cannot see this" apart.
+ */
+export function RestrictedState({ title, body }: { title: string; body?: string }) {
+  return (
+    <div className="px-6 py-16 text-center">
+      <div className="mx-auto mb-4 flex size-11 items-center justify-center rounded-full bg-pending-soft text-pending">
+        <svg viewBox="0 0 24 24" className="size-5" fill="none" stroke="currentColor" strokeWidth="1.7">
+          <rect x="5" y="10.5" width="14" height="9" rx="2" />
+          <path d="M8 10.5V7.5a4 4 0 0 1 8 0v3" strokeLinecap="round" />
+        </svg>
+      </div>
+      <p className="text-base font-semibold text-fg">{title}</p>
+      {body && (
+        <p className="mx-auto mt-1.5 max-w-sm text-sm leading-relaxed text-fg-muted">
+          {body}
+        </p>
+      )}
+    </div>
+  )
+}
+
 export function Skeleton({ className }: { className?: string }) {
   return <div className={cx('animate-pulse rounded-xl bg-surface-2', className)} />
 }
