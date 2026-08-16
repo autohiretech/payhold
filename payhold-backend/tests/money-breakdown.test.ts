@@ -275,6 +275,39 @@ describe('the §7 breakdown', () => {
     expect(Number(a.seller_net)).toBe(0)
   })
 
+  test('a real provider fee on a fully refunded deal is not the seller\'s debt', async () => {
+    // The fix above only zeroed platform_fee. seller_net = gross -
+    // platform_fee still carried whatever gross itself picked up — and
+    // gross subtracts provider_fee, a cost that is real and does not come
+    // back on a refund (the rail keeps its cut), but was never the
+    // SELLER's to answer for on a deal that never released. Live: a $1.96
+    // deal, PayPal kept a genuine $0.56 fee, refunded in full before
+    // release — "Seller receives: −USD 0.56" implied the seller was out of
+    // pocket for a fee on money they were never going to be paid from.
+    const { rows: [d] } = await h.db.query<{ id: string }>(
+      `insert into deals (tenant_id, buyer_ref, seller_id, description, amount,
+                          currency, presentment_currency, presentment_amount,
+                          buyer_country, provider, fee_amount)
+       values ($1, 'buyer_w', $2, 'Fully refunded, rail kept its fee', 2744,
+               'RWF', 'USD', 196, 'US', 'fake', 274)
+       returning id`,
+      [tenant, seller],
+    )
+    await h.db.query(
+      `select fund_deal($1, 'fake', 'ref-w', 'card', null, 196, 'USD', 0.0007142857, 3, 56)`,
+      [d.id],
+    )
+    await h.db.query(`select refund_deal($1, 'Cancelled by host before pickup', 'dashboard')`, [d.id])
+
+    const { rows: [a] } = await h.db.query<Record<string, string>>(
+      `select * from deal_amounts($1)`, [d.id],
+    )
+    expect(Number(a.provider_fee)).toBe(56)
+    expect(Number(a.refunded)).toBe(196)
+    expect(Number(a.platform_fee)).toBe(0)
+    expect(Number(a.seller_net)).toBe(0)
+  })
+
   test('a partial refund still carries the fee estimate — the trip is not over', async () => {
     // The other side of the same guard: refunded < buyer_paid means the
     // deal is still headed toward a release for the rest, so the estimate
