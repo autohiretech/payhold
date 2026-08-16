@@ -317,12 +317,48 @@ never tries to run a `Deno.test` file.
 | `CRON_SECRET` | sent by pg_cron as `x-cron-secret`. The scheduled jobs are not tenant-scoped, so no API key may trigger them. Unset means they refuse every caller. |
 | `ANTHROPIC_API_KEY` | the Intelligence layer's model key. **Unset is demo mode, not off** — `askClaude` answers from `_shared/ai-demo.ts`'s stand-in, so §12 works end to end with zero keys. |
 | `AI_JWT_SECRET` | the project's own JWT secret (from the dashboard), used to mint the short-lived `payhold_ai` token in `_shared/ai-db.ts`. **The one secret §12 cannot do without**, and for the reason it has no fallback: falling back would mean running the AI layer with the service role. **Not named `SUPABASE_JWT_SECRET`** — the CLI refuses to set any secret with that prefix, since it is reserved for the values Supabase auto-injects (`SUPABASE_URL`, `SUPABASE_ANON_KEY`, …). |
+| `FLUTTERWAVE_PROXY_URL` | optional. Routes `FlutterwaveProvider`'s calls through an outbound proxy with a fixed IP, e.g. `http://user:pass@us-east-static-01.quotaguard.com:9293`. **Unset is today's behavior** — a direct call, from whatever IP Supabase's Edge Runtime happens to use for that invocation. See below. |
 
 Set with `npx supabase secrets set NAME=value`. Generate the master key with
 `openssl rand -base64 32`. Nothing falls back to a default — a missing
 `CREDENTIALS_KEY` throws rather than silently encrypting with something
 guessable, and a missing `ANTHROPIC_API_KEY` or `AI_JWT_SECRET` refuses
 the AI call rather than reaching for a wider credential.
+
+### Flutterwave's IP whitelist and why a live payout can be `blocked` forever
+
+Found 2026-08-16: a fully verified seller, with a verified, in-hold-window
+destination, whose transfers still failed every time, retried or automatic,
+with `failure_reason` reading `Flutterwave: Please enable IP Whitelisting to
+access this service (no further automatic attempts after 6 tries)`.
+
+**Supabase Edge Functions have no static egress IP.** Every invocation can
+leave from a different address — this is a documented platform limitation,
+not a PayHold bug — so whitelisting one IP with Flutterwave whitelists
+nothing; the next call is as likely as not to come from somewhere else.
+`payouts/index.ts`'s own comment on `blocked` retries already names this as
+"a rail's own transient block (IP whitelisting, a timeout)" — it was
+anticipated as a category, just not yet wired to a fix.
+
+The fix is `FLUTTERWAVE_PROXY_URL` (`_shared/flutterwave.ts`): an outbound
+proxy service with its own fixed IP (QuotaGuard is one; there are others)
+sits between us and Flutterwave, and *its* IP is what gets whitelisted —
+never ours, because we don't have one to give them. Implemented with
+`Deno.createHttpClient({ proxy: { url } })`, the API Supabase's own
+integration docs point at for this.
+
+**This has not been exercised against a live proxy and is unverified.**
+Supabase's Edge Runtime is not vanilla Deno Deploy and has been known to
+restrict Deno-namespace APIs without notice — if `Deno.createHttpClient`
+throws in this runtime, `flutterwaveClient()` catches it, logs plainly, and
+every call falls back to a direct connection: today's behavior, not a crash.
+Whoever sets this secret should watch the first real transfer afterward
+rather than assume it worked. Getting the rest of the way live is not a
+code change: sign up for a proxy service, set `FLUTTERWAVE_PROXY_URL` to the
+connection string it gives you, then add *that* IP to Flutterwave's
+whitelist in their dashboard (Settings → API → IP Whitelist, as of this
+writing) — not PayHold's Supabase project, which has no IP of its own to
+offer them.
 
 ## The database is the money engine
 

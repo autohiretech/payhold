@@ -33,6 +33,54 @@ import { PayHoldError, type Currency, type Money, type PaymentMethod } from './t
 const API = 'https://api.flutterwave.com/v3'
 
 /**
+ * Flutterwave's Transfers API can be put behind IP whitelisting on their
+ * side, and Supabase Edge Functions have no static egress IP to give it —
+ * every invocation can leave from a different address, so whitelisting one
+ * IP whitelists nothing. `FLUTTERWAVE_PROXY_URL` is the documented way
+ * around that: an outbound proxy with its own fixed IP (QuotaGuard and
+ * similar services sell exactly this), whitelisted with Flutterwave instead
+ * of us. This is platform network configuration, not a tenant credential —
+ * unlike `StripeCredentials`/`FlutterwaveCredentials` above, which this file
+ * deliberately never reads from the environment, a proxy is how *every*
+ * tenant's calls leave the building, not a fallback that could cross tenants.
+ *
+ * Opt-in and unverified: `Deno.createHttpClient` is the API Supabase's own
+ * integration guides document for this, but Supabase's Edge Runtime is not
+ * vanilla Deno Deploy and has been known to restrict Deno-namespace APIs
+ * without notice. If it throws, every Flutterwave call falls back to a
+ * plain `fetch` — the same (broken, unwhitelisted) behavior as today — rather
+ * than taking the whole rail down over a transport feature nobody has
+ * configured yet. Whoever sets `FLUTTERWAVE_PROXY_URL` should watch the first
+ * real transfer after doing so; this has not been exercised against a live
+ * proxy.
+ */
+let flutterwaveHttpClient: Deno.HttpClient | null | undefined
+
+function flutterwaveClient(): Deno.HttpClient | undefined {
+  if (flutterwaveHttpClient !== undefined) return flutterwaveHttpClient ?? undefined
+
+  const proxyUrl = Deno.env.get('FLUTTERWAVE_PROXY_URL')
+  if (!proxyUrl) {
+    flutterwaveHttpClient = null
+    return undefined
+  }
+
+  try {
+    // deno-lint-ignore no-explicit-any
+    flutterwaveHttpClient = (Deno as any).createHttpClient({ proxy: { url: proxyUrl } })
+  } catch (err) {
+    console.error(
+      'FLUTTERWAVE_PROXY_URL is set but Deno.createHttpClient is unavailable in this ' +
+        "runtime — falling back to a direct connection, which Flutterwave's IP whitelist " +
+        'will keep refusing.',
+      err instanceof Error ? err.message : err,
+    )
+    flutterwaveHttpClient = null
+  }
+  return flutterwaveHttpClient ?? undefined
+}
+
+/**
  * `amount_settled` can lag a transaction's own success the same way Stripe's
  * balance transaction does — see the identical constants and reasoning in
  * `stripe.ts`'s `resolveProviderFee`. `verify` retries this many times,
@@ -254,7 +302,12 @@ export class FlutterwaveProvider implements PaymentProvider {
     // than performing the action twice.
     if (init.idempotencyKey) headers['idempotency-key'] = init.idempotencyKey
 
-    const res = await fetch(`${API}${path}`, { ...init, headers })
+    const client = flutterwaveClient()
+    const res = await fetch(`${API}${path}`, {
+      ...init,
+      headers,
+      ...(client ? { client } : {}),
+    })
     const body = await res.json().catch(() => ({}))
 
     if (!res.ok || body.status === 'error') {
