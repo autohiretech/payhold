@@ -244,6 +244,62 @@ describe('the §7 breakdown', () => {
     expect(Number(a.platform_fee)).toBe(1)
     expect(Number(a.seller_net)).toBe(6)
   })
+
+  test('a deal refunded in full before release owes no commission, not a negative one', async () => {
+    // The same fallback estimate, past the point it should apply at all.
+    // Live on AutoHire: a $0.07 deal refunded in full before release still
+    // showed "PayHold fee: −USD 0.01" and "Seller receives: −USD 0.01" — the
+    // provisional "here's what this trip is on track to earn" estimate
+    // never noticed the trip was over and nothing was ever going to be
+    // collected on it.
+    const { rows: [d] } = await h.db.query<{ id: string }>(
+      `insert into deals (tenant_id, buyer_ref, seller_id, description, amount,
+                          currency, presentment_currency, presentment_amount,
+                          buyer_country, provider, fee_amount)
+       values ($1, 'buyer_y', $2, 'Fully refunded before release', 9799, 'RWF',
+               'USD', 7, 'US', 'fake', 980)
+       returning id`,
+      [tenant, seller],
+    )
+    await h.db.query(
+      `select fund_deal($1, 'fake', 'ref-y', 'card', null, 7, 'USD', 0.0007142857, 3, 0)`,
+      [d.id],
+    )
+    await h.db.query(`select refund_deal($1, 'Renter changed their mind', 'dashboard')`, [d.id])
+
+    const { rows: [a] } = await h.db.query<Record<string, string>>(
+      `select * from deal_amounts($1)`, [d.id],
+    )
+    expect(Number(a.refunded)).toBe(7)
+    expect(Number(a.platform_fee)).toBe(0)
+    expect(Number(a.seller_net)).toBe(0)
+  })
+
+  test('a partial refund still carries the fee estimate — the trip is not over', async () => {
+    // The other side of the same guard: refunded < buyer_paid means the
+    // deal is still headed toward a release for the rest, so the estimate
+    // must not drop to zero just because some money went back.
+    const { rows: [d] } = await h.db.query<{ id: string }>(
+      `insert into deals (tenant_id, buyer_ref, seller_id, description, amount,
+                          currency, presentment_currency, presentment_amount,
+                          buyer_country, provider, fee_amount)
+       values ($1, 'buyer_z', $2, 'Partially refunded before release', 9799,
+               'RWF', 'USD', 7, 'US', 'fake', 980)
+       returning id`,
+      [tenant, seller],
+    )
+    await h.db.query(
+      `select fund_deal($1, 'fake', 'ref-z', 'card', null, 7, 'USD', 0.0007142857, 3, 0)`,
+      [d.id],
+    )
+    await h.db.query(`select refund_deal($1, 'Partial goodwill credit', 'dashboard', 2)`, [d.id])
+
+    const { rows: [a] } = await h.db.query<Record<string, string>>(
+      `select * from deal_amounts($1)`, [d.id],
+    )
+    expect(Number(a.refunded)).toBe(2)
+    expect(Number(a.platform_fee)).toBe(1)
+  })
 })
 
 describe('the new-seller reserve — §6.1', () => {
