@@ -22,6 +22,8 @@ import { dispatchPayout } from '../_shared/dispatch.ts'
 import { handler, json, readJson, required } from '../_shared/http.ts'
 import { loadProvider } from '../_shared/load-provider.ts'
 import { countryInfo, payoutRoute } from '../_shared/rails.ts'
+import { withCallerLabel } from '../_shared/seller-mask.ts'
+import { StripeProvider } from '../_shared/stripe.ts'
 import {
   PayHoldError,
   type AddDestinationInput,
@@ -97,6 +99,11 @@ async function create(
       currency: payoutCurrency,
       country,
     })
+    // The provider's own mask guesses its leading word from a field it does
+    // not always get back (Flutterwave's `bank_name`, unset for every RWF
+    // corridor) — the caller already knows which method this is, since it is
+    // what chose `payout_provider` a few lines up.
+    token = { ...token, masked_destination: withCallerLabel(token.masked_destination, body.label) }
   }
 
   // §11's external user id: the client's own handle for this person. Checked
@@ -570,6 +577,9 @@ async function addDestination(
     currency: payoutCurrency,
     country,
   })
+  // Same reasoning as `create`'s tokenize call — the mask's guessed prefix is
+  // less trustworthy than the label the caller already has for this method.
+  const masked = withCallerLabel(token.masked_destination, body.label)
 
   const { data: added, error } = await db.rpc('add_seller_destination', {
     p_seller: id,
@@ -578,7 +588,7 @@ async function addDestination(
     p_currency: payoutCurrency,
     p_provider: body.payout_provider,
     p_token: token.beneficiary_token,
-    p_masked: token.masked_destination,
+    p_masked: masked,
     p_label: body.label ?? null,
     p_role: role,
     p_actor: caller.actor,
@@ -758,6 +768,182 @@ async function readAllWallets(
   return json(req, { wallets: data ?? [] })
 }
 
+/**
+ * `POST /v1/sellers/:id/connect/onboard` — start (or resume) Stripe Connect
+ * onboarding for a seller whose market pays out via `stripe_connect` rather
+ * than Flutterwave. `POST /sellers/:id/destinations` cannot do this on its
+ * own: it takes a destination and tokenizes it, but nobody has minted an
+ * `acct_…` for this seller yet, and `StripeProvider.tokenize` only confirms
+ * one that already exists.
+ *
+ * Returns a one-time hosted onboarding URL. The client redirects the seller
+ * there; nothing is written as a payable destination until
+ * `GET /connect/status` (or the account webhook) confirms Stripe actually
+ * finished onboarding them — a return URL by itself is not evidence of
+ * anything, the same reasoning `checkout_session_state` applies to a payment.
+ */
+async function startConnectOnboarding(
+  req: Request,
+  db: SupabaseClient,
+  caller: Caller,
+  id: string,
+): Promise<Response> {
+  const { data } = await db
+    .from('sellers')
+    .select('id, country, payout_currency, stripe_connect_pending_account_id')
+    .eq('id', id)
+    .eq('tenant_id', caller.tenant_id)
+    .maybeSingle()
+  if (!data) throw new PayHoldError('not_found', `Seller ${id} not found`)
+  const seller = data as unknown as {
+    country: string | null
+    payout_currency: string | null
+    stripe_connect_pending_account_id: string | null
+  }
+
+  const body = await readJson<{
+    country?: string
+    email?: string | null
+    return_url: string
+    refresh_url: string
+  }>(req)
+  required(body as unknown as Record<string, unknown>, 'return_url', 'refresh_url')
+
+  // Same "this is their first destination" gate `addDestination` enforces —
+  // a seller registered with no destination has no country to default to.
+  if (!body.country && !seller.country) {
+    throw new PayHoldError(
+      'policy_violation',
+      'This seller has no country on file yet; country is required to start Stripe onboarding',
+    )
+  }
+  const country = body.country ?? seller.country!
+  const currency = body.country
+    ? countryInfo(body.country).currency
+    : (seller.payout_currency ?? countryInfo(country).currency)
+
+  // Refuse before creating anything at Stripe: a market that pays out via
+  // Flutterwave has no use for a Connect account, and one created anyway
+  // would sit unused and unfindable by anything that reads
+  // `stripe_connect_pending_account_id` for a market that never asks.
+  const route = payoutRoute(country, currency)
+  if (route.provider !== 'stripe' || route.kind !== 'connect') {
+    throw new PayHoldError(
+      'policy_violation',
+      `${countryInfo(country).name} is not paid out via Stripe Connect — ` +
+        'use POST /sellers/:id/destinations instead',
+    )
+  }
+
+  const { provider, connected } = await loadProvider(db, caller.tenant_id, 'stripe')
+  if (!connected || !(provider instanceof StripeProvider)) {
+    throw new PayHoldError(
+      'policy_violation',
+      'This tenant has no live Stripe account connected — Connect onboarding needs one',
+    )
+  }
+
+  // Reuse the account this seller already has mid-onboarding rather than
+  // minting a second one every time they reopen the link — Stripe has no
+  // delete for these either.
+  let accountId = seller.stripe_connect_pending_account_id
+  if (!accountId) {
+    const created = await provider.createConnectAccount(country, body.email ?? null, id)
+    accountId = created.accountId
+    await db
+      .from('sellers')
+      .update({ stripe_connect_pending_account_id: accountId })
+      .eq('id', id)
+  }
+
+  const { url } = await provider.createAccountLink(
+    accountId,
+    body.refresh_url,
+    body.return_url,
+  )
+
+  return json(req, { account_id: accountId, url })
+}
+
+/**
+ * `GET /v1/sellers/:id/connect/status` — has onboarding finished, and if so,
+ * promote it to a real destination.
+ *
+ * The polling half of the pair, called from the seller's return page rather
+ * than trusted from the redirect itself. Completion goes through exactly the
+ * path `POST /sellers/:id/destinations` uses — `tokenize` then
+ * `add_seller_destination` — so a Connect-onboarded destination lands
+ * unverified and inside its security hold like any other. Stripe's own
+ * onboarding proves the account is real and payable; it is not §12's
+ * separate identity attestation, which still needs `POST /sellers/:id/verify`.
+ */
+async function connectStatus(
+  req: Request,
+  db: SupabaseClient,
+  caller: Caller,
+  id: string,
+): Promise<Response> {
+  const { data } = await db
+    .from('sellers')
+    .select('id, country, payout_currency, stripe_connect_pending_account_id')
+    .eq('id', id)
+    .eq('tenant_id', caller.tenant_id)
+    .maybeSingle()
+  if (!data) throw new PayHoldError('not_found', `Seller ${id} not found`)
+  const seller = data as unknown as {
+    country: string | null
+    payout_currency: string | null
+    stripe_connect_pending_account_id: string | null
+  }
+
+  if (!seller.stripe_connect_pending_account_id) {
+    return json(req, { status: 'not_started' })
+  }
+
+  const { provider, connected } = await loadProvider(db, caller.tenant_id, 'stripe')
+  if (!connected || !(provider instanceof StripeProvider)) {
+    throw new PayHoldError(
+      'policy_violation',
+      'This tenant has no live Stripe account connected',
+    )
+  }
+
+  const accountId = seller.stripe_connect_pending_account_id
+  const { payoutsEnabled } = await provider.connectAccountStatus(accountId)
+  if (!payoutsEnabled) {
+    return json(req, { status: 'pending', account_id: accountId })
+  }
+
+  const currency = seller.payout_currency ?? countryInfo(seller.country!).currency
+  const token = await provider.tokenize({
+    destination: accountId,
+    currency,
+    country: seller.country!,
+  })
+
+  const { data: added, error } = await db.rpc('add_seller_destination', {
+    p_seller: id,
+    p_tenant: caller.tenant_id,
+    p_country: seller.country,
+    p_currency: currency,
+    p_provider: 'stripe_connect',
+    p_token: token.beneficiary_token,
+    p_masked: token.masked_destination,
+    p_label: 'Stripe',
+    p_role: 'primary',
+    p_actor: 'stripe_connect_onboarding',
+  })
+  if (error) throw new PayHoldError('policy_violation', error.message)
+
+  await db
+    .from('sellers')
+    .update({ stripe_connect_pending_account_id: null })
+    .eq('id', id)
+
+  const { beneficiary_token: _token, ...destination } = added as Record<string, unknown>
+  return json(req, { status: 'connected', destination })
+}
+
 Deno.serve(handler(async (req) => {
   const db = serviceClient()
   const caller = await resolveCaller(db, req)
@@ -825,6 +1011,17 @@ Deno.serve(handler(async (req) => {
 
   if (req.method === 'POST' && id && action === 'destinations') {
     return await addDestination(req, db, caller, id)
+  }
+
+  // Ahead of nothing in particular, but grouped with `destinations` since
+  // `stripe_connect` is the one rail whose destination cannot be typed in —
+  // it has to be minted by Stripe's own onboarding first.
+  if (req.method === 'POST' && id && action === 'connect' && sub === 'onboard') {
+    return await startConnectOnboarding(req, db, caller, id)
+  }
+
+  if (req.method === 'GET' && id && action === 'connect' && sub === 'status') {
+    return await connectStatus(req, db, caller, id)
   }
 
   if (req.method === 'POST' && id && action === 'withdraw') {

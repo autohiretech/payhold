@@ -684,3 +684,100 @@ Deno.test('the intent is pinned to the chosen method, not left to the dashboard'
     restore()
   }
 })
+
+// ---------------------------------------------------------------------------
+// Connect onboarding — minting the acct_… `tokenize` above confirms
+// ---------------------------------------------------------------------------
+
+Deno.test('a new Connect account only requests transfers, never charges', async () => {
+  const { seen, restore } = intercept({ id: 'acct_new1' })
+
+  try {
+    const { accountId } = await new StripeProvider(CREDS, '').createConnectAccount(
+      'US',
+      'host@example.com',
+      'seller_1',
+    )
+    const body = decodeURIComponent(seen.body ?? '')
+
+    assertEquals(accountId, 'acct_new1')
+    assertEquals(seen.url?.includes('/accounts'), true, seen.url)
+    assertEquals(body.includes('type=express'), true, body)
+    assertEquals(body.includes('country=US'), true, body)
+    assertEquals(body.includes('email=host@example.com'), true, body)
+    assertEquals(body.includes('capabilities[transfers][requested]=true'), true, body)
+    assertEquals(body.includes('metadata[seller_id]=seller_1'), true, body)
+    // Never `card_payments` — this account only ever receives a Connect
+    // transfer from `release`, and requesting a capability nothing here uses
+    // is a capability someone downstream has to explain away in review.
+    assertEquals(body.includes('card_payments'), false, body)
+  } finally {
+    restore()
+  }
+})
+
+Deno.test('a seller with no email on file still gets a valid account request', async () => {
+  const { seen, restore } = intercept({ id: 'acct_new2' })
+
+  try {
+    await new StripeProvider(CREDS, '').createConnectAccount('RW', null, 'seller_2')
+    const body = decodeURIComponent(seen.body ?? '')
+
+    assertEquals(body.includes('email='), false, body)
+  } finally {
+    restore()
+  }
+})
+
+Deno.test('the onboarding link names the account and both callback URLs', async () => {
+  const { seen, restore } = intercept({ url: 'https://connect.stripe.com/setup/e/acct_1/abc' })
+
+  try {
+    const { url } = await new StripeProvider(CREDS, '').createAccountLink(
+      'acct_1',
+      'https://example.com/refresh',
+      'https://example.com/return',
+    )
+    const body = decodeURIComponent(seen.body ?? '')
+
+    assertEquals(url, 'https://connect.stripe.com/setup/e/acct_1/abc')
+    assertEquals(seen.url?.includes('/account_links'), true, seen.url)
+    assertEquals(body.includes('account=acct_1'), true, body)
+    assertEquals(body.includes('refresh_url=https://example.com/refresh'), true, body)
+    assertEquals(body.includes('return_url=https://example.com/return'), true, body)
+    assertEquals(body.includes('type=account_onboarding'), true, body)
+  } finally {
+    restore()
+  }
+})
+
+Deno.test('Connect status reads both flags Stripe reports, not just one', async () => {
+  const { restore } = intercept({ payouts_enabled: true, details_submitted: false })
+
+  try {
+    const status = await new StripeProvider(CREDS, '').connectAccountStatus('acct_1')
+    // Both are surfaced even though `tokenize` only gates on the first —
+    // `startConnectOnboarding`'s caller polls this directly and "submitted
+    // but not yet payable" is a different sentence to a host than "nothing
+    // submitted at all", even though neither is payable today.
+    assertEquals(status.payoutsEnabled, true)
+    assertEquals(status.detailsSubmitted, false)
+  } finally {
+    restore()
+  }
+})
+
+Deno.test('Connect status defaults both flags false rather than guessing', async () => {
+  // Same reasoning as the fee-we-cannot-read tests above: a field Stripe
+  // omitted is not evidence of anything, and reporting a payable account here
+  // on a guess is the one direction this integration must never round toward.
+  const { restore } = intercept({})
+
+  try {
+    const status = await new StripeProvider(CREDS, '').connectAccountStatus('acct_1')
+    assertEquals(status.payoutsEnabled, false)
+    assertEquals(status.detailsSubmitted, false)
+  } finally {
+    restore()
+  }
+})

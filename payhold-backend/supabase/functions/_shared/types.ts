@@ -735,6 +735,13 @@ export interface CreateSellerInput {
    * is what makes a retried registration safe.
    */
   external_user_id?: string
+  /**
+   * What the caller calls this destination — "Bank transfer", "Mobile Money".
+   * Same field `AddDestinationInput` already carries; a seller's *first*
+   * destination has just as much claim to an accurate label as their second.
+   * See `_shared/seller-mask.ts` for why the provider's own guess needs one.
+   */
+  label?: string
 }
 
 /**

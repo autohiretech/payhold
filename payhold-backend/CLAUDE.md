@@ -73,7 +73,7 @@ environment or a build log.
 | `deals` | create (with §14's `completion_policy`), list, get, `/pay`, `/confirm`, `/refund`, `/deposit`, `/capture`, `/release-deposit` |
 | `checkout` | §10.1's sessions. `/sessions` for the client's server; `/public/:token` for the buyer, with no credential |
 | `payment-options` | what a buyer in a market can pay with; the catalogue a client renders its checkout from |
-| `sellers` | register (destination optional), list (`?external_user_id=` finds the client's own handle), `/wallets`, `/:id/capabilities`, `/:id/balance`, `/:id/withdraw`, `/:id/verify` (person-only), `/:id/active` (status only, no payout effect), `/:id/destinations` and `/:id/destinations/:id/end-hold` (person-only) |
+| `sellers` | register (destination optional), list (`?external_user_id=` finds the client's own handle), `/wallets`, `/:id/capabilities`, `/:id/balance`, `/:id/withdraw`, `/:id/verify` (person-only), `/:id/active` (status only, no payout effect), `/:id/destinations` and `/:id/destinations/:id/end-hold` (person-only), `/:id/connect/onboard` and `/:id/connect/status` (Stripe Connect onboarding — see below) |
 | `balance` | four buckets per currency, or `?by=rail` |
 | `ledger` | the entries behind those buckets, filterable by deal. No writer, on any method |
 | `audit-log` | who did what, including every act that moved no money |
@@ -546,6 +546,25 @@ downgraded" forbids.
 the seller's connected account id, and the bank details behind it are given to
 Stripe during Connect onboarding and never to us. A raw account number arriving
 there is a client misunderstanding worth naming rather than storing.
+
+**`createConnectAccount` / `createAccountLink` / `connectAccountStatus`
+(`sellers/index.ts`'s `/connect/onboard` and `/connect/status`, migration
+`20260816000011`) are what mint the `acct_…` `tokenize` above only confirms.**
+Outside Flutterwave's corridors nobody has one until Stripe's own hosted
+onboarding produces it, so a client cannot reach `POST /sellers/:id/destinations`
+for this rail at all on a seller's first save — there is nothing to type in. The
+in-progress account id lives on `sellers.stripe_connect_pending_account_id`
+between "created" and "promoted to a `seller_destinations` row"; nothing on the
+payout path reads that column, and it is cleared the moment it is. `/connect/status`
+does the promotion itself once Stripe reports `payouts_enabled`, going through
+the *exact* `tokenize` → `add_seller_destination` path `addDestination` uses —
+so a Connect-onboarded destination lands unverified and inside its usual
+security hold like any other one, and still needs a separate
+`POST /sellers/:id/verify`: Stripe's own KYC proves the account is real and
+payable, not §12's identity attestation. Polling from the client's return page
+is the primary completion path (the same "the return is not the evidence,
+re-check what's true" shape `settle-pending` and checkout's own poll use); an
+`account.updated` webhook handler is the natural next step and is not built.
 
 `verify` takes a Checkout Session id **or** a PaymentIntent id, because both are
 references this adapter hands out — `charge` returns the session and their

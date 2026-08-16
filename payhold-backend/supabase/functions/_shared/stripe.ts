@@ -750,6 +750,74 @@ export class StripeProvider implements PaymentProvider {
     }
   }
 
+  // -------------------------------------------------------------------------
+  // Connect onboarding — minting the acct_… that `tokenize` above confirms
+  // -------------------------------------------------------------------------
+
+  /**
+   * A new Express connected account for a seller who has never onboarded with
+   * Stripe. `tokenize` above can only confirm an account that already exists
+   * and can be paid; this is what creates one in the first place. Only
+   * `transfers` is requested — this account never collects a charge, only
+   * receives Connect transfers from `release`.
+   */
+  async createConnectAccount(
+    country: string,
+    email: string | null,
+    sellerId: string,
+  ): Promise<{ accountId: string }> {
+    const account = await this.call<{ id: string }>('/accounts', {
+      method: 'POST',
+      body: {
+        type: 'express',
+        country,
+        email: email ?? undefined,
+        capabilities: { transfers: { requested: true } },
+        metadata: { seller_id: sellerId },
+      },
+    })
+    return { accountId: account.id }
+  }
+
+  /**
+   * The hosted onboarding link Stripe collects KYC and bank details through.
+   * Single-use and short-lived by Stripe's own design: `refreshUrl` is where
+   * an expired link sends the seller back to ask for a new one, `returnUrl` is
+   * where a completed (or abandoned) session sends them after — neither is
+   * evidence of anything by itself, which is why `connectAccountStatus` exists
+   * rather than trusting the return.
+   */
+  async createAccountLink(
+    accountId: string,
+    refreshUrl: string,
+    returnUrl: string,
+  ): Promise<{ url: string }> {
+    const link = await this.call<{ url: string }>('/account_links', {
+      method: 'POST',
+      body: {
+        account: accountId,
+        refresh_url: refreshUrl,
+        return_url: returnUrl,
+        type: 'account_onboarding',
+      },
+    })
+    return { url: link.url }
+  }
+
+  /** Has this account finished enough of onboarding to receive a transfer? */
+  async connectAccountStatus(
+    accountId: string,
+  ): Promise<{ payoutsEnabled: boolean; detailsSubmitted: boolean }> {
+    const account = await this.call<{
+      payouts_enabled?: boolean
+      details_submitted?: boolean
+    }>(`/accounts/${encodeURIComponent(accountId)}`)
+    return {
+      payoutsEnabled: !!account.payouts_enabled,
+      detailsSubmitted: !!account.details_submitted,
+    }
+  }
+
   async balances(): Promise<{ currency: Currency; amount: Money }[]> {
     const balance = await this.call<{
       available?: { amount: number; currency: string }[]
