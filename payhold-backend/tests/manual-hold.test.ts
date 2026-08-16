@@ -142,6 +142,27 @@ describe('holding one payout', () => {
     await rejects(() => hold(s.payout), /invalid_state.*already with the provider/)
   })
 
+  test('refuses to hold a payout whose deal was refunded — nothing is left to hold it for', async () => {
+    // Live bug: refund_deal correctly fails the payout on its own
+    // ('Deal was refunded'), but hold_payout had no check on *why* a
+    // failed payout failed. A person holding it anyway, then approving
+    // the hold through the normal door, produced "Scheduled — Deal was
+    // refunded" — a status describing money that was never going to move
+    // again, on a deal whose release already reversed.
+    const s = await seed()
+    await h.db.query(`select refund_deal($1, 'Cancelled by host before pickup', 'dashboard')`, [s.deal])
+
+    // Confirm the fixture actually reaches the state this test is about
+    // before asserting on it — refund_deal's own cancellation is what's
+    // supposed to have put the payout here.
+    expect(await statusOf(s.payout)).toBe('failed')
+
+    await rejects(
+      () => hold(s.payout),
+      /invalid_state.*refunded.*nothing left to hold/,
+    )
+  })
+
   test('refuses to hold what is already held', async () => {
     const s = await seed()
     await hold(s.payout)

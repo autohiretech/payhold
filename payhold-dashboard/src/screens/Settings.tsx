@@ -71,7 +71,10 @@ export function SettingsPage() {
     )
   }
 
-  const exampleAmount = 100_000_00
+  // RWF has no minor unit — 100,000 RWF *is* 100,000, not "100,000.00" written
+  // as `100_000_00`. That literal reads as ten million: `_` is only a visual
+  // separator in a JS number, never a decimal point.
+  const exampleAmount = 100_000
   const exampleFee = Math.round(exampleAmount * (Number(feeRate) / 100))
 
   return (

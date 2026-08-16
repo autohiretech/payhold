@@ -207,6 +207,19 @@ async function retry(
       'This seller has something outstanding — verify them to send it',
     )
   }
+  // A failure `refund_deal` itself wrote is permanent — release already
+  // reversed and there is no clearing pool left to pay from, ever, unlike
+  // a rail's own transient block (IP whitelisting, a timeout). dispatch
+  // below would already skip it silently (its own PAYABLE_DEAL_STATUSES
+  // check), so this is the difference between a clear refusal and a
+  // wasted attempt with no explanation — the same reasoning
+  // `hold_payout` refuses the identical case for.
+  if (payout.status === 'failed' && payout.failure_reason === 'Deal was refunded') {
+    throw new PayHoldError(
+      'invalid_state',
+      'This deal was refunded — there is nothing left to send',
+    )
+  }
 
   // Put the automatic clock back before sending. §13's backoff stops after
   // `payout_retry_max_attempts` by clearing `next_attempt_at`, and a payout a

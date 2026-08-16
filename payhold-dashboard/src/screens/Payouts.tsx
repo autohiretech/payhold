@@ -193,15 +193,25 @@ export function PayoutsPage() {
                           </Button>
                         ) : (
                           <>
-                            {(p.status === 'failed' || p.status === 'frozen') && (
-                              <Button
-                                size="sm"
-                                disabled={retry.isPending}
-                                onClick={() => retry.mutate(p.id)}
-                              >
-                                Retry
-                              </Button>
-                            )}
+                            {/* `refund_deal` fails a payout with this exact
+                                reason when its deal is refunded — a
+                                permanent condition, not a transient one like
+                                a rail's own IP-whitelisting block. Retrying
+                                it wastes an attempt against
+                                payout_retry_max_attempts for no reason: the
+                                deal has no clearing pool left to pay from,
+                                ever. hold_payout refuses the same case for
+                                the identical reason. */}
+                            {(p.status === 'failed' || p.status === 'frozen') &&
+                              p.failure_reason !== 'Deal was refunded' && (
+                                <Button
+                                  size="sm"
+                                  disabled={retry.isPending}
+                                  onClick={() => retry.mutate(p.id)}
+                                >
+                                  Retry
+                                </Button>
+                              )}
                             {p.status === 'scheduled' && aiReady && (
                               <Button
                                 size="sm"
