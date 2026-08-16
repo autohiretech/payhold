@@ -323,6 +323,78 @@ Deno.test('verify reads the capture, and reports their fee separately', async ()
   }
 })
 
+Deno.test('an order-embedded capture with no fee breakdown is looked up directly', async () => {
+  // The exact incident this pins: settle-pending calls `verify` with the
+  // order id every time (that is what `charge` hands out as the checkout
+  // session's reference), so this — capture-id lookup 404s, falls through to
+  // the order, whose embedded capture is a summary — is the path the common
+  // case actually takes, not the direct-capture-id branch above. A real,
+  // successful PayPal deal booked provider_fee: 0 because nothing here ever
+  // asked about the capture by its own id, where the full breakdown lives.
+  const original = globalThis.fetch
+  let calls = 0
+  globalThis.fetch = ((url: string | URL | Request) => {
+    const target = String(url)
+    if (target.endsWith('/v1/oauth2/token')) {
+      return Promise.resolve(
+        new Response(JSON.stringify({ access_token: 't', expires_in: 32400 }), { status: 200 }),
+      )
+    }
+    calls++
+    if (calls === 1) {
+      // `/v2/payments/captures/ORDER-9` — ORDER-9 is not a capture id.
+      return Promise.resolve(new Response('{}', { status: 404 }))
+    }
+    if (calls === 2) {
+      // `/v2/checkout/orders/ORDER-9` — the embedded capture has no breakdown.
+      return Promise.resolve(
+        new Response(
+          JSON.stringify({
+            id: 'ORDER-9',
+            status: 'COMPLETED',
+            purchase_units: [{
+              amount: { currency_code: 'USD', value: '100.00' },
+              payments: {
+                captures: [{
+                  id: 'CAPTURE-9',
+                  status: 'COMPLETED',
+                  amount: { currency_code: 'USD', value: '100.00' },
+                }],
+              },
+            }],
+          }),
+          { status: 200 },
+        ),
+      );
+    }
+    // `/v2/payments/captures/CAPTURE-9` — the direct lookup, with the full
+    // breakdown the order's embedded copy did not carry.
+    assert(target.endsWith('/v2/payments/captures/CAPTURE-9'));
+    return Promise.resolve(
+      new Response(
+        JSON.stringify({
+          id: 'CAPTURE-9',
+          status: 'COMPLETED',
+          amount: { currency_code: 'USD', value: '100.00' },
+          seller_receivable_breakdown: {
+            paypal_fee: { currency_code: 'USD', value: '3.49' },
+          },
+        }),
+        { status: 200 },
+      ),
+    );
+  }) as typeof fetch;
+
+  try {
+    const pp = new PayPalProvider(CREDS, 'https://pay.example');
+    const v = await pp.verify('ORDER-9');
+    assertEquals(v.fee, 349);
+    assertEquals(calls, 3);
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
 Deno.test('an unfinished order verifies as pending, never as failed', async () => {
   // A capture id 404s, so it falls through to the order — which is the path a
   // caller holding a `charge` result takes.

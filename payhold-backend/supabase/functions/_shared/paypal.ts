@@ -399,6 +399,22 @@ export class PayPalProvider implements PaymentProvider {
       const unit = order.purchase_units?.[0]
       fallbackAmount = unit?.amount
       capture = unit?.payments?.captures?.[0] ?? null
+
+      // The capture embedded in an order response is a summary and does not
+      // carry `seller_receivable_breakdown` — confirmed live: a deal verified
+      // this way booked `provider_fee: 0` on a real, successful payment.
+      // `settle-pending` calls this with the order id every time (that is
+      // what `charge` hands out as `provider_ref`), so this branch — not the
+      // direct capture lookup above — is the one the common case actually
+      // takes. The full breakdown only comes from asking about the capture by
+      // its own id directly, same as the direct-lookup branch already does.
+      if (capture && !capture.seller_receivable_breakdown) {
+        try {
+          capture = await this.call<CaptureShape>(`/v2/payments/captures/${capture.id}`)
+        } catch {
+          /* the summary is still a real capture — better than nothing */
+        }
+      }
     }
 
     const amount = capture?.amount ?? fallbackAmount
