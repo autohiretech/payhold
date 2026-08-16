@@ -347,9 +347,28 @@ export class PayPalProvider implements PaymentProvider {
       },
     })
 
+    const approval_url = PayPalProvider.approvalLink(order)
+
     return {
       provider_ref: order.id,
-      payment_link: PayPalProvider.approvalLink(order),
+      payment_link: approval_url,
+      // Without this, `startCharge` fills in the generic `redirect` fallback
+      // — a plain URL, which the checkout client puts in an iframe the same
+      // way it does Flutterwave's hosted page. PayPal refuses to be framed
+      // for the identical reason Stripe Checkout does (§6, and this file's
+      // own header on why a wallet's login can never be ours to embed), so
+      // that iframe starts loading PayPal's page and is immediately blocked
+      // — the buyer sees it arrive and vanish, with no way to actually pay.
+      // `wallet_approval` is what the client's popup-based button already
+      // expects; it was simply never returned.
+      next_action: {
+        type: 'wallet_approval',
+        provider: 'paypal',
+        client_id: this.creds.client_id,
+        order: order.id,
+        currency: req.currency,
+        approval_url,
+      },
     }
   }
 
@@ -466,9 +485,23 @@ export class PayPalProvider implements PaymentProvider {
       },
     })
 
+    const approval_url = PayPalProvider.approvalLink(order)
+
     return {
       provider_ref: order.id,
-      payment_link: PayPalProvider.approvalLink(order),
+      payment_link: approval_url,
+      // Same reasoning as `charge`'s identical block: without this a deposit
+      // hold falls back to the generic `redirect`, which the client frames —
+      // and PayPal refuses framing regardless of which intent the order was
+      // created with.
+      next_action: {
+        type: 'wallet_approval',
+        provider: 'paypal',
+        client_id: this.creds.client_id,
+        order: order.id,
+        currency: req.currency,
+        approval_url,
+      },
     }
   }
 

@@ -132,6 +132,39 @@ Deno.test('a charge creates an order and hands back where to send the buyer', as
   }
 })
 
+Deno.test('a charge names wallet_approval, not the generic redirect', async () => {
+  // Without this, startCharge fills in `{ type: 'redirect', url: payment_link
+  // }`, and the checkout client puts that url in an iframe — the same as it
+  // does Flutterwave's hosted page. PayPal refuses to be framed exactly like
+  // Stripe Checkout does, so that iframe loads PayPal's page and is
+  // immediately blocked: a buyer sees it arrive and vanish, with no way to
+  // pay. wallet_approval is what the client's popup-based button expects.
+  const { restore } = intercept([ORDER])
+  try {
+    const pp = new PayPalProvider(CREDS, 'https://pay.example')
+    const result = await pp.charge({
+      deal_id: 'deal-1',
+      amount: 10_000,
+      currency: 'USD',
+      method: 'wallet',
+      return_url: 'https://pay.example/done',
+      three_d_secure: true,
+      idempotency_key: 'idem-1',
+    })
+
+    assertEquals(result.next_action, {
+      type: 'wallet_approval',
+      provider: 'paypal',
+      client_id: CREDS.client_id,
+      order: 'ORDER-1',
+      currency: 'USD',
+      approval_url: ORDER.links[0].href,
+    })
+  } finally {
+    restore()
+  }
+})
+
 Deno.test('idempotency is a header, so a retry is not a second order', async () => {
   const { seen, restore } = intercept([ORDER])
   try {
@@ -192,6 +225,31 @@ Deno.test('a deposit is held rather than taken — §22', async () => {
     // hold against damage.
     assertEquals(body.intent, 'AUTHORIZE')
     assertEquals(body.purchase_units[0].amount.value, '250.00')
+  } finally {
+    restore()
+  }
+})
+
+Deno.test('a deposit hold also names wallet_approval, not the generic redirect', async () => {
+  const { restore } = intercept([{ ...ORDER, intent: 'AUTHORIZE' }])
+  try {
+    const pp = new PayPalProvider(CREDS, 'https://pay.example')
+    const result = await pp.preauth({
+      deal_id: 'deal-1',
+      amount: 25_000,
+      currency: 'USD',
+      return_url: 'https://pay.example/done',
+      idempotency_key: 'idem-1',
+    })
+
+    assertEquals(result.next_action, {
+      type: 'wallet_approval',
+      provider: 'paypal',
+      client_id: CREDS.client_id,
+      order: 'ORDER-1',
+      currency: 'USD',
+      approval_url: ORDER.links[0].href,
+    })
   } finally {
     restore()
   }
