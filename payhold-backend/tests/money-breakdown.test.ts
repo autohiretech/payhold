@@ -220,18 +220,24 @@ describe('the §7 breakdown', () => {
     // presentment. Invisible on a domestic deal, where the two are the same
     // number; on AutoHire's live data a RWF 9.80 estimate came back labelled
     // "USD 9.80" — four orders of magnitude off a $0.07 booking.
+    //
+    // 9799 RWF at 0.0007142857 (presentment per settlement, major-to-major)
+    // is $7.00 — 700 minor USD units — and its 980 RWF fee estimate is
+    // $0.70, 70 minor units. Both figures here have to cross from RWF's
+    // minor-equals-major convention into USD's ×100 one, which is exactly
+    // the arithmetic this test pins.
     const { rows: [d] } = await h.db.query<{ id: string }>(
       `insert into deals (tenant_id, buyer_ref, seller_id, description, amount,
                           currency, presentment_currency, presentment_amount,
                           buyer_country, provider, fee_amount)
-       values ($1, 'buyer_x', $2, 'Cross-border rental', 9799, 'RWF', 'USD', 7,
+       values ($1, 'buyer_x', $2, 'Cross-border rental', 9799, 'RWF', 'USD', 700,
                'US', 'fake', 980)
        returning id`,
       [tenant, seller],
     )
     // Same rate the deal itself locks at funding: presentment per settlement.
     await h.db.query(
-      `select fund_deal($1, 'fake', 'ref-x', 'card', null, 7, 'USD', 0.0007142857, 3, 0)`,
+      `select fund_deal($1, 'fake', 'ref-x', 'card', null, 700, 'USD', 0.0007142857, 3, 0)`,
       [d.id],
     )
 
@@ -239,10 +245,11 @@ describe('the §7 breakdown', () => {
       `select * from deal_amounts($1)`, [d.id],
     )
     // 980 RWF-minor-unit estimate converted at the locked rate — not the raw
-    // settlement figure mislabeled as presentment.
-    expect(Number(a.buyer_paid)).toBe(7)
-    expect(Number(a.platform_fee)).toBe(1)
-    expect(Number(a.seller_net)).toBe(6)
+    // settlement figure mislabeled as presentment, and not left as a
+    // fraction of a major dollar mistaken for a count of cents.
+    expect(Number(a.buyer_paid)).toBe(700)
+    expect(Number(a.platform_fee)).toBe(70)
+    expect(Number(a.seller_net)).toBe(630)
   })
 
   test('a deal refunded in full before release owes no commission, not a negative one', async () => {
@@ -319,21 +326,21 @@ describe('the §7 breakdown', () => {
                           currency, presentment_currency, presentment_amount,
                           buyer_country, provider, fee_amount)
        values ($1, 'buyer_z', $2, 'Partially refunded before release', 9799,
-               'RWF', 'USD', 7, 'US', 'fake', 980)
+               'RWF', 'USD', 700, 'US', 'fake', 980)
        returning id`,
       [tenant, seller],
     )
     await h.db.query(
-      `select fund_deal($1, 'fake', 'ref-z', 'card', null, 7, 'USD', 0.0007142857, 3, 0)`,
+      `select fund_deal($1, 'fake', 'ref-z', 'card', null, 700, 'USD', 0.0007142857, 3, 0)`,
       [d.id],
     )
-    await h.db.query(`select refund_deal($1, 'Partial goodwill credit', 'dashboard', 2)`, [d.id])
+    await h.db.query(`select refund_deal($1, 'Partial goodwill credit', 'dashboard', 200)`, [d.id])
 
     const { rows: [a] } = await h.db.query<Record<string, string>>(
       `select * from deal_amounts($1)`, [d.id],
     )
-    expect(Number(a.refunded)).toBe(2)
-    expect(Number(a.platform_fee)).toBe(1)
+    expect(Number(a.refunded)).toBe(200)
+    expect(Number(a.platform_fee)).toBe(70)
   })
 })
 
