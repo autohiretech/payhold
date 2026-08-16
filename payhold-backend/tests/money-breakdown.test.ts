@@ -211,6 +211,39 @@ describe('the §7 breakdown', () => {
     // 60,000 less our 6,000 and the 4,000 owed onward.
     expect(Number(a.seller_net)).toBe(50_000)
   })
+
+  test('a cross-currency deal held before release converts its fee estimate, not just its amount', async () => {
+    // `platform_fee`'s fallback — the ledger has no `fee` entry until
+    // release, so a still-held deal reads `deals.fee_amount` instead — used
+    // to hand that figure back unconverted. `fee_amount` is booked in
+    // settlement currency; every other figure `deal_amounts` returns is
+    // presentment. Invisible on a domestic deal, where the two are the same
+    // number; on AutoHire's live data a RWF 9.80 estimate came back labelled
+    // "USD 9.80" — four orders of magnitude off a $0.07 booking.
+    const { rows: [d] } = await h.db.query<{ id: string }>(
+      `insert into deals (tenant_id, buyer_ref, seller_id, description, amount,
+                          currency, presentment_currency, presentment_amount,
+                          buyer_country, provider, fee_amount)
+       values ($1, 'buyer_x', $2, 'Cross-border rental', 9799, 'RWF', 'USD', 7,
+               'US', 'fake', 980)
+       returning id`,
+      [tenant, seller],
+    )
+    // Same rate the deal itself locks at funding: presentment per settlement.
+    await h.db.query(
+      `select fund_deal($1, 'fake', 'ref-x', 'card', null, 7, 'USD', 0.0007142857, 3, 0)`,
+      [d.id],
+    )
+
+    const { rows: [a] } = await h.db.query<Record<string, string>>(
+      `select * from deal_amounts($1)`, [d.id],
+    )
+    // 980 RWF-minor-unit estimate converted at the locked rate — not the raw
+    // settlement figure mislabeled as presentment.
+    expect(Number(a.buyer_paid)).toBe(7)
+    expect(Number(a.platform_fee)).toBe(1)
+    expect(Number(a.seller_net)).toBe(6)
+  })
 })
 
 describe('the new-seller reserve — §6.1', () => {
