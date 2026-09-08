@@ -35,7 +35,7 @@ One repository, two deploy targets, independent of each other:
 
 | | Where | How |
 |---|---|---|
-| `payhold-dashboard` | Cloudflare Pages | `.github/workflows/deploy-dashboard.yml`, on push to main |
+| `payhold-dashboard` | Cloudflare Pages | `wrangler pages deploy dist --project-name=payhold`, by hand |
 | `payhold-backend` | Supabase (`mwnbjjlilqrwdmwutbxr`) | `.github/workflows/deploy-backend.yml`; migrations by hand |
 
 The backend does not go on Cloudflare and cannot: the money engine is SQL

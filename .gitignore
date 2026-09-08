@@ -11,3 +11,6 @@
 node_modules/
 dist/
 .DS_Store
+
+# Wrangler's local state, written by `wrangler pages deploy`. Machine-local.
+.wrangler/

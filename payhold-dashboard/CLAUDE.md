@@ -39,40 +39,36 @@ against provider test keys.
 
 ## Deploying
 
-**What actually publishes the site is Cloudflare's own Git integration, not the
-GitHub workflow.** The `payhold` Pages project is connected to this repository
-and runs `npm run build` in `payhold-dashboard` on every push to `main`. That is
-worth knowing before changing anything here, because this file used to describe
-the opposite and the difference cost a broken production deploy: the workflow
-builds and tests, then **skips** the publish, because `CLOUDFLARE_API_TOKEN` has
-never been set as a GitHub secret.
+**The site is published by hand, from a terminal, with wrangler.** The `payhold`
+Pages project is a direct-upload project: it is not connected to this
+repository, nothing builds on push, and `git push` publishes nothing. The
+deploy is a separate act you perform when you mean to:
 
-So there are two build environments and they do not share variables:
+```bash
+cd payhold-dashboard
+VITE_SUPABASE_URL=… VITE_SUPABASE_ANON_KEY=… npm run build
+wrangler pages deploy dist --project-name=payhold --branch=main
+```
 
-| | Where its `VITE_*` come from | What it does |
-|---|---|---|
-| Cloudflare Pages (Git) | the **project's** build environment variables, set in the Cloudflare dashboard or via the API | builds and publishes |
-| `.github/workflows/deploy-dashboard.yml` | GitHub repository *variables* | typechecks, tests, builds, and skips publishing while the token is unset |
+This replaced two racing pipelines. Cloudflare's Git integration used to build
+and publish every push to `main`, while `.github/workflows/deploy-dashboard.yml`
+built, tested and then **skipped** the publish because `CLOUDFLARE_API_TOKEN`
+was never set as a GitHub secret — so the tested pipeline was not the one
+shipping. Both are now gone: the workflow is deleted and the project was
+recreated without a Git connection.
 
-**Both `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY` must be set on the
-Pages project itself**, for production *and* preview. They were not, which is
-why the first build after the mock was deleted shipped a bundle that threw
-`VITE_SUPABASE_URL must be set at build time` before rendering a pixel. Setting
-them in GitHub does nothing for the deployed site.
+**The build environment is now this machine**, which is the thing to be
+deliberate about. `VITE_*` values are read from your shell or from a local
+`.env.local` at build time and baked into the bundle; the Pages project holds no
+build variables any more, because Cloudflare no longer builds anything. Setting
+them in GitHub or in the Cloudflare dashboard does nothing for the deployed
+site.
 
-The consequence to be deliberate about: **nothing gates the publish.**
-Cloudflare builds whatever is on `main` whether or not the tests pass. The
-workflow's suites are a signal you have to go and read. Closing that is a
-choice between two shapes, and neither is free:
-
-1. **Keep the Git integration** and treat the workflow as CI. Simple, one
-   pipeline, no token to manage — and a red suite still ships.
-2. **Disconnect Git in Cloudflare** and give the workflow
-   `CLOUDFLARE_API_TOKEN` + `CLOUDFLARE_ACCOUNT_ID` so the publish depends on
-   the tests. That is what this file originally described and what the workflow
-   was written for. Leaving *both* connected is the one option that is simply
-   wrong: two pipelines race to publish and the slower one wins, which is the
-   older one.
+The consequence to be deliberate about: **nothing gates the publish.** No test
+runs between your build and the live site — `npm test && npm run typecheck`
+before deploying is the whole safety net, and it is one you have to actually
+run. What you gain for that is that the artifact you tested locally is the exact
+artifact that ships, rather than one a remote builder made from your branch.
 
 `.env.example` is the whole configuration surface, and all of it is public by
 design — the anon key grants nothing on its own, and the service-role key has no
