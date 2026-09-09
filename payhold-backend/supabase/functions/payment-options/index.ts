@@ -45,7 +45,8 @@ import { momoNetworksFor } from '../_shared/momo.ts'
 import { allMarketsVerified, marketVerified } from '../_shared/launch.ts'
 import { closedMarkets, liveProviders } from '../_shared/matrix.ts'
 import { loadSettings } from '../_shared/settings.ts'
-import { PayHoldError, type Currency, type PaymentMethod } from '../_shared/types.ts'
+import { type Country, type Currency, PayHoldError, type PaymentMethod } from '../_shared/types.ts'
+import type { SupabaseClient } from 'npm:@supabase/supabase-js@2'
 
 /** Regional-indicator flag emoji, derived from the ISO code. */
 function flag(code: string): string {
@@ -87,6 +88,65 @@ function methodsFor(
     schemes: (rail.schemes ?? []).map((code) => ({ code, label: SCHEME_LABEL[code] })),
     note: rail.note ?? null,
   }))
+}
+
+/**
+ * The registry's answer, checked against the table that actually routes.
+ *
+ * `payoutRoute()` is `rails.ts` — the generated registry of where money *can*
+ * go. `route_payout` reads `payout_routes` — where it may go today. On
+ * 2026-09-09 the two disagreed by ~46 countries (Stripe 44 vs 11, Flutterwave
+ * 25 vs 12), and this endpoint answered from the registry alone. So a client
+ * rendering its payout-method picker from this response — which is the only
+ * thing a client is allowed to render it from — told a host in Austria or
+ * Sierra Leone "choose how you want to be paid", tokenized a real destination,
+ * and every payout after that was `blocked: no route`. The Rwandan
+ * stripe_connect primary refused earlier the same day, forty-six corridors
+ * wide, from the other direction.
+ *
+ * `route_evaluation` is the engine's own judgement, tenant overrides included.
+ * Amount limits are deliberately not part of the question: a corridor with a
+ * route whose minimum this particular payout is under is still a corridor a
+ * seller can be set up in, so `p_amount` is 0 and the two amount reasons count
+ * as covered. Everything else — no row for the country or currency, a disabled
+ * or suspended rail — is not, and the answer fails closed.
+ *
+ * `verified` is orthogonal and stays as it was: per market, from §16's
+ * checklist. A corridor can be verified and still have no route row, and a
+ * client that read `rails_verified` as "this will work" would be wrong twice.
+ * `blocked` is the field that answers "will a payout find a route".
+ */
+async function routedOrBlocked(
+  db: SupabaseClient,
+  tenant: string,
+  country: string,
+  currency: string,
+  verified: boolean,
+): Promise<Record<string, unknown>> {
+  const route = payoutRoute(country as Country, currency as Currency)
+  if (route.blocked) return { ...route, verified }
+
+  const { data, error } = await db.rpc('route_evaluation', {
+    p_tenant: tenant,
+    p_country: country,
+    p_currency: currency,
+    p_amount: 0,
+    p_rail: null,
+  })
+  if (error) throw new Error(`route_evaluation failed: ${error.message}`)
+
+  const COVERED = new Set(['eligible', 'below_route_minimum', 'above_route_maximum'])
+  const covered = ((data ?? []) as { reason_code: string }[]).some((r) => COVERED.has(r.reason_code))
+  if (covered) return { ...route, verified }
+
+  return {
+    ...route,
+    blocked: true,
+    verified,
+    reason:
+      `PayHold has no enabled payout route into ${countryInfo(country as Country).name} in ${currency} yet. ` +
+      'The registry lists the corridor; the routing table does not, and payouts follow the table.',
+  }
 }
 
 Deno.serve(handler(async (req) => {
@@ -141,7 +201,7 @@ Deno.serve(handler(async (req) => {
         verified: false,
         reason: closure.reason,
       }
-      : { ...payoutRoute(payoutCountry, currency), verified }
+      : await routedOrBlocked(db, caller.tenant_id, payoutCountry, currency, verified)
 
     // What a seller here actually has to *pick*, which is the half of this
     // answer a payout-setup form needs. A beneficiary is registered against a
