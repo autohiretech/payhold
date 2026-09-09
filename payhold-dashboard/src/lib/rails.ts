@@ -529,10 +529,14 @@ export function payoutRoute(country: Country, currency: Currency): PayoutRoute {
 /** Summary of payout capability in a market, for the seller's local currency. */
 export function payoutCapability(country: Country): {
   provider: Provider | null
+  /** Which rail on that provider — a wallet, a bank transfer, a Connect
+   * account. Carried so a screen can look the row up by the rail it actually
+   * names, not just the provider behind it. */
+  kind: PayoutKind | null
   reason: string
 } {
   const route = payoutRoute(country, defaultCurrencyFor(country))
-  return { provider: route.provider, reason: route.reason }
+  return { provider: route.provider, kind: route.kind, reason: route.reason }
 }
 
 // ---------------------------------------------------------------------------

@@ -376,6 +376,7 @@ export function RailsPage() {
               <Th>Sellers</Th>
               <Th>Payout rail</Th>
               <Th>Why</Th>
+              <Th align="right">Checked</Th>
             </tr>
           </thead>
           <tbody>
@@ -403,6 +404,24 @@ export function RailsPage() {
                   </Td>
                   <Td className="max-w-md text-sm leading-relaxed text-fg-muted">
                     {capability.reason}
+                  </Td>
+                  <Td align="right">
+                    {capability.provider ? (
+                      <ProvenanceBadge
+                        direction="payout"
+                        rail={{
+                          provider: capability.provider,
+                          country,
+                          method: capability.kind === 'momo' ? 'mobile_money' : 'bank_transfer',
+                          currencies: [],
+                          networks: [],
+                          collect: false,
+                          payout: true,
+                        }}
+                      />
+                    ) : (
+                      <span className="text-xs text-fg-muted">—</span>
+                    )}
                   </Td>
                 </tr>
               )
