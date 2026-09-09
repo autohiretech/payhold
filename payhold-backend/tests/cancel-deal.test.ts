@@ -84,6 +84,9 @@ describe('cancel_deal — a deal holding no money can be withdrawn', () => {
         `select details from audit_log where deal_id = $1 and action = 'deal.canceled'`, [deal],
       )
       expect(a.details.reason).toBe('closed the payment sheet')
+      // 20260909000002 read the status after `returning * into d` and logged
+      // 'canceled' as the origin of every cancellation. 000007 fixes it.
+      expect(a.details.from_status).toBe(from)
     },
   )
 
