@@ -91,6 +91,58 @@ function methodsFor(
 }
 
 /**
+ * The routing table's coverage, as a predicate, read once per request.
+ *
+ * The catalogue branch below answers for every country in one response, and it
+ * used to derive `can_payout` from `payoutRoute()` alone — the registry — while
+ * the single-country branch had already been made to defer to `route_evaluation`
+ * — the table. So the country list said Poland could be paid and the country's
+ * own answer said it could not, and a client that rendered its "where do you get
+ * paid?" picker from the list offered a market it would then refuse. The same
+ * divergence this file had just closed, one branch over.
+ *
+ * Two hundred `route_evaluation` calls per request is not the fix. The rows are
+ * few — one platform row per rail plus a tenant's overrides — so they are read
+ * once and judged here with the same conditions `route_evaluation` applies
+ * before it reaches the amount: an adapter behind the rail, enabled, approved,
+ * supports payouts, country and currency in the row. Amount limits are a
+ * per-payout question, not a coverage one, and are left out on purpose, as
+ * `routedOrBlocked` leaves them out. A tenant row replaces the platform row for
+ * the same rail, exactly as `route_evaluation`'s `distinct on` does.
+ */
+async function loadPayoutCoverage(
+  db: SupabaseClient,
+  tenant: string,
+): Promise<(country: string, currency: string) => boolean> {
+  const { data, error } = await db
+    .from('payout_routes')
+    .select('tenant_id, payout_provider, provider, enabled, supports_payouts, risk_status, countries, currencies')
+    .or(`tenant_id.is.null,tenant_id.eq.${tenant}`)
+  if (error) throw new Error(`payout_routes read failed: ${error.message}`)
+
+  type Row = {
+    tenant_id: string | null
+    payout_provider: string
+    provider: string | null
+    enabled: boolean
+    supports_payouts: boolean
+    risk_status: string
+    countries: string[]
+    currencies: string[]
+  }
+  const byRail = new Map<string, Row>()
+  for (const r of (data ?? []) as Row[]) {
+    const current = byRail.get(r.payout_provider)
+    if (!current || (r.tenant_id !== null && current.tenant_id === null)) byRail.set(r.payout_provider, r)
+  }
+  const rows = [...byRail.values()].filter((r) =>
+    r.provider !== null && r.enabled && r.risk_status === 'approved' && r.supports_payouts
+  )
+  return (country, currency) =>
+    rows.some((r) => r.countries.includes(country) && r.currencies.includes(currency))
+}
+
+/**
  * The registry's answer, checked against the table that actually routes.
  *
  * `payoutRoute()` is `rails.ts` — the generated registry of where money *can*
@@ -254,6 +306,7 @@ Deno.serve(handler(async (req) => {
 
   // --- The whole catalogue -------------------------------------------------
   if (!country) {
+    const coveredByTable = await loadPayoutCoverage(db, caller.tenant_id)
     return json(req, {
       countries: COUNTRIES.map((info) => ({
         code: info.code,
@@ -264,7 +317,12 @@ Deno.serve(handler(async (req) => {
         // Every market can pay unless sanctions say otherwise; far fewer can
         // be paid. A client picking a seller's country needs both facts.
         can_collect: !info.restricted && (closed.get(info.code)?.collect ?? true),
+        // Registry, table and market switch all have to agree — the same
+        // three the single-country branch consults, so the list a client
+        // renders a country picker from cannot offer a market the country's
+        // own answer then refuses.
         can_payout: !payoutRoute(info.code, info.currency).blocked &&
+          coveredByTable(info.code, info.currency) &&
           (closed.get(info.code)?.payout ?? true),
         restricted: info.restricted,
         // Why we closed it, when we did. Absent for the great majority, which
