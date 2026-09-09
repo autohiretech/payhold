@@ -100,12 +100,25 @@ export async function aiReadClient(tenantId: string): Promise<SupabaseClient> {
   const url = Deno.env.get('SUPABASE_URL')
   if (!url) throw new Error('SUPABASE_URL must be set')
 
+  // The gateway's admission ticket, and nothing more. It has to be one of the
+  // project's *issued* keys: once the project moved to asymmetric JWT signing
+  // keys, a self-signed token in this slot is refused at the edge with
+  // "Invalid API key" before PostgREST ever sees it. The minted token used to
+  // serve as both headers, and that is precisely what stopped working — every
+  // AI write failed while the money paths, which use the issued service key,
+  // carried on fine.
+  const apiKey = Deno.env.get('SUPABASE_ANON_KEY')
+  if (!apiKey) throw new Error('SUPABASE_ANON_KEY must be set')
+
   const token = await mintAiToken(tenantId)
 
-  // The minted token serves as both the apikey and the bearer: PostgREST reads
-  // the role claim from it either way, and there is deliberately no anon key
-  // here to fall back to a wider role by accident.
-  return createClient(url, token, {
+  // **The role still comes from the bearer.** PostgREST switches roles on the
+  // `Authorization` token's `role` claim, so this connects as `payhold_ai`
+  // exactly as before — the anon key beside it is not a fallback and cannot
+  // widen anything, and anon holds no grant on these tables regardless. A
+  // token that fails to verify fails the request; it does not quietly demote
+  // to the anon role.
+  return createClient(url, apiKey, {
     auth: { persistSession: false, autoRefreshToken: false },
     global: { headers: { Authorization: `Bearer ${token}` } },
   })

@@ -350,6 +350,89 @@ describe('the AI role cannot reach a money function', () => {
       expect(rows[0].allowed, table).toBe(false)
     }
   })
+
+  /**
+   * The grant tests above all passed while every AI write was refused in
+   * production, which is the whole reason these exist. `has_table_privilege`
+   * answers "may this role insert at all"; it says nothing about whether a
+   * policy lets the row through, and the policy read a claim PostgREST stopped
+   * setting in v10 — so `current_ai_tenant_id()` was NULL and the `with check`
+   * compared against NULL forever. These assume the role and write a row.
+   */
+  describe('the tenant claim the policies read', () => {
+    async function asAiRole<T>(claims: string | null, body: () => Promise<T>): Promise<T> {
+      await h.db.query('begin')
+      try {
+        // How PostgREST v10+ actually presents a verified token.
+        await h.db.query(`select set_config('request.jwt.claims', $1, true)`, [claims ?? ''])
+        await h.db.query('set local role payhold_ai')
+        return await body()
+      } finally {
+        await h.db.query('rollback')
+      }
+    }
+
+    test('a claims JSON naming the tenant lets that tenant’s row through', async () => {
+      const s = await seed()
+      await asAiRole(JSON.stringify({ role: 'payhold_ai', tenant_id: s.tenant }), async () => {
+        const { rows } = await h.db.query<{ tenant_id: string }>(
+          `insert into ai_chat (tenant_id, role, text, sources, attachments, cost_usd)
+           values ($1, 'assistant', 'hello', '{}'::text[], '[]'::jsonb, 0)
+           returning tenant_id`,
+          [s.tenant],
+        )
+        expect(rows[0].tenant_id).toBe(s.tenant)
+      })
+    })
+
+    test('a row for another tenant is refused', async () => {
+      const mine = await seed()
+      const theirs = await seed()
+      await asAiRole(JSON.stringify({ role: 'payhold_ai', tenant_id: mine.tenant }), async () => {
+        await rejects(
+          () =>
+            h.db.query(
+              `insert into ai_chat (tenant_id, role, text, sources, attachments, cost_usd)
+               values ($1, 'assistant', 'hello', '{}'::text[], '[]'::jsonb, 0)`,
+              [theirs.tenant],
+            ),
+          /row-level security/,
+        )
+      })
+    })
+
+    test('no claims at all writes nothing rather than everything', async () => {
+      const s = await seed()
+      await asAiRole(null, async () => {
+        await rejects(
+          () =>
+            h.db.query(
+              `insert into ai_chat (tenant_id, role, text, sources, attachments, cost_usd)
+               values ($1, 'assistant', 'hello', '{}'::text[], '[]'::jsonb, 0)`,
+              [s.tenant],
+            ),
+          /row-level security/,
+        )
+      })
+    })
+
+    test('the legacy per-claim GUC still resolves, so either shape works', async () => {
+      const s = await seed()
+      await h.db.query('begin')
+      try {
+        await h.db.query(
+          `select set_config('request.jwt.claim.tenant_id', $1, true)`,
+          [s.tenant],
+        )
+        const { rows } = await h.db.query<{ id: string | null }>(
+          `select current_ai_tenant_id() as id`,
+        )
+        expect(rows[0].id).toBe(s.tenant)
+      } finally {
+        await h.db.query('rollback')
+      }
+    })
+  })
 })
 
 // ---------------------------------------------------------------------------
