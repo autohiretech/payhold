@@ -139,13 +139,16 @@ async function routedOrBlocked(
   const covered = ((data ?? []) as { reason_code: string }[]).some((r) => COVERED.has(r.reason_code))
   if (covered) return { ...route, verified }
 
+  // `reason` is shown to a seller verbatim by at least one client, so it says
+  // only what a seller can act on — that payouts into this market are not open
+  // yet. The mechanism (the registry claims a corridor the routing table does
+  // not carry) is this comment's job and `reason_code`'s, not the sentence's.
   return {
     ...route,
     blocked: true,
     verified,
-    reason:
-      `PayHold has no enabled payout route into ${countryInfo(country as Country).name} in ${currency} yet. ` +
-      'The registry lists the corridor; the routing table does not, and payouts follow the table.',
+    reason: `PayHold has no enabled payout route into ${countryInfo(country as Country).name} in ${currency} yet.`,
+    reason_code: 'no_payout_route',
   }
 }
 
