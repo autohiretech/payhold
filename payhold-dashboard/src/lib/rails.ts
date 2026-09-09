@@ -15,8 +15,11 @@
  * that will never land.
  * ─────────────────────────────────────────────────────────────────────────────
  *
- * Nothing here is verified against a signed provider agreement. See
- * `RAILS_VERIFIED`.
+ * Nothing here is verified against a signed provider agreement — that is what
+ * `RAILS_VERIFIED` means, and it is false for every row. Whether a row has been
+ * checked against the provider's *documentation* is a separate, per-row fact
+ * and lives in `railProvenance.ts`; the two are different claims and this file
+ * makes only the first.
  */
 
 // Imported from the types module directly, not the `@/api` barrel: the mock

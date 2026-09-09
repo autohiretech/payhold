@@ -10,6 +10,7 @@
 import { describe, expect, it } from 'vitest'
 import type { Country } from '@/api/types'
 import { COUNTRIES } from './countries'
+import { PROVENANCE, PROVENANCE_CHECKED_ON, provenanceFor } from './railProvenance'
 import {
   RAILS,
   RAILS_VERIFIED,
@@ -347,9 +348,49 @@ describe('rail table integrity', () => {
     }
   })
 
-  it('flags that nothing has been verified against provider docs yet', () => {
+  it('flags that nothing has been verified against a signed provider agreement', () => {
     // Deliberately fails the day someone flips the flag without also updating
-    // the warning the dashboard shows.
+    // the warning the dashboard shows. Documentation provenance is the weaker,
+    // per-row claim and lives in `railProvenance.ts`; this constant is about
+    // contracts and settled transfers, and stays false until there is one.
     expect(RAILS_VERIFIED).toBe(false)
+  })
+})
+
+describe('rail provenance — what has been checked against provider documentation', () => {
+  it('every entry names a rail that exists, in a direction that rail supports', () => {
+    for (const key of Object.keys(PROVENANCE)) {
+      const [direction, provider, country, method] = key.split(':')
+      const rows = RAILS.filter((r) =>
+        r.provider === provider && r.country === country &&
+        (direction === 'collect' ? r.collect : r.payout) &&
+        (method === undefined || r.method === method)
+      )
+      expect(rows.length, `${key} names no rail row`).toBeGreaterThan(0)
+    }
+  })
+
+  it('every checked entry carries the page it was read against and the date', () => {
+    for (const [key, rec] of Object.entries(PROVENANCE)) {
+      expect(rec.state, key).not.toBe('unchecked')
+      expect(rec.source, key).toMatch(/^https:\/\//)
+      expect(rec.checked, key).toBe(PROVENANCE_CHECKED_ON)
+    }
+  })
+
+  it('an unlisted row is unchecked, never silently documented', () => {
+    const card = RAILS.find((r) => r.provider === 'stripe' && r.method === 'card' && r.collect)!
+    expect(provenanceFor(card, 'collect').state).toBe('unchecked')
+  })
+
+  it('the launch corridor is documented on both sides', () => {
+    const momo = RAILS.find((r) => r.provider === 'flutterwave' && r.country === 'RW' && r.method === 'mobile_money')!
+    expect(provenanceFor(momo, 'collect').state).toBe('documented')
+    expect(provenanceFor(momo, 'payout').state).toBe('documented')
+  })
+
+  it('a corridor the routing table was pruned of reads as not supported here', () => {
+    const sl = RAILS.find((r) => r.provider === 'flutterwave' && r.country === 'SL' && r.method === 'bank_transfer')!
+    expect(provenanceFor(sl, 'payout').state).toBe('unsupported')
   })
 })

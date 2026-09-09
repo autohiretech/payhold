@@ -29,21 +29,8 @@ import {
   cx,
 } from '@/components/ui'
 import { formatMoney, type StatusMeta } from '@/lib/format'
-import {
-  COUNTRIES,
-  METHOD_LABEL,
-  PROVIDER_BLURB,
-  PROVIDER_LABEL,
-  RAILS,
-  RAILS_VERIFIED,
-  SCHEME_LABEL,
-  countriesByRegion,
-  countryFlag,
-  countryName,
-  marketSummary,
-  payoutCapability,
-  settlementNote,
-} from '@/lib/rails'
+import { COUNTRIES, METHOD_LABEL, PROVIDER_BLURB, PROVIDER_LABEL, RAILS, SCHEME_LABEL, countriesByRegion, countryFlag, countryName, marketSummary, payoutCapability, settlementNote } from '@/lib/rails'
+import { PROVENANCE_CHECKED_ON, PROVENANCE_LABEL, provenanceFor, type ProvenanceState } from '@/lib/railProvenance'
 import {
   keys,
   useProviderRequirements,
@@ -94,6 +81,41 @@ function demoState(anyConnected: boolean): StatusMeta {
         tone: 'released',
         hint: 'Demo mode — payments are simulated end to end, with every guard still applied.',
       }
+}
+
+
+/**
+ * Three states, not two. "Documented" is the provider's own page supporting the
+ * row; "Not supported" is the row checked and found wanting; "Unchecked" is the
+ * plan as first typed in. The old binary printed one word on every row and so
+ * said nothing. See `railProvenance.ts` for what each means and where it came
+ * from — and note none of it is the launch checklist, which gates live money
+ * per market and is a person's signature, not a reading of documentation.
+ */
+const PROVENANCE_TONE: Record<ProvenanceState, string> = {
+  documented: 'text-released',
+  unsupported: 'text-danger',
+  unchecked: 'text-pending',
+}
+
+function ProvenanceBadge({ rail, direction }: { rail: Parameters<typeof provenanceFor>[0]; direction: 'collect' | 'payout' }) {
+  const rec = provenanceFor(rail, direction)
+  return (
+    <div className="flex flex-col items-end gap-0.5">
+      <span className={cx('text-xs font-semibold', PROVENANCE_TONE[rec.state])}>
+        {PROVENANCE_LABEL[rec.state]}
+      </span>
+      {rec.note && (
+        <span className="max-w-xs text-right text-[11px] leading-snug text-fg-muted">
+          {rec.source ? (
+            <a href={rec.source} target="_blank" rel="noreferrer" className="hover:underline">
+              {rec.note}
+            </a>
+          ) : rec.note}
+        </span>
+      )}
+    </div>
+  )
 }
 
 export function RailsPage() {
@@ -284,7 +306,7 @@ export function RailsPage() {
                 <Th>Method</Th>
                 <Th>Currencies</Th>
                 <Th>Routes to</Th>
-                <Th align="right">Status</Th>
+                <Th align="right">Checked</Th>
               </tr>
             </thead>
             <tbody>
@@ -321,14 +343,7 @@ export function RailsPage() {
                     <ProviderChip provider={rail.provider} />
                   </Td>
                   <Td align="right">
-                    <span
-                      className={cx(
-                        'text-xs font-semibold',
-                        RAILS_VERIFIED ? 'text-released' : 'text-pending',
-                      )}
-                    >
-                      {RAILS_VERIFIED ? 'Verified' : 'Unverified'}
-                    </span>
+                    <ProvenanceBadge rail={rail} direction="collect" />
                   </Td>
                 </tr>
               ))}
@@ -336,12 +351,15 @@ export function RailsPage() {
           </Table>
         )}
         <div className="border-t border-line bg-pending-soft px-6 py-4 text-sm leading-relaxed text-pending">
-          <strong className="font-semibold">Unverified rows are a plan, not a
-          guarantee.</strong>{' '}
-          Each one must be checked against the provider's own country and method
-          documentation, and against your signed account agreement, before it
-          carries live money. A wrong row means a charge you cannot collect — or
-          money you collect and cannot pay out.
+          <strong className="font-semibold">“Checked” means read against the provider’s documentation on {PROVENANCE_CHECKED_ON}, row by row.</strong>{' '}
+          <span className="text-released">Documented</span> rows have a page behind them and the link
+          under the label opens it. <span className="text-danger">Not supported</span> rows were checked
+          and the documentation does not back them — or backs them only on terms this account does not
+          meet — and the routing table no longer carries them. <span className="font-semibold">Unchecked</span>{' '}
+          rows are still the original plan: nobody has read the provider’s page for that country yet, which
+          is true of nearly every international card row. None of this is the launch checklist — that
+          gates live money per market and is a person’s signature against a signed agreement, not a reading
+          of documentation — and no row here carries live money until that is signed.
         </div>
       </Card>
 
