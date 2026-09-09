@@ -493,6 +493,81 @@ async function endHold(
 }
 
 /**
+ * `POST /v1/sellers/:id/destinations/:destinationId/verify` — §5.1's
+ * attestation, per destination.
+ *
+ * `verify_seller` stamps only the primary, which was right while a seller had
+ * one destination and wrong the moment §5.1 gave them a backup. A destination
+ * displaced before anyone verified it could not be verified (not primary) and
+ * could not be promoted to become primary (`promote_seller_destination`
+ * refuses an unverified row) — a deadlock with no endpoint to break it. The
+ * visible cost was a row reading "Not verified" forever; the real one is that
+ * `route_payout` requires `verified_at is not null` on a backup, so §5.1's
+ * failover was unreachable for any backup that missed its turn as primary.
+ *
+ * **Refuses an API key**, the same ground `/verify` stands on: a client that
+ * could verify its own destinations has turned the check into a field it sets.
+ *
+ * **It does not end the security hold** — `end-hold` next door is the other
+ * stop, and each attests to a different thing. Verifying says the account
+ * belongs to them; ending the hold says this particular change was their own
+ * act. §5.1 wants both, so one must never quietly satisfy the other.
+ */
+async function verifyDestination(
+  req: Request,
+  db: SupabaseClient,
+  caller: Caller,
+  id: string,
+  destinationId: string,
+): Promise<Response> {
+  if (caller.kind === 'api_key') {
+    throw new PayHoldError(
+      'policy_violation',
+      'Verifying a payout destination is a person\'s decision and cannot be ' +
+        'done with an API key',
+    )
+  }
+
+  const body = await readJson<{ verified?: boolean }>(req)
+
+  await ownSeller(db, caller, id)
+
+  // Scoped to the seller as well as the tenant, for `endHold`'s reason: a
+  // destination belonging to another of this account's sellers would otherwise
+  // be verifiable from whichever seller page the caller happened to be on, and
+  // the audit row would name the wrong one.
+  const { data: destination } = await db
+    .from('seller_destinations')
+    .select('id')
+    .eq('id', destinationId)
+    .eq('seller_id', id)
+    .eq('tenant_id', caller.tenant_id)
+    .maybeSingle()
+
+  if (!destination) {
+    throw new PayHoldError('not_found', `Destination ${destinationId} not found`)
+  }
+
+  const { error } = await db.rpc('verify_seller_destination', {
+    p_destination: destinationId,
+    p_tenant: caller.tenant_id,
+    // From the session, never the request body — a caller that can name its own
+    // verifier can forge one.
+    p_actor: caller.actor,
+    p_verified: body.verified ?? true,
+  })
+  if (error) throw new Error(`verify_seller_destination failed: ${error.message}`)
+
+  const { data } = await db
+    .from('seller_destinations')
+    .select(DESTINATION_COLUMNS)
+    .eq('id', destinationId)
+    .maybeSingle()
+
+  return json(req, data)
+}
+
+/**
  * `POST /v1/sellers/:id/destinations/:destinationId/promote` — §5.1's move back.
  *
  * `POST /destinations` always writes a new row with a new hold, which is right
@@ -1072,6 +1147,16 @@ Deno.serve(handler(async (req) => {
     sub && subAction === 'promote'
   ) {
     return await promoteDestination(req, db, caller, id, sub)
+  }
+
+  // Ahead of the bare `destinations` POST for `end-hold`'s reason: that route
+  // would otherwise swallow this one and try to register a destination from a
+  // body carrying only `verified`.
+  if (
+    req.method === 'POST' && id && action === 'destinations' &&
+    sub && subAction === 'verify'
+  ) {
+    return await verifyDestination(req, db, caller, id, sub)
   }
 
   if (req.method === 'POST' && id && action === 'destinations') {

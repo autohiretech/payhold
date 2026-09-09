@@ -674,6 +674,7 @@ function Destinations({ sellerId, now }: { sellerId: string; now: Date }) {
   const destinations = useSellerDestinations(sellerId)
   const { account } = useAuth()
   const [confirming, setConfirming] = useState<string | null>(null)
+  const [attesting, setAttesting] = useState<string | null>(null)
 
   // Recorded against whoever is signed in. The endpoint takes the actor from
   // the session and refuses an API key outright, so there is no form field.
@@ -687,6 +688,12 @@ function Destinations({ sellerId, now }: { sellerId: string; now: Date }) {
   // attested to — and the audit row names both.
   const promote = useMoneyMutation((destinationId: string) =>
     api.promoteSellerDestination(sellerId, destinationId),
+  )
+  // §5.1's per-destination attestation. `verifySeller` stamps only the primary,
+  // so a backup displaced before anyone checked it could be neither verified
+  // nor promoted into being verifiable — this is what breaks that deadlock.
+  const verifyDest = useMoneyMutation((destinationId: string) =>
+    api.verifySellerDestination(sellerId, destinationId),
   )
 
   if (destinations.isPending) {
@@ -761,6 +768,23 @@ function Destinations({ sellerId, now }: { sellerId: string; now: Date }) {
                     End the hold
                   </Button>
                 )}
+                {/* The claim itself is in the panel below rather than
+                    beside the button, which is the one departure from how
+                    `verifySeller` renders the same kind of attestation: a table
+                    cell has no room to say what is being claimed, and an
+                    attestation made where nobody can read it is the thing that
+                    actually weakens it. */}
+                {!d.verified_at && attesting !== d.id && (
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className="mt-1.5"
+                    disabled={verifyDest.isPending || !actor}
+                    onClick={() => setAttesting(d.id)}
+                  >
+                    Verify this destination
+                  </Button>
+                )}
                 {/* §5.1's move back. Only offered where it can succeed —
                     already checked, out of its hold, and not already primary —
                     because a disabled control that says why is a smaller
@@ -781,7 +805,7 @@ function Destinations({ sellerId, now }: { sellerId: string; now: Date }) {
           )
         })}
       </tbody>
-      {(confirming || promote.isError) && (
+      {(confirming || attesting || promote.isError) && (
         <tfoot>
           <tr>
             <Td colSpan={6}>
@@ -789,6 +813,44 @@ function Destinations({ sellerId, now }: { sellerId: string; now: Date }) {
                 {/* Outside the confirm block: promoting has no confirm step, so
                     its refusal has nowhere else to land. */}
                 {promote.isError && <ErrorNote message={promote.error.message} />}
+                {attesting && (
+                <>
+                <p className="text-sm leading-relaxed text-fg">
+                  Record that{' '}
+                  <Mono>
+                    {destinations.data.find((d) => d.id === attesting)
+                      ?.masked_destination}
+                  </Mono>{' '}
+                  belongs to this seller? PayHold does not check this. You are
+                  recording that you did, against{' '}
+                  <strong className="font-semibold">{actor}</strong>.
+                </p>
+                <p className="text-xs leading-relaxed text-fg-muted">
+                  This is about this destination only — it is not the identity,
+                  sanctions and ownership check, which is Verify on the
+                  onboarding card, and it does not end a security hold. Each
+                  stops a payout on its own.
+                </p>
+                <div className="flex gap-2">
+                  <Button
+                    size="sm"
+                    variant="primary"
+                    disabled={verifyDest.isPending || !actor}
+                    onClick={() =>
+                      verifyDest.mutate(attesting, {
+                        onSuccess: () => setAttesting(null),
+                      })
+                    }
+                  >
+                    {verifyDest.isPending ? 'Recording…' : 'Yes, I checked it'}
+                  </Button>
+                  <Button size="sm" variant="ghost" onClick={() => setAttesting(null)}>
+                    Cancel
+                  </Button>
+                </div>
+                {verifyDest.isError && <ErrorNote message={verifyDest.error.message} />}
+                </>
+                )}
                 {confirming && (
                 <>
                 <p className="text-sm leading-relaxed text-fg">

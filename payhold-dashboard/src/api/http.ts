@@ -665,6 +665,21 @@ export class HttpClient implements PayHoldClient {
     )
   }
 
+  /**
+   * One destination's own attestation. The actor comes from the session on the
+   * server, like every other recorded decision here — there is no name to pass.
+   */
+  async verifySellerDestination(
+    sellerId: string,
+    destinationId: string,
+    verified = true,
+  ): Promise<SellerDestination> {
+    return await this.#post<SellerDestination>(
+      `/sellers/${sellerId}/destinations/${destinationId}/verify`,
+      { verified },
+    )
+  }
+
   // -- Disputes: the Resolution Center (§8) --------------------------------
 
   async listDisputes(): Promise<Dispute[]> {

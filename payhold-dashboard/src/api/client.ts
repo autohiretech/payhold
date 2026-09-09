@@ -285,6 +285,24 @@ export interface PayHoldClient {
     sellerId: string,
     destinationId: string,
   ): Promise<SellerDestination>
+  /**
+   * §5.1's attestation for one destination: this account belongs to the seller.
+   *
+   * Separate from `verifySeller`, which stamps identity, sanctions and
+   * ownership — and which only ever stamped the *primary* destination. A
+   * backup displaced before anyone checked it could not be verified and could
+   * not be promoted to become verifiable, so §5.1's failover destination was
+   * unreachable for it. This is the endpoint that breaks that.
+   *
+   * **A person's decision; the endpoint refuses an API key.** It does not end
+   * the security hold — `endDestinationHold` is the other stop, and each
+   * attests to a different thing. Pass `verified: false` to withdraw.
+   */
+  verifySellerDestination(
+    sellerId: string,
+    destinationId: string,
+    verified?: boolean,
+  ): Promise<SellerDestination>
 
   // -- Money ---------------------------------------------------------------
   getBalance(): Promise<Balance[]>

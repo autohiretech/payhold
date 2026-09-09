@@ -458,6 +458,116 @@ describe('seller capabilities — §10.1', () => {
   })
 })
 
+describe('§5.1 — verifying one destination', () => {
+  // The deadlock this function exists to break. `verify_seller` stamps
+  // `where is_primary`, and `promote_seller_destination` refuses a row whose
+  // `verified_at is null` — so a **backup**, which is never primary by
+  // definition, could be neither verified nor promoted into being verifiable.
+  // That also put §5.1's failover permanently out of reach for it, since
+  // `route_payout` will only use a verified backup.
+  async function tenantOf(seller: string): Promise<string> {
+    const { rows } = await h.db.query<{ tenant_id: string }>(
+      `select tenant_id from sellers where id = $1`, [seller],
+    )
+    return rows[0].tenant_id
+  }
+
+  async function addBackup(seller: string, tenant: string): Promise<string> {
+    await h.db.query(
+      `select add_seller_destination($1, $2, 'RW', 'RWF', 'flutterwave_momo',
+                                     'tok_backup', 'MTN •••• 4242', 'Backup',
+                                     'backup', 'grace@autohire.rw')`,
+      [seller, tenant],
+    )
+    const { rows } = await h.db.query<{ id: string }>(
+      `select id from seller_destinations
+        where seller_id = $1 and not is_primary order by created_at desc limit 1`,
+      [seller],
+    )
+    return rows[0].id
+  }
+
+  // A `Date`, not a string — PGlite hands back the driver's own type, and
+  // saying otherwise made an equality check compare object identity.
+  async function verifiedAt(id: string): Promise<Date | null> {
+    const { rows } = await h.db.query<{ verified_at: Date | null }>(
+      `select verified_at from seller_destinations where id = $1`, [id],
+    )
+    return rows[0].verified_at
+  }
+
+  test('a backup can be verified, which verify_seller cannot reach', async () => {
+    const seller = await newSeller('Backup verifier')
+    const tenant = await tenantOf(seller)
+    const backup = await addBackup(seller, tenant)
+
+    // Proving the gap rather than asserting it: the seller-level attestation
+    // stamps the primary and leaves the backup exactly as it was.
+    await h.db.query(`select verify_seller($1, 'compliance@payhold')`, [seller])
+    expect(await verifiedAt(backup)).toBeNull()
+
+    await h.db.query(
+      `select verify_seller_destination($1, $2, 'grace@autohire.rw')`,
+      [backup, tenant],
+    )
+    expect(await verifiedAt(backup)).not.toBeNull()
+  })
+
+  test('it does not end the security hold, and refuses a blank actor', async () => {
+    const seller = await newSeller('Two stops')
+    const tenant = await tenantOf(seller)
+    const backup = await addBackup(seller, tenant)
+
+    await expect(
+      h.db.query(`select verify_seller_destination($1, $2, '   ')`, [backup, tenant]),
+    ).rejects.toThrow(/policy_violation/)
+
+    await h.db.query(
+      `select verify_seller_destination($1, $2, 'grace@autohire.rw')`,
+      [backup, tenant],
+    )
+
+    // Each stops a payout on its own and §5.1 wants both, so verifying must
+    // never quietly satisfy the hold as well.
+    const { rows } = await h.db.query<{ held: boolean }>(
+      `select security_hold_until > now() as held
+         from seller_destinations where id = $1`,
+      [backup],
+    )
+    expect(rows[0].held).toBe(true)
+  })
+
+  test('a second call writes no second audit row, and withdrawing reverses it', async () => {
+    const seller = await newSeller('Idempotent')
+    const tenant = await tenantOf(seller)
+    const backup = await addBackup(seller, tenant)
+
+    await h.db.query(
+      `select verify_seller_destination($1, $2, 'grace@autohire.rw')`, [backup, tenant],
+    )
+    const first = await verifiedAt(backup)
+    await h.db.query(
+      `select verify_seller_destination($1, $2, 'someone.else@autohire.rw')`,
+      [backup, tenant],
+    )
+    // Unchanged stamp, and no second name against a decision the first made.
+    expect(await verifiedAt(backup)).toEqual(first)
+    const { rows: a } = await h.db.query<{ n: string }>(
+      `select count(*) as n from audit_log
+        where action = 'seller.destination_verified'
+          and details->>'destination_id' = $1`,
+      [backup],
+    )
+    expect(Number(a[0].n)).toBe(1)
+
+    await h.db.query(
+      `select verify_seller_destination($1, $2, 'grace@autohire.rw', false)`,
+      [backup, tenant],
+    )
+    expect(await verifiedAt(backup)).toBeNull()
+  })
+})
+
 describe('§5.1 change protection', () => {
   test('a seller is created with their destination, whoever inserted them', async () => {
     // A trigger rather than a line in the endpoint: the endpoint is not the
