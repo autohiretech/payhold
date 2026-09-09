@@ -29,6 +29,7 @@ const SIGNED_IN: AuthAccount = {
   full_name: 'Grace Uwase',
   tenant_id: 'ten_test',
   tenant_name: 'AutoHire',
+  tenant_slug: 'autohire',
   role: 'owner',
 }
 

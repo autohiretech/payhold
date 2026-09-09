@@ -499,6 +499,20 @@ export interface PayHoldClient {
   // -- Settings and access -------------------------------------------------
   getSettings(): Promise<TenantSettings>
   updateSettings(patch: Partial<TenantSettings>): Promise<TenantSettings>
+  /**
+   * Wipe this company's own test data and start over — every deal, seller,
+   * destination, payout, refund, dispute, ledger entry and audit row. Settings,
+   * logins and connected rails stay.
+   *
+   * **Owner, dashboard session only; the endpoint refuses an API key** — a
+   * client's server should no more be able to erase a company's history than
+   * set its own commission. `confirm` must be the company's own slug, typed:
+   * the same check GitHub puts in front of deleting a repository, and a UX net
+   * on top of the database's own enforced one — `reset_tenant_sandbox` refuses
+   * permanently any tenant that ever connected live credentials, whatever this
+   * call sends.
+   */
+  resetSandbox(confirm: string): Promise<{ reset: true }>
   listApiKeys(): Promise<ApiKey[]>
   /** Returns the plaintext key exactly once — it is never retrievable again. */
   createApiKey(label: string): Promise<{ key: ApiKey; plaintext: string }>

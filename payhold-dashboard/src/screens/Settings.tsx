@@ -14,6 +14,7 @@ import {
 import { formatMoney, formatPercent } from '@/lib/format'
 import { SUPPORTED_CURRENCIES } from '@/lib/rails'
 import { useMoneyAction, useSettings } from '@/lib/queries'
+import { useAuth } from '@/auth/AuthProvider'
 
 // Derived from the rail table: a currency no rail can collect would only
 // create deals nobody can pay.
@@ -67,6 +68,13 @@ export function SettingsPage() {
       destination_hold_hours: Number(holdHours),
     }),
   )
+
+  // Owner-only, and gated on typing the company's own slug — see the card
+  // below for why both. The account is read here rather than inside the card
+  // so the mutation can be declared with the others, unconditionally.
+  const { account } = useAuth()
+  const [confirmSlug, setConfirmSlug] = useState('')
+  const reset = useMoneyAction(() => api.resetSandbox(confirmSlug.trim()))
 
   if (settings.isPending) {
     return (
@@ -364,6 +372,66 @@ export function SettingsPage() {
             </Button>
             {saved && <span className="text-sm text-released">Saved.</span>}
           </div>
+
+          {/* The backend has had `POST /account/reset-sandbox` since migration
+              20260817000001 and this repository's own notes described the
+              control that calls it — and no screen ever did. It was reachable
+              only by hand-building the request with a session token, which is
+              exactly the shape the slug confirmation exists to prevent being
+              casual. It is owner-only here for the same reason the endpoint
+              refuses staff and viewers: this deletes every deal, seller, payout
+              and ledger entry the company has, and the person doing that
+              should be the one accountable for the company. The database is
+              where the real guard lives — a tenant that ever connected live
+              credentials is refused permanently, whatever this sends — so the
+              typed slug is a net against a misclick, not the thing standing
+              between a company and its history. */}
+          {account?.role === 'owner' && (
+            <Card>
+              <CardHeader
+                title="Start over"
+                subtitle="Wipe this company's test data — every deal, seller, payout destination, payout, refund, dispute, ledger entry and audit row. Settings, logins and connected payment rails stay."
+              />
+              <div className="space-y-4 px-6 py-5">
+                <p className="text-sm leading-relaxed text-fg-muted">
+                  For a sandbox that has accumulated broken or stale test data. Refused
+                  permanently once this company has ever connected live payment
+                  credentials — real buyer money is what the append-only ledger exists
+                  to make unforgettable. Your own app will need to register its sellers
+                  again afterwards; anything it stored about them points at nothing.
+                </p>
+                <Field
+                  label={`Type this company's slug to confirm: ${account.tenant_slug}`}
+                  hint="Same check as deleting a repository. Nothing happens until it matches exactly."
+                >
+                  <Input
+                    value={confirmSlug}
+                    onChange={(e) => setConfirmSlug(e.target.value)}
+                    placeholder={account.tenant_slug}
+                    autoComplete="off"
+                    spellCheck={false}
+                  />
+                </Field>
+                <div className="flex items-center gap-3">
+                  <Button
+                    variant="primary"
+                    disabled={reset.isPending || confirmSlug.trim() !== account.tenant_slug}
+                    onClick={async () => {
+                      await reset.mutateAsync()
+                      // A hard reload, not an invalidation: every query on
+                      // every screen is now describing rows that do not
+                      // exist, and the honest state is the empty company a
+                      // fresh sign-in would show.
+                      window.location.assign('/')
+                    }}
+                  >
+                    {reset.isPending ? 'Wiping…' : 'Wipe this company\'s test data'}
+                  </Button>
+                </div>
+                {reset.isError && <ErrorNote message={reset.error.message} />}
+              </div>
+            </Card>
+          )}
         </div>
 
         {/* A worked example, because percentages and day counts are abstract

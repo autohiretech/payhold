@@ -186,7 +186,7 @@ export class SupabaseAuthBackend implements AuthBackend {
 
     const body = (await res.json()) as {
       user: { id?: string; email: string; full_name?: string }
-      tenant: { id: string; name: string }
+      tenant: { id: string; name: string; slug: string }
       role: AuthAccount['role']
     }
 
@@ -196,6 +196,7 @@ export class SupabaseAuthBackend implements AuthBackend {
       ...(body.user.full_name ? { full_name: body.user.full_name } : {}),
       tenant_id: body.tenant.id,
       tenant_name: body.tenant.name,
+      tenant_slug: body.tenant.slug,
       role: body.role,
     }
   }

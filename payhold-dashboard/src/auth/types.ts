@@ -36,6 +36,11 @@ export interface AuthAccount {
   full_name?: string
   tenant_id: string
   tenant_name: string
+  /** The company's URL-safe handle, as `/account/me` returns it. Carried so a
+   * screen can ask a person to type it back — the same confirmation GitHub
+   * uses before deleting a repository, and what `POST /account/reset-sandbox`
+   * requires as `confirm` before it will wipe a company's test data. */
+  tenant_slug: string
   role: TenantRole
 }
 

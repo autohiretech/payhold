@@ -958,6 +958,13 @@ export class HttpClient implements PayHoldClient {
     return settings
   }
 
+  /** The `account` function, not `settings` — it is the one holding the
+   * service role that can call `reset_tenant_sandbox`, and its `/me` is where
+   * the slug this must echo back came from. */
+  async resetSandbox(confirm: string): Promise<{ reset: true }> {
+    return await this.#post<{ reset: true }>('/account/reset-sandbox', { confirm })
+  }
+
   async listApiKeys(): Promise<ApiKey[]> {
     const { keys } = await this.#call<{ keys: ApiKey[] }>('/api-keys')
     return keys
