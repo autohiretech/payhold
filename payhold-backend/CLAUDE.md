@@ -2056,14 +2056,20 @@ violated by one row, and Postgres does not promise which it reports.
 
 ## Not built yet
 
-- **Three lifecycle states with no writer.** `checkout_started` got one in
-  Phase 7, `canceled` got `POST /deals/:id/cancel` in `20260909000002`, and
+- **Two lifecycle states with no writer.** `checkout_started` got one in
+  Phase 7, `canceled` got `POST /deals/:id/cancel` in `20260909000002`,
+  `expired` got `expire_stale_deals` in `20260909000005`, and
   `partially_refunded` is deliberately permanent (§29.8);
-  `in_progress`, `revision_requested` and `expired` each want an
+  `in_progress` and `revision_requested` each want an
   endpoint
   (§10.1 lists `POST /v1/orders/{id}/cancel` among them). The enum values and
   the transition guard already know all six, so those are endpoints rather than
-  migrations. **`auto-release` and `deals_auto_release_idx` filter on
+  migrations. **`expired` is the one that was never going to be an endpoint** —
+  a deal is abandoned precisely when no request is coming, so it is swept on
+  `settle-pending`'s existing five-minute cron. It defers to an open checkout
+  session's own `expires_at`, and never touches `payment_pending`: that is the
+  status the same cron's settlement step exists to resolve, and expiring one
+  would have a pass destroying its own work. **`auto-release` and `deals_auto_release_idx` filter on
   `funded_held | confirmed_buyer | confirmed_seller`** — whoever gives
   `in_progress` or `revision_requested` a writer must widen both, or the timer
   will silently skip deals sitting in them.

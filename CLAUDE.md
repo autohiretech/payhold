@@ -150,10 +150,13 @@ long as that takes, which is exactly the state an operator needs to see.
 
 A **transition guard** (`deal_transition_allowed`, enforced by a before-trigger)
 says which pairs are describable at all. It guards shape, not policy —
-`release_deal` still decides whether both confirmations are present. Five states
-have no writer: `checkout_started` (Phase 7), `in_progress`,
-`revision_requested` and `expired` (an endpoint each), and
-`partially_refunded` — which is deliberate and permanent, see §29.8 below. They
+`release_deal` still decides whether both confirmations are present. Three
+states have no writer: `checkout_started` (Phase 7), `in_progress` and
+`revision_requested` (an endpoint each), and
+`partially_refunded` — which is deliberate and permanent, see §29.8 below.
+`expired` got one in `20260909000005`: `expire_stale_deals`, swept from
+`settle-pending`'s cron rather than an endpoint, because silent abandonment
+is by definition something no request arrives to report. They
 are declared because an enum value is the expensive migration and the guard
 already knows them.
 

@@ -152,6 +152,8 @@ async function runPass(db: SupabaseClient): Promise<Record<string, number>> {
     /** No charge to ask about, a suspended tenant, or a rail we cannot reach. */
     skipped: 0,
     errored: 0,
+    /** Abandoned checkouts swept to `expired` — see the sweep below. */
+    expired: 0,
   }
 
   for (const deal of deals) {
@@ -192,6 +194,29 @@ async function runPass(db: SupabaseClient): Promise<Record<string, number>> {
       })
       result.errored += 1
     }
+  }
+
+  // Abandoned checkouts, swept to `expired`.
+  //
+  // Riding this cron rather than owning one: it already runs every five
+  // minutes, and a job whose whole purpose is noticing that nothing happened
+  // has no schedule of its own to justify. A new function directory would
+  // also mean a new config.toml block and a new workflow entry, for a single
+  // RPC call.
+  //
+  // Runs after settlement, and deliberately cannot fail the pass. Settling a
+  // live charge is this cron's actual job and its work is already done by
+  // this point; letting a tidy-up error throw would mark the whole run failed
+  // and throw away the settlement counts with it. `expired` stays 0 and the
+  // reason is logged.
+  try {
+    const { data: expired, error: expireErr } = await db.rpc('expire_stale_deals', {})
+    if (expireErr) throw new Error(expireErr.message)
+    result.expired = (expired ?? []).length
+  } catch (err) {
+    console.error('expiring stale deals failed', {
+      message: err instanceof Error ? err.message : String(err),
+    })
   }
 
   return result
