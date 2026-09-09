@@ -554,6 +554,18 @@ verify_jwt = false
 [functions.stripe-webhook]
 verify_jwt = false
 
+# The third rail's inbound webhook. `verify_jwt = false` for the same reason as
+# the other two — PayPal signs its own deliveries and holds no Supabase session
+# — but the check behind it is a network call to PayPal rather than a digest we
+# compute, so an unreachable PayPal means unverified and never verified.
+#
+# It was deployed for weeks without a block here or a line in the workflow's
+# deploy list, which is exactly the gap CLAUDE.md warns about: a new function is
+# three edits, and one missing from either list is a function CI never ships. It
+# was the single function left behind by the 89849ee deploy for that reason.
+[functions.paypal-webhook]
+verify_jwt = false
+
 # Authenticated by CRON_SECRET. Not reachable without it.
 [functions.webhook-dispatch]
 verify_jwt = false

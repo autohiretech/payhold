@@ -18,7 +18,8 @@ npx supabase functions deploy account deals checkout payment-options sellers \
                               balance ledger audit-log payout-routes settings \
                               api-keys admin \
                               payouts risk-signals disputes launch webhook-endpoints \
-                              flutterwave-webhook stripe-webhook provider-accounts \
+                              flutterwave-webhook stripe-webhook paypal-webhook \
+                              provider-accounts \
                               webhook-dispatch reconcile auto-release \
                               settle-pending \
                               payout-dispatch ai-dispute ai-risk-narrator \

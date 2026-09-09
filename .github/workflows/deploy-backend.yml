@@ -100,8 +100,9 @@ jobs:
           supabase functions deploy \
             account deals checkout payment-options sellers balance payouts risk-signals \
             ledger audit-log payout-routes settings api-keys admin \
-            disputes launch webhook-endpoints flutterwave-webhook stripe-webhook provider-accounts \
-            webhook-dispatch reconcile auto-release payout-dispatch \
+            disputes launch webhook-endpoints flutterwave-webhook stripe-webhook paypal-webhook \
+            provider-accounts \
+            webhook-dispatch reconcile auto-release payout-dispatch settle-pending \
             ai-dispute ai-risk-narrator ai-support ai-decisions \
             --project-ref "${{ secrets.SUPABASE_PROJECT_REF }}"
 
