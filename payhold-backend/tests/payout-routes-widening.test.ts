@@ -51,37 +51,56 @@ async function covered(country: string, currency: string): Promise<boolean> {
   return rows.some((r) => COVERED.has(r.reason_code))
 }
 
-describe('payout_routes widened to the FX-safe registry set', () => {
+describe('payout_routes: widened to the registry, then pruned to what the providers document', () => {
   test.each([
-    ['BE', 'EUR'], ['AT', 'EUR'], ['SK', 'EUR'], ['CH', 'CHF'], ['LI', 'CHF'],
-    ['JP', 'JPY'], ['SG', 'SGD'], ['BR', 'BRL'], ['MX', 'MXN'],
-  ])('the Stripe Connect row now carries %s in %s', async (country, currency) => {
+    ['BE', 'EUR'], ['AT', 'EUR'], ['SK', 'EUR'], ['PT', 'EUR'], ['CH', 'CHF'],
+  ])('the Stripe Connect row carries %s in %s (Express list, self-serve region)', async (country, currency) => {
     expect(await inRoute('stripe_connect', country, currency)).toBe(true)
   })
 
   test.each([
-    ['BF', 'XOF'], ['BJ', 'XOF'], ['CF', 'XAF'], ['GA', 'XAF'], ['ML', 'XOF'],
-    ['MW', 'MWK'], ['SL', 'SLE'], ['TG', 'XOF'],
-  ])('the Flutterwave bank row now carries %s in %s', async (country, currency) => {
-    expect(await inRoute('flutterwave_bank', country, currency)).toBe(true)
+    ['HR', 'EUR'], ['LI', 'CHF'], ['BR', 'BRL'], ['JP', 'JPY'], ['SG', 'SGD'], ['MX', 'MXN'],
+  ])('%s in %s was widened and then pruned — not on the Express list, or outside the self-serve region', async (country, currency) => {
+    expect(await inRoute('stripe_connect', country, currency)).toBe(false)
+  })
+
+  test('the Flutterwave bank row carries BF in XOF — the one added corridor with a transfer guide', async () => {
+    expect(await inRoute('flutterwave_bank', 'BF', 'XOF')).toBe(true)
+  })
+
+  test.each([
+    ['BJ', 'XOF'], ['ML', 'XOF'], ['TG', 'XOF'], ['CF', 'XAF'], ['GA', 'XAF'],
+    ['MW', 'MWK'], ['SL', 'SLE'],
+  ])('%s in %s was widened and then pruned — no transfer guide, request-only, or an undocumented currency code', async (country, currency) => {
+    expect(await inRoute('flutterwave_bank', country, currency)).toBe(false)
   })
 
   test.each([['PL', 'PLN'], ['SE', 'SEK'], ['HK', 'HKD'], ['NZ', 'NZD']])(
-    '%s in %s is in no row and covered by nothing — its currency is not in the FX table',
+    '%s in %s was never added and is covered by nothing — its currency is not in the FX table',
     async (country, currency) => {
       expect(await inRoute('stripe_connect', country, currency)).toBe(false)
       expect(await covered(country, currency)).toBe(false)
     },
   )
 
-  test('the momo row did not widen — BF has no account_bank codes in momo.ts', async () => {
+  test('the momo row did not widen — no account_bank codes exist for BF or MW', async () => {
     expect(await inRoute('flutterwave_momo', 'BF', 'XOF')).toBe(false)
+    expect(await inRoute('flutterwave_momo', 'MW', 'MWK')).toBe(false)
   })
 
   test('the launch corridors are untouched', async () => {
     expect(await inRoute('flutterwave_momo', 'RW', 'RWF')).toBe(true)
     expect(await inRoute('flutterwave_bank', 'RW', 'RWF')).toBe(true)
     expect(await inRoute('stripe_connect', 'US', 'USD')).toBe(true)
+    expect(await inRoute('stripe_connect', 'AE', 'AED')).toBe(true)
+  })
+
+  test('the Stripe note no longer claims Africa is unreachable', async () => {
+    const { rows } = await h.db.query<{ note: string }>(
+      `select note from payout_routes where tenant_id is null and payout_provider = 'stripe_connect'`,
+    )
+    expect(rows[0].note).toMatch(/no self-serve route/i)
+    expect(rows[0].note).not.toMatch(/cannot reach/i)
   })
 
   test('re-running the widening adds nothing twice', async () => {
