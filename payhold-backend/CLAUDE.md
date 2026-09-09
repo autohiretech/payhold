@@ -71,7 +71,7 @@ environment or a build log.
 | Function | Serves |
 |---|---|
 | `account` | `/signup` creates a company and its first owner; `/me` turns a session into a tenant and a role; `/reset-sandbox` wipes the company's own test data — owner, dashboard session only, refused permanently once the tenant has ever gone live |
-| `deals` | create (with §14's `completion_policy`), list, get, `/pay`, `/confirm`, `/refund`, `/deposit`, `/capture`, `/release-deposit` |
+| `deals` | create (with §14's `completion_policy`), list, get, `/pay`, `/confirm`, `/refund`, `/deposit`, `/capture`, `/release-deposit`, `/cancel` (an unfunded deal only — `created`, `checkout_started`, `payment_failed`; a payment in flight is refused, anything funded is a refund) |
 | `checkout` | §10.1's sessions. `/sessions` for the client's server; `/public/:token` for the buyer, with no credential |
 | `payment-options` | what a buyer in a market can pay with; the catalogue a client renders its checkout from |
 | `sellers` | register (destination optional), list (`?external_user_id=` finds the client's own handle), `/wallets`, `/:id/capabilities`, `/:id/balance`, `/:id/withdraw`, `/:id/verify` (person-only), `/:id/active` (status only, no payout effect), `/:id/destinations` and `/:id/destinations/:id/end-hold` (person-only), `/:id/connect/onboard` and `/:id/connect/status` (Stripe Connect onboarding — see below) |
@@ -2056,9 +2056,10 @@ violated by one row, and Postgres does not promise which it reports.
 
 ## Not built yet
 
-- **Four lifecycle states with no writer.** `checkout_started` got one in
-  Phase 7 and `partially_refunded` is deliberately permanent (§29.8);
-  `in_progress`, `revision_requested`, `expired` and `canceled` each want an
+- **Three lifecycle states with no writer.** `checkout_started` got one in
+  Phase 7, `canceled` got `POST /deals/:id/cancel` in `20260909000002`, and
+  `partially_refunded` is deliberately permanent (§29.8);
+  `in_progress`, `revision_requested` and `expired` each want an
   endpoint
   (§10.1 lists `POST /v1/orders/{id}/cancel` among them). The enum values and
   the transition guard already know all six, so those are endpoints rather than

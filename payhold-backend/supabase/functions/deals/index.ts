@@ -398,6 +398,43 @@ async function create(
 // ---------------------------------------------------------------------------
 
 /**
+ * `POST /v1/deals/:id/cancel` — the writer `canceled` never had.
+ *
+ * A client that opens a deal and then closes its checkout could not say so,
+ * and every abandoned checkout became a permanent `created` row. This is that
+ * statement, for a deal holding no money — `created`, `checkout_started` or
+ * `payment_failed`. `payment_pending` is refused by `cancel_deal` itself: a
+ * charge is in flight at a rail, `canceled` is terminal, and a settlement
+ * landing afterwards would be money at the provider with no deal willing to
+ * admit it arrived. Anything funded is a refund, not a cancel.
+ *
+ * Takes an API key: this is the client's own server withdrawing its own
+ * unfunded deal, the same standing `POST /deals` has to create one. The
+ * actor recorded is whatever `resolveCaller` names for the credential.
+ */
+async function cancel(
+  req: Request,
+  db: SupabaseClient,
+  caller: Caller,
+  id: string,
+): Promise<Response> {
+  const body = await readJson<{ reason?: string }>(req)
+  // Tenant scoping first — the 404 `getDeal` raises is what keeps another
+  // account's deal id from being cancellable, or from being confirmed to exist.
+  await getDeal(db, caller, id)
+
+  const { data, error } = await db.rpc('cancel_deal', {
+    p_deal: id,
+    p_tenant: caller.tenant_id,
+    p_actor: caller.actor,
+    p_reason: typeof body.reason === 'string' && body.reason.trim() ? body.reason.trim() : null,
+  })
+  if (error) throw rpcError(error, 'cancel this deal')
+
+  return json(req, data)
+}
+
+/**
  * Start the payment, on the rail the buyer's chosen method implies.
  *
  * This is where the provisional provider on a created deal becomes real: a
@@ -820,6 +857,10 @@ Deno.serve(handler(async (req) => {
   //
   // `getDeal` first, and the 404 it raises is the tenant scoping — a refund
   // list must not confirm that another account's deal exists.
+  if (req.method === 'POST' && id && action === 'cancel') {
+    return await cancel(req, db, caller, id)
+  }
+
   if (req.method === 'GET' && action === 'refunds') {
     await getDeal(db, caller, id)
 

@@ -150,9 +150,9 @@ long as that takes, which is exactly the state an operator needs to see.
 
 A **transition guard** (`deal_transition_allowed`, enforced by a before-trigger)
 says which pairs are describable at all. It guards shape, not policy —
-`release_deal` still decides whether both confirmations are present. Six states
+`release_deal` still decides whether both confirmations are present. Five states
 have no writer: `checkout_started` (Phase 7), `in_progress`,
-`revision_requested`, `expired` and `canceled` (an endpoint each), and
+`revision_requested` and `expired` (an endpoint each), and
 `partially_refunded` — which is deliberate and permanent, see §29.8 below. They
 are declared because an enum value is the expensive migration and the guard
 already knows them.
