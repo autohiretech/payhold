@@ -1158,7 +1158,12 @@ describe('§5.1 moving back to a checked destination', () => {
     const { rows: [old] } = await h.db.query<{ id: string }>(
       `select id from seller_destinations where seller_id = $1 and is_primary`, [seller],
     )
-    // The move that demoted it — a card destination, as in the real case.
+    // The move that demoted it — a card destination, as in the real case. The
+    // endpoint now refuses this pairing (`stripe_connect` cannot pay RW; see
+    // `sellers/rail-adapter.ts` and `seller-destination-rail.test.ts`), and the
+    // SQL function deliberately does not: it is the writer, not the policy, and
+    // this row is exactly the shape the moving-back path was built to recover
+    // from.
     const { rows: [fresh] } = await h.db.query<{ id: string }>(
       `select id from add_seller_destination($1, $2, 'RW', 'RWF', 'stripe_connect',
                                              'tok_card', 'Card •••• 5757', 'Card',

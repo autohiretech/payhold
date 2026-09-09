@@ -24,6 +24,7 @@ import { loadProvider } from '../_shared/load-provider.ts'
 import { momoBankCode, momoNetworksFor } from '../_shared/momo.ts'
 import { countryInfo, payoutRoute } from '../_shared/rails.ts'
 import { withCallerLabel } from '../_shared/seller-mask.ts'
+import { assertRailOnRoute } from './rail-adapter.ts'
 import { StripeProvider } from '../_shared/stripe.ts'
 import {
   PayHoldError,
@@ -144,6 +145,11 @@ async function create(
     if (route.blocked) {
       throw new PayHoldError('policy_violation', route.reason)
     }
+    // And refuse a rail that is not the corridor's. `blocked` only says the
+    // corridor is unreachable; it says nothing about whether the rail the
+    // caller named is the one that reaches it, and this is the registration
+    // half of the hole `addDestination` was found through.
+    assertRailOnRoute(body.payout_provider!, country, route)
 
     // Which wallet or bank, checked before anything is sent anywhere. A
     // beneficiary registered without it is one the rail will not transfer to.
@@ -707,6 +713,13 @@ async function addDestination(
   const route = payoutRoute(country, payoutCurrency)
   if (route.blocked) throw new PayHoldError('policy_violation', route.reason)
 
+  // `route.blocked` used to be the only check here, and it is the wrong one
+  // for the rail the caller named: RW/RWF is not blocked, it is Flutterwave's,
+  // so a `stripe_connect` request sailed through, was tokenized on
+  // `route.provider` two calls below — Flutterwave — and was stored claiming
+  // Stripe. `rail-adapter.ts` has the whole account; this is where it happened.
+  assertRailOnRoute(body.payout_provider, country, route)
+
   const credentials = destinationCredentials(body.payout_provider, country, body)
 
   const { provider } = await loadProvider(db, caller.tenant_id, route.provider!)
@@ -1055,6 +1068,17 @@ async function connectStatus(
   }
 
   const currency = seller.payout_currency ?? countryInfo(seller.country!).currency
+
+  // `startConnectOnboarding` already refused a market Stripe does not pay
+  // into, but that was at the start of a redirect-and-poll that can take days,
+  // and the row written here is a `stripe_connect` destination whatever the
+  // routing says by now. Re-asked rather than trusted from then, for the same
+  // reason the poll itself exists: the return is not the evidence, what is
+  // true now is. A refusal leaves `stripe_connect_pending_account_id` in
+  // place — the account is real at Stripe, and clearing it would lose the only
+  // handle anyone has to it.
+  assertRailOnRoute('stripe_connect', seller.country!, payoutRoute(seller.country!, currency))
+
   const token = await provider.tokenize({
     destination: accountId,
     currency,
