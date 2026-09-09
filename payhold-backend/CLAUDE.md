@@ -399,7 +399,10 @@ The fix is `FLUTTERWAVE_PROXY_URL` (`_shared/flutterwave.ts`): an outbound
 proxy service with its own fixed IP (QuotaGuard is one; there are others)
 sits between us and Flutterwave, and *its* IP is what gets whitelisted —
 never ours, because we don't have one to give them. Implemented with
-`Deno.createHttpClient({ proxy: { url } })`, the API Supabase's own
+`Deno.createHttpClient({ proxy: { url, basicAuth } })` — the credentials
+parsed out of `FLUTTERWAVE_PROXY_URL` and passed separately, since Deno
+documents `basicAuth` and nothing confirms it honours `user:pass@` in the
+URL — the API Supabase's own
 integration docs point at for this.
 
 **This has not been exercised against a live proxy and is unverified.**

@@ -9,7 +9,15 @@
  */
 
 import { assert, assertEquals, assertRejects } from 'jsr:@std/assert@1'
-import { FlutterwaveProvider, toMajor, toMinor, type FlutterwaveCredentials } from './flutterwave.ts'
+import {
+  FlutterwaveProvider,
+  payoutIdFromTransferReference,
+  proxyConfig,
+  toMajor,
+  toMinor,
+  transferReference,
+  type FlutterwaveCredentials,
+} from './flutterwave.ts'
 import { PayHoldError } from './types.ts'
 
 const CREDS: FlutterwaveCredentials = {
@@ -49,26 +57,26 @@ Deno.test('conversion round-trips without drift', () => {
 })
 
 Deno.test('a webhook with no verif-hash is refused', () => {
-  const p = new FlutterwaveProvider(CREDS, '')
+  const p = new FlutterwaveProvider(CREDS, '', 'test')
   assert(!p.verifySignature('{}', new Headers()))
 })
 
 Deno.test('a webhook with the wrong verif-hash is refused', () => {
-  const p = new FlutterwaveProvider(CREDS, '')
+  const p = new FlutterwaveProvider(CREDS, '', 'test')
   assert(!p.verifySignature('{}', new Headers({ 'verif-hash': 'wrong' })))
   // Same length, one character different — the constant-time path.
   assert(!p.verifySignature('{}', new Headers({ 'verif-hash': 'super-secret-hasX' })))
 })
 
 Deno.test('a webhook with the right verif-hash is accepted', () => {
-  const p = new FlutterwaveProvider(CREDS, '')
+  const p = new FlutterwaveProvider(CREDS, '', 'test')
   assert(p.verifySignature('{}', new Headers({ 'verif-hash': 'super-secret-hash' })))
 })
 
 Deno.test('a provider with no configured hash accepts nothing', () => {
   // An unconfigured webhook secret must fail closed. Accepting everything
   // because nothing was set is how the forged-webhook test starts passing 200.
-  const p = new FlutterwaveProvider({ ...CREDS, webhook_hash: '' }, '')
+  const p = new FlutterwaveProvider({ ...CREDS, webhook_hash: '' }, '', 'test')
   assert(!p.verifySignature('{}', new Headers({ 'verif-hash': '' })))
   assert(!p.verifySignature('{}', new Headers({ 'verif-hash': 'anything' })))
 })
@@ -115,7 +123,7 @@ Deno.test('a wallet number routes to the direct rail, not the hosted page', asyn
   })
 
   try {
-    const result = await new FlutterwaveProvider(CREDS, '').charge({
+    const result = await new FlutterwaveProvider(CREDS, '', 'test').charge({
       ...CHARGE,
       phone: '250788123456',
       network: 'MTN MoMo',
@@ -151,7 +159,7 @@ Deno.test('an OTP request is passed on with the reference needed to answer it', 
   })
 
   try {
-    const result = await new FlutterwaveProvider(CREDS, '').charge({
+    const result = await new FlutterwaveProvider(CREDS, '', 'test').charge({
       ...CHARGE,
       phone: '250788123456',
     })
@@ -174,7 +182,7 @@ Deno.test('an OTP with no reference degrades to waiting rather than an unanswera
   })
 
   try {
-    const result = await new FlutterwaveProvider(CREDS, '').charge({
+    const result = await new FlutterwaveProvider(CREDS, '', 'test').charge({
       ...CHARGE,
       phone: '250788123456',
     })
@@ -195,7 +203,7 @@ Deno.test('a rail that answers with a redirect is still honoured', async () => {
   })
 
   try {
-    const result = await new FlutterwaveProvider(CREDS, '').charge({
+    const result = await new FlutterwaveProvider(CREDS, '', 'test').charge({
       ...CHARGE,
       phone: '250788123456',
     })
@@ -214,7 +222,7 @@ Deno.test('a currency with no direct rail is refused, not quietly handed off', a
   try {
     await assertRejects(
       () =>
-        new FlutterwaveProvider(CREDS, '').charge({
+        new FlutterwaveProvider(CREDS, '', 'test').charge({
           ...CHARGE,
           currency: 'GBP',
           phone: '447700900000',
@@ -233,7 +241,7 @@ Deno.test('mobile money with no number still gets the hosted page', async () => 
   try {
     // A client that does not collect a number must keep working exactly as it
     // did. The direct path is an upgrade, never a requirement.
-    const result = await new FlutterwaveProvider(CREDS, '').charge(CHARGE)
+    const result = await new FlutterwaveProvider(CREDS, '', 'test').charge(CHARGE)
     assert(seen.url?.endsWith('/payments'), seen.url)
     assertEquals(result.next_action?.type, 'redirect')
     assertEquals(result.payment_link, 'https://hosted')
@@ -246,7 +254,7 @@ Deno.test('card is offered as an element carrying the deal id as its reference',
   const { seen, restore } = intercept({ status: 'success', data: { link: 'https://hosted' } })
 
   try {
-    const result = await new FlutterwaveProvider(CREDS, '').charge({
+    const result = await new FlutterwaveProvider(CREDS, '', 'test').charge({
       ...CHARGE,
       method: 'card',
       three_d_secure: true,
@@ -277,7 +285,7 @@ Deno.test('validating a code reports what the rail said next, never success', as
   })
 
   try {
-    const result = await new FlutterwaveProvider(CREDS, '').validate({
+    const result = await new FlutterwaveProvider(CREDS, '', 'test').validate({
       reference: 'FLW-REF-4',
       otp: '123456',
       method: 'mobile_money',
@@ -303,7 +311,7 @@ Deno.test('a rejected code comes back as another code, not as a dead end', async
   })
 
   try {
-    const result = await new FlutterwaveProvider(CREDS, '').validate({
+    const result = await new FlutterwaveProvider(CREDS, '', 'test').validate({
       reference: 'FLW-REF-5',
       otp: '000000',
       method: 'mobile_money',
@@ -337,7 +345,7 @@ Deno.test('a card never leaves in the clear', async () => {
   })
 
   try {
-    await new FlutterwaveProvider(CREDS, '').charge({ ...CARD_CHARGE, card: CARD })
+    await new FlutterwaveProvider(CREDS, '', 'test').charge({ ...CARD_CHARGE, card: CARD })
 
     assert(seen.url?.includes('/charges?type=card'), seen.url)
 
@@ -360,7 +368,7 @@ Deno.test('a PIN demand is its own action, not an OTP', async () => {
   })
 
   try {
-    const result = await new FlutterwaveProvider(CREDS, '').charge({
+    const result = await new FlutterwaveProvider(CREDS, '', 'test').charge({
       ...CARD_CHARGE,
       card: CARD,
     })
@@ -380,7 +388,7 @@ Deno.test('an address demand names the fields rather than leaving them to guess'
   })
 
   try {
-    const result = await new FlutterwaveProvider(CREDS, '').charge({
+    const result = await new FlutterwaveProvider(CREDS, '', 'test').charge({
       ...CARD_CHARGE,
       card: CARD,
     })
@@ -396,7 +404,7 @@ Deno.test('the second attempt does not replay the first response', async () => {
   const first = intercept({ status: 'success', data: {}, meta: { authorization: { mode: 'pin' } } })
   let firstKey: string | undefined
   try {
-    await new FlutterwaveProvider(CREDS, '').charge({ ...CARD_CHARGE, card: CARD })
+    await new FlutterwaveProvider(CREDS, '', 'test').charge({ ...CARD_CHARGE, card: CARD })
     firstKey = first.seen.idempotencyKey
   } finally {
     first.restore()
@@ -404,7 +412,7 @@ Deno.test('the second attempt does not replay the first response', async () => {
 
   const second = intercept({ status: 'success', data: { flw_ref: 'r' }, meta: { authorization: { mode: 'otp' } } })
   try {
-    await new FlutterwaveProvider(CREDS, '').charge({
+    await new FlutterwaveProvider(CREDS, '', 'test').charge({
       ...CARD_CHARGE,
       card: CARD,
       authorization: { mode: 'pin', pin: '3310' },
@@ -429,7 +437,7 @@ Deno.test('3DS is a redirect to the issuer, which is the one correct handoff', a
   })
 
   try {
-    const result = await new FlutterwaveProvider(CREDS, '').charge({
+    const result = await new FlutterwaveProvider(CREDS, '', 'test').charge({
       ...CARD_CHARGE,
       card: CARD,
     })
@@ -445,7 +453,7 @@ Deno.test('an account with no encryption key cannot charge a card at all', async
   try {
     await assertRejects(
       () =>
-        new FlutterwaveProvider({ ...CREDS, encryption_key: '' }, '').charge({
+        new FlutterwaveProvider({ ...CREDS, encryption_key: '' }, '', 'test').charge({
           ...CARD_CHARGE,
           card: CARD,
         }),
@@ -462,7 +470,7 @@ Deno.test('a mistyped encryption key is a sentence, not a crypto stack trace', a
   try {
     await assertRejects(
       () =>
-        new FlutterwaveProvider({ ...CREDS, encryption_key: 'too-short' }, '').charge({
+        new FlutterwaveProvider({ ...CREDS, encryption_key: 'too-short' }, '', 'test').charge({
           ...CARD_CHARGE,
           card: CARD,
         }),
@@ -478,7 +486,7 @@ Deno.test('a card charge with no card still gets the hosted page', async () => {
   const { seen, restore } = intercept({ status: 'success', data: { link: 'https://hosted' } })
   try {
     // The default posture, and the one every other tenant keeps.
-    const result = await new FlutterwaveProvider(CREDS, '').charge(CARD_CHARGE)
+    const result = await new FlutterwaveProvider(CREDS, '', 'test').charge(CARD_CHARGE)
     assert(seen.url?.endsWith('/payments'), seen.url)
     assertEquals(result.next_action?.type, 'element')
   } finally {
@@ -507,7 +515,7 @@ Deno.test('a bank transfer answers with an account, not a page', async () => {
   })
 
   try {
-    const result = await new FlutterwaveProvider(CREDS, '').charge({
+    const result = await new FlutterwaveProvider(CREDS, '', 'test').charge({
       ...CHARGE,
       method: 'bank_transfer',
     })
@@ -538,7 +546,7 @@ Deno.test('a transfer the rail will not mint an account for falls back to the pa
   const { restore } = intercept({ status: 'success', data: { link: 'https://hosted' } })
 
   try {
-    const result = await new FlutterwaveProvider(CREDS, '').charge({
+    const result = await new FlutterwaveProvider(CREDS, '', 'test').charge({
       ...CHARGE,
       method: 'bank_transfer',
     })
@@ -568,7 +576,7 @@ Deno.test('verify derives the provider fee from what actually settled', async ()
   })
 
   try {
-    const v = await new FlutterwaveProvider(CREDS, '').verify('tx_1')
+    const v = await new FlutterwaveProvider(CREDS, '', 'test').verify('tx_1')
     assertEquals(v.fee, 55)
     assertEquals(v.amount, 1000)
     assertEquals(v.currency, 'RWF')
@@ -591,7 +599,7 @@ Deno.test('verify surfaces a card token only once the charge has succeeded', asy
   })
 
   try {
-    const v = await new FlutterwaveProvider(CREDS, '').verify('tx_3')
+    const v = await new FlutterwaveProvider(CREDS, '', 'test').verify('tx_3')
     assertEquals(v.saved_payment_method, 'flw-token-1')
   } finally {
     restore()
@@ -611,7 +619,7 @@ Deno.test('mobile money never carries a saved payment method, even if a rail sen
   })
 
   try {
-    const v = await new FlutterwaveProvider(CREDS, '').verify('tx_4')
+    const v = await new FlutterwaveProvider(CREDS, '', 'test').verify('tx_4')
     assertEquals(v.saved_payment_method, null)
   } finally {
     restore()
@@ -632,7 +640,7 @@ Deno.test('an unsuccessful charge never reports a saved payment method', async (
   })
 
   try {
-    const v = await new FlutterwaveProvider(CREDS, '').verify('tx_5')
+    const v = await new FlutterwaveProvider(CREDS, '', 'test').verify('tx_5')
     assertEquals(v.saved_payment_method, null)
   } finally {
     restore()
@@ -643,7 +651,7 @@ Deno.test('chargeSaved sends the saved token to the tokenized-charges endpoint',
   const { seen, restore } = intercept({ data: { id: 999, status: 'successful' } })
 
   try {
-    const out = await new FlutterwaveProvider(CREDS, '').chargeSaved({
+    const out = await new FlutterwaveProvider(CREDS, '', 'test').chargeSaved({
       token: 'flw-token-1',
       amount: 45_000,
       currency: 'RWF',
@@ -676,7 +684,7 @@ Deno.test('verify falls back to app_fee when settlement is absent', async () => 
   })
 
   try {
-    assertEquals((await new FlutterwaveProvider(CREDS, '').verify('tx_2')).fee, 35)
+    assertEquals((await new FlutterwaveProvider(CREDS, '', 'test').verify('tx_2')).fee, 35)
   } finally {
     restore()
   }
@@ -711,7 +719,7 @@ Deno.test('a settlement that lands late is still preferred over app_fee', async 
   }) as typeof fetch
 
   try {
-    const v = await new FlutterwaveProvider(CREDS, '').verify('tx_6')
+    const v = await new FlutterwaveProvider(CREDS, '', 'test').verify('tx_6')
     // 1000 − 945 = 55, not the VAT-excluding app_fee of 35.
     assertEquals(v.fee, 55)
     assertEquals(calls, 3)
@@ -735,7 +743,7 @@ Deno.test('tokenize: a mobile money beneficiary names its carrier', async () => 
     data: { id: 88, account_number: '250788123456' },
   })
   try {
-    const p = new FlutterwaveProvider(CREDS, '')
+    const p = new FlutterwaveProvider(CREDS, '', 'test')
     const result = await p.tokenize({
       destination: '+250 788 123 456',
       currency: 'RWF',
@@ -766,7 +774,7 @@ Deno.test('tokenize: a bank beneficiary carries its bank code', async () => {
     data: { id: 91, account_number: '0690000031', bank_name: 'Access Bank' },
   })
   try {
-    const p = new FlutterwaveProvider(CREDS, '')
+    const p = new FlutterwaveProvider(CREDS, '', 'test')
     const result = await p.tokenize({
       destination: '0690000031',
       currency: 'NGN',
@@ -787,7 +795,7 @@ Deno.test('tokenize: a bank beneficiary carries its bank code', async () => {
 Deno.test('tokenize: a destination naming neither is refused before it is sent', async () => {
   const { seen, restore } = intercept({ status: 'success', data: { id: 1 } })
   try {
-    const p = new FlutterwaveProvider(CREDS, '')
+    const p = new FlutterwaveProvider(CREDS, '', 'test')
     await assertRejects(
       () => p.tokenize({ destination: '0788123456', currency: 'RWF', country: 'RW' }),
       PayHoldError,
@@ -812,11 +820,153 @@ Deno.test('transferStatus: only SUCCESSFUL and FAILED are answers', async () => 
   ] as const) {
     const { seen, restore } = intercept({ status: 'success', data: { status: reported } })
     try {
-      const p = new FlutterwaveProvider(CREDS, '')
+      const p = new FlutterwaveProvider(CREDS, '', 'test')
       assertEquals(await p.transferStatus('12345'), expected, reported)
       assert(seen.url!.endsWith('/transfers/12345'))
     } finally {
       restore()
     }
+  }
+})
+
+// ---------------------------------------------------------------------------
+// Transfers in the sandbox — the reference is what makes a mock settle
+// ---------------------------------------------------------------------------
+
+const PAYOUT_ID = '7b1f3c6e-2a4d-4e8f-9b0c-1d2e3f4a5b6c'
+
+const PAYOUT = {
+  payout_id: PAYOUT_ID,
+  beneficiary_token: '4242',
+  amount: 45_000,
+  currency: 'RWF',
+  idempotency_key: `payout:${PAYOUT_ID}`,
+}
+
+Deno.test('a test-mode transfer carries the sandbox settle marker', async () => {
+  // https://developer.flutterwave.com/v3.0/docs/testing — a mocked transfer
+  // stays PENDING forever unless its reference ends with `_PMCK`; `DU_1`
+  // behind it is their documented one-minute delay.
+  const { seen, restore } = intercept({
+    status: 'success',
+    data: { id: 9001, status: 'NEW' },
+  })
+  try {
+    const result = await new FlutterwaveProvider(CREDS, '', 'test').release(PAYOUT)
+    const body = JSON.parse(seen.body!)
+    assertEquals(body.reference, `${PAYOUT_ID}_PMCKDU_1`)
+    assert(body.reference.endsWith('_PMCK') || /_PMCKDU_\d+$/.test(body.reference))
+    // The id is still the leading part, so the webhook can find the payout.
+    assert(body.reference.startsWith(PAYOUT_ID))
+    assertEquals(seen.idempotencyKey, `payout:${PAYOUT_ID}`)
+    assertEquals(result, { provider_ref: '9001', status: 'pending' })
+  } finally {
+    restore()
+  }
+})
+
+Deno.test('a live-mode transfer carries the bare payout id and nothing else', async () => {
+  const { seen, restore } = intercept({
+    status: 'success',
+    data: { id: 9002, status: 'NEW' },
+  })
+  try {
+    await new FlutterwaveProvider({ ...CREDS, secret_key: 'FLWSECK-x' }, '', 'live').release(PAYOUT)
+    assertEquals(JSON.parse(seen.body!).reference, PAYOUT_ID)
+  } finally {
+    restore()
+  }
+})
+
+Deno.test('the reference is a pure function of payout id and mode', () => {
+  // Same payout, same mode, same reference on every attempt — which is what a
+  // retry after a failed attempt relies on.
+  assertEquals(transferReference(PAYOUT_ID, 'test'), transferReference(PAYOUT_ID, 'test'))
+  assertEquals(transferReference(PAYOUT_ID, 'live'), PAYOUT_ID)
+  assert(transferReference(PAYOUT_ID, 'test') !== PAYOUT_ID)
+})
+
+Deno.test('the webhook recovers the payout id from a suffixed or bare reference', () => {
+  // Every reference this adapter ever sends, in either mode, round-trips.
+  for (const mode of ['test', 'live'] as const) {
+    assertEquals(payoutIdFromTransferReference(transferReference(PAYOUT_ID, mode)), PAYOUT_ID, mode)
+  }
+  // Their other documented markers share the prefix and are stripped the same
+  // way — a person testing the failure path by hand still reaches the payout.
+  assertEquals(payoutIdFromTransferReference(`${PAYOUT_ID}_PMCK`), PAYOUT_ID)
+  assertEquals(payoutIdFromTransferReference(`${PAYOUT_ID}_PMCK_ST_F`), PAYOUT_ID)
+  assertEquals(payoutIdFromTransferReference(`${PAYOUT_ID}_PMCK_ST_FDU_1`), PAYOUT_ID)
+  assertEquals(payoutIdFromTransferReference(PAYOUT_ID.toUpperCase()), PAYOUT_ID.toUpperCase())
+})
+
+Deno.test('the webhook refuses a reference that is not a payout id once the marker is gone', () => {
+  for (const garbage of [
+    '',
+    '_PMCK',
+    '_PMCKDU_1',
+    'dfs23fhr7ntg0293039_PMCK',
+    'not-a-uuid',
+    `${PAYOUT_ID}x_PMCK`,
+    `${PAYOUT_ID}_pmck`,
+    `x${PAYOUT_ID}`,
+    `${PAYOUT_ID}; drop table payouts`,
+  ]) {
+    assertEquals(payoutIdFromTransferReference(garbage), null, JSON.stringify(garbage))
+  }
+})
+
+// ---------------------------------------------------------------------------
+// The outbound proxy — credentials leave the URL and travel as basicAuth
+// ---------------------------------------------------------------------------
+
+Deno.test('proxy credentials are split out of the URL into basicAuth', () => {
+  assertEquals(proxyConfig('http://flutterwave-proxy:s3cret@203.0.113.7:3128'), {
+    url: 'http://203.0.113.7:3128',
+    basicAuth: { username: 'flutterwave-proxy', password: 's3cret' },
+  })
+  // The vendor's own example shape from CLAUDE.md.
+  assertEquals(proxyConfig('http://user:pass@us-east-static-01.quotaguard.com:9293'), {
+    url: 'http://us-east-static-01.quotaguard.com:9293',
+    basicAuth: { username: 'user', password: 'pass' },
+  })
+})
+
+Deno.test('proxy credentials are decoded, so a password with @ or # arrives literally', () => {
+  const { basicAuth } = proxyConfig('http://u%40ser:p%40ss%23word%2F@proxy.example:3128')
+  assertEquals(basicAuth, { username: 'u@ser', password: 'p@ss#word/' })
+})
+
+Deno.test('a proxy URL without credentials passes only the URL', () => {
+  const cfg = proxyConfig('http://proxy.example:3128')
+  assertEquals(cfg, { url: 'http://proxy.example:3128' })
+  assertEquals('basicAuth' in cfg, false)
+  // A path or trailing slash on the input does not survive into the proxy url.
+  assertEquals(proxyConfig('https://proxy.example/').url, 'https://proxy.example')
+})
+
+Deno.test('the proxy url handed to Deno never carries the credentials', () => {
+  const cfg = proxyConfig('http://someone:hunter2@proxy.example:3128')
+  assertEquals(cfg.url.includes('hunter2'), false)
+  assertEquals(cfg.url.includes('someone'), false)
+})
+
+Deno.test('a proxy URL that is not a URL throws rather than being sent', () => {
+  // `flutterwaveClient` catches this and logs a fixed sentence — the thrown
+  // error quotes the input, which is the one string holding the password.
+  for (const bad of [
+    'not a url',
+    // The scheme forgotten: `new URL` accepts this as an opaque URL whose
+    // scheme is the username, and Deno would be handed `flutterwave-proxy://`.
+    'flutterwave-proxy:s3cret@host:3128',
+    'ftp://user:pass@host:21',
+    'http://',
+  ]) {
+    let threw = false
+    try {
+      proxyConfig(bad)
+    } catch {
+      threw = true
+    }
+    assert(threw, bad)
   }
 })

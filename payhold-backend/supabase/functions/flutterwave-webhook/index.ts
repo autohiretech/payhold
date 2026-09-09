@@ -26,6 +26,7 @@
 import type { SupabaseClient } from 'npm:@supabase/supabase-js@2'
 import { serviceClient } from '../_shared/auth.ts'
 import { dispatchPayout } from '../_shared/dispatch.ts'
+import { payoutIdFromTransferReference } from '../_shared/flutterwave.ts'
 import { convert } from '../_shared/fx.ts'
 import { handler, json } from '../_shared/http.ts'
 import { loadProvider } from '../_shared/load-provider.ts'
@@ -48,8 +49,10 @@ interface FlutterwaveEvent {
     card?: { type?: string }
     /**
      * Outbound transfers only. This is the `reference` we set when the
-     * transfer was created — our own `payouts.id` — and it is how a settlement
-     * finds the payout it belongs to. Charges use `tx_ref` for the same job.
+     * transfer was created — our own `payouts.id`, carrying Flutterwave's
+     * mock-settle marker behind it when the account is a sandbox one — and
+     * it is how a settlement finds the payout it belongs to. Charges use
+     * `tx_ref` for the same job.
      */
     reference?: string
   }
@@ -140,9 +143,19 @@ async function settleTransfer(
   event: FlutterwaveEvent,
 ): Promise<Response> {
   // Our own `payouts.id`, set as the transfer's `reference` when it was sent.
+  //
+  // In the sandbox it arrives with `_PMCKDU_1` behind it — the marker
+  // `transferReference` adds so Flutterwave's test environment settles the
+  // transfer at all — and this used to refuse exactly that: a bare-uuid test
+  // meant the one settlement the sandbox could ever deliver was dropped as
+  // carrying "no payout reference". The strip happens in the adapter's own
+  // inverse, so what is accepted here is by construction what `release` sends,
+  // and a reference that is not a uuid once the marker is gone is still
+  // refused before it can reach a query.
   const reference = event.data?.reference
+  const payoutId = reference ? payoutIdFromTransferReference(reference) : null
 
-  if (!reference || !UUID.test(reference)) {
+  if (!payoutId) {
     await markProcessed(db, eventId, 'Transfer event carries no payout reference')
     throw new PayHoldError('policy_violation', 'Transfer event carries no reference')
   }
@@ -150,7 +163,7 @@ async function settleTransfer(
   const { data: payout } = await db
     .from('payouts')
     .select('*')
-    .eq('id', reference)
+    .eq('id', payoutId)
     .eq('tenant_id', tenantId)
     .maybeSingle()
 

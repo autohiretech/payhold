@@ -120,6 +120,11 @@ export async function loadProvider(
         provider: new FlutterwaveProvider(
           credentials as unknown as FlutterwaveCredentials,
           publicUrl(),
+          // The adapter needs to know this for one reason: a sandbox transfer
+          // only settles if its reference says so. This row is where the mode
+          // is recorded, so it is read here once rather than re-derived from
+          // the key inside the adapter.
+          data.mode,
         ),
         mode: data.mode,
         connected: true,

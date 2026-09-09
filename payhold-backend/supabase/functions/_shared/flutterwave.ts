@@ -57,6 +57,56 @@ const API = 'https://api.flutterwave.com/v3'
  */
 let flutterwaveHttpClient: Deno.HttpClient | null | undefined
 
+/**
+ * `FLUTTERWAVE_PROXY_URL` as `Deno.createHttpClient` wants it.
+ *
+ * The operator sets the URL in the shape every proxy vendor prints —
+ * `http://user:pass@host:port` — and it used to be handed to Deno whole.
+ * Deno documents `Deno.Proxy` as a `url` **plus** a separate
+ * `basicAuth: { username, password }` (https://docs.deno.com/api/deno/~/Deno.Proxy),
+ * and nothing in that documentation promises that credentials embedded in the
+ * URL are read out of it. QuotaGuard's own Supabase Edge Functions guide
+ * parses them out and passes `basicAuth` on the side for exactly this reason
+ * (https://www.quotaguard.com/docs/integration/platforms/supabase-edge-functions-integration-guide/).
+ * A proxy that ignores the embedded credentials answers 407 to every call,
+ * which `envelope` would report as `Flutterwave: Proxy Authentication
+ * Required` — a stuck payout with the wrong vendor's name on it.
+ *
+ * So the credentials are split off here. `URL.username`/`URL.password` come
+ * back percent-encoded exactly as written, and a password containing `@` or
+ * `#` *had* to be encoded to fit in the URL at all, so both are decoded before
+ * they are used as the literal Basic-auth value. The `url` handed on is
+ * `protocol//host` only — no path, no trailing slash, and above all no
+ * credentials, so the one string that could later appear in an error message
+ * cannot carry them.
+ *
+ * Exported for the test; this is the parsing that decides whether a live
+ * proxy is used or silently bypassed, and it needs pinning.
+ */
+export function proxyConfig(
+  proxyUrl: string,
+): { url: string; basicAuth?: { username: string; password: string } } {
+  const u = new URL(proxyUrl)
+  // `new URL('flutterwave-proxy:s3cret@host:3128')` — the string with its
+  // scheme forgotten — does not throw; it parses as an opaque URL whose scheme
+  // is the username. Only the transports Deno's proxy actually speaks are
+  // accepted, and each needs a host, so that mistake fails here with the
+  // fixed log line in `flutterwaveClient` rather than inside Deno with a
+  // message that might quote it.
+  if (!['http:', 'https:', 'socks5:'].includes(u.protocol) || !u.host) {
+    throw new TypeError('proxy URL must be http://, https:// or socks5:// with a host')
+  }
+  const url = `${u.protocol}//${u.host}`
+  if (!u.username && !u.password) return { url }
+  return {
+    url,
+    basicAuth: {
+      username: decodeURIComponent(u.username),
+      password: decodeURIComponent(u.password),
+    },
+  }
+}
+
 function flutterwaveClient(): Deno.HttpClient | undefined {
   if (flutterwaveHttpClient !== undefined) return flutterwaveHttpClient ?? undefined
 
@@ -66,10 +116,29 @@ function flutterwaveClient(): Deno.HttpClient | undefined {
     return undefined
   }
 
+  // Parsed in its own step, because `new URL()` quotes its input back in the
+  // error it throws — and the input is the one string in this process that
+  // holds the proxy password. Nothing from that failure reaches a log line
+  // except the fact of it.
+  let proxy: ReturnType<typeof proxyConfig>
+  try {
+    proxy = proxyConfig(proxyUrl)
+  } catch {
+    console.error(
+      'FLUTTERWAVE_PROXY_URL is set but is not a URL of the form ' +
+        "http://user:pass@host:port — falling back to a direct connection, which Flutterwave's " +
+        'IP whitelist will keep refusing.',
+    )
+    flutterwaveHttpClient = null
+    return undefined
+  }
+
   try {
     // deno-lint-ignore no-explicit-any
-    flutterwaveHttpClient = (Deno as any).createHttpClient({ proxy: { url: proxyUrl } })
+    flutterwaveHttpClient = (Deno as any).createHttpClient({ proxy })
   } catch (err) {
+    // `proxy.url` carries no credentials by construction (see `proxyConfig`),
+    // so whatever Deno says about it is safe to print.
     console.error(
       'FLUTTERWAVE_PROXY_URL is set but Deno.createHttpClient is unavailable in this ' +
         "runtime — falling back to a direct connection, which Flutterwave's IP whitelist " +
@@ -246,6 +315,70 @@ function toMethod(paymentType: string | null | undefined): PaymentMethod | null 
   return null
 }
 
+/**
+ * What makes a sandbox transfer settle at all.
+ *
+ * Flutterwave's test environment never settles a transfer on its own:
+ * https://developer.flutterwave.com/v3.0/docs/testing says a mocked transfer
+ * "will always remain in a PENDING state" by default, and to mock a
+ * successful one the `reference` must end with `_PMCK`. `DU_{minutes}`
+ * appended after it sets how long the mock waits — their own example,
+ * `dfs23fhr7ntg0293039_PMCKDU_1`, succeeds after one minute where the bare
+ * `_PMCK` takes ten. One minute is the difference between a person running
+ * `scripts/sandbox-walkthrough.md` watching the payout land and giving up on
+ * it, and nothing else about the mock changes with the delay.
+ *
+ * Until this existed every sandbox payout went `processing` and stayed there:
+ * `release` sent the bare payout id, the sandbox left it `PENDING` forever,
+ * `transferStatus` faithfully answered `pending` on every pass, and
+ * `walkthrough_money_path` could never be signed off — not because anything
+ * was wrong, but because the sandbox had never been told to pretend.
+ *
+ * Only the *success* marker is used. Their failure marker (`_PMCK_ST_F`) is
+ * for testing the failure path by hand, not something this adapter should
+ * ever pick on its own.
+ */
+const SANDBOX_SETTLE_SUFFIX = '_PMCKDU_1'
+
+/**
+ * The `reference` a transfer is created under. Our own `payouts.id`, and in
+ * test mode only, `SANDBOX_SETTLE_SUFFIX` behind it.
+ *
+ * Live is the bare id and nothing else, and the branch is written so that is
+ * the case that needs no reasoning: a live transfer carrying a mock-settle
+ * marker would be a request to real money to behave like test money, and
+ * whatever Flutterwave's live API does with an unknown suffix, the payout row
+ * would then be found by a reference that is not its id.
+ *
+ * Deterministic in the payout id — same payout, same mode, same reference on
+ * every attempt — which is what keeps `dispatchPayout`'s retry reasoning true:
+ * a re-sent `release` (only ever after a *failed* attempt, since a
+ * `processing` transfer is asked about by id, never re-POSTed) presents the
+ * reference and the `idempotency_key` the rail already saw.
+ */
+export function transferReference(payoutId: string, mode: 'test' | 'live'): string {
+  if (mode === 'test') return `${payoutId}${SANDBOX_SETTLE_SUFFIX}`
+  return payoutId
+}
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+/**
+ * The payout id inside a transfer `reference` Flutterwave sends back, or null.
+ *
+ * The inverse of `transferReference`, for `flutterwave-webhook`: a `transfer.*`
+ * event carries the reference we created the transfer under, and in the
+ * sandbox that is the payout id with the settle marker behind it. Anything
+ * from `_PMCK` onward is stripped — the delay modifier varies, and their
+ * failure marker shares the prefix — and what remains must be a uuid, or the
+ * event is not ours. The uuid check is what stops a reference somebody else
+ * chose from being used as a row id in a query.
+ */
+export function payoutIdFromTransferReference(reference: string): string | null {
+  const bare = reference.replace(/_PMCK.*$/, '')
+  return UUID.test(bare) ? bare : null
+}
+
 export class FlutterwaveProvider implements PaymentProvider {
   readonly name = 'flutterwave' as const
 
@@ -276,6 +409,20 @@ export class FlutterwaveProvider implements PaymentProvider {
   constructor(
     private readonly creds: FlutterwaveCredentials,
     private readonly publicUrl: string,
+    /**
+     * Whether these credentials are a sandbox account or a live one, as
+     * `tenant_provider_accounts.mode` records it. `loadProvider` is the one
+     * caller that knows, so it is passed in rather than inferred here from the
+     * `FLWSECK_TEST-` prefix — two places deciding the same fact is how they
+     * come to disagree, and `provider-accounts` already refuses a key whose
+     * prefix contradicts the mode it was submitted under.
+     *
+     * The only thing it changes is the transfer `reference` `release` sends —
+     * see `transferReference`. Required rather than defaulted, because a
+     * default of `live` would leave the sandbox quietly unable to settle and a
+     * default of `test` would put a mock-settle marker on real money.
+     */
+    private readonly mode: 'test' | 'live',
   ) {}
 
   // -------------------------------------------------------------------------
@@ -821,7 +968,10 @@ export class FlutterwaveProvider implements PaymentProvider {
         beneficiary: Number(req.beneficiary_token),
         amount: toMajor(req.amount, req.currency),
         currency: req.currency,
-        reference: req.payout_id,
+        // Our own `payouts.id`, which is how their `transfer.*` webhook finds
+        // the payout again — plus, in the sandbox only, the marker that makes
+        // the mock settle. See `transferReference`.
+        reference: transferReference(req.payout_id, this.mode),
         narration: 'PayHold settlement',
       }),
     })
@@ -1160,7 +1310,12 @@ export async function validateFlutterwaveCredentials(
   creds: FlutterwaveCredentials,
 ): Promise<{ ok: true; currencies: Currency[] } | { ok: false; reason: string }> {
   try {
-    const provider = new FlutterwaveProvider(creds, '')
+    // This instance reads `/balances` and sends nothing, so the mode it is
+    // built with decides nothing. `live` is still the right value to write
+    // here: it is the branch of `transferReference` that appends nothing, so
+    // if this validator ever did grow a transfer, it could not put a sandbox
+    // marker on one.
+    const provider = new FlutterwaveProvider(creds, '', 'live')
     const balances = await provider.balances()
     return { ok: true, currencies: balances.map((b) => b.currency) }
   } catch (err) {

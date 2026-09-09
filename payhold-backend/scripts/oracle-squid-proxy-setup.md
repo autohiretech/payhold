@@ -90,6 +90,15 @@ npx supabase secrets set \
   FLUTTERWAVE_PROXY_URL="http://flutterwave-proxy:YOUR_PASSWORD@YOUR_VM_PUBLIC_IP:3128"
 ```
 
+The format is the ordinary `http://user:pass@host:port`, the same string
+`curl -x` took in step 6. `_shared/flutterwave.ts` splits the user and password
+out of it and hands them to Deno as `basicAuth` on the side, since Deno's
+`Deno.Proxy` documents credentials as a separate field rather than part of the
+URL. Nothing about what you set changes because of that — but if the password
+contains `@`, `#`, `/` or `%`, percent-encode it (`@` → `%40`, `#` → `%23`)
+so the URL still parses; the code decodes it before use, so Squid sees the
+literal password.
+
 ## 8. Whitelist the VM's IP with Flutterwave
 
 Flutterwave dashboard → Settings → API → IP Whitelist → add your VM's public
