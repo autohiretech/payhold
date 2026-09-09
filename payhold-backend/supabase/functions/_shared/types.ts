@@ -552,10 +552,22 @@ export interface Balance {
   available: Money
   reserved: Money
   fees_retained: Money
+  /**
+   * The tenant's own money on this rail, owed to no seller.
+   *
+   * Two things land here and both are money that is really there and really
+   * theirs: a cross-rail payout leaves what the buyer paid sitting at the rail
+   * that collected it — under bring-your-own-keys nothing sweeps it out — and
+   * takes the seller's money out of the rail that sent it; and a transfer the
+   * tenant makes between their own provider accounts, which PayHold never sees
+   * and a person records. Like `fees_retained` it is in the reconciliation sum
+   * and absent from every seller's wallet.
+   */
+  tenant_funds: Money
   paid_out: Money
 }
 
-/** The same six buckets, split by the rail actually holding the money. */
+/** The same seven buckets, split by the rail actually holding the money. */
 export interface RailBalance extends Balance {
   provider: Provider
 }
@@ -691,6 +703,22 @@ export interface CreateDealInput {
   amount: Money
   currency: Currency
   buyer_country?: Country
+  /**
+   * What to charge the buyer in, when they have been given the choice — a
+   * "Pay in" picker on the client's own checkout. `currency` above is still
+   * what the seller is owed and is unaffected; this is the other half of the
+   * pair, and the rate between them is quoted at creation and locked at
+   * funding exactly as it is when PayHold picks the currency itself.
+   *
+   * Optional, and its absence is not a lesser case: with nothing supplied
+   * `presentmentCurrencyFor` chooses the best currency the buyer's market can
+   * be charged, which is the right answer for every client that has no opinion.
+   * Supplied, it must be one of the currencies `currenciesFor(buyer_country)`
+   * lists — a buyer's market decides what can actually be collected there, and
+   * a client naming something else is refused with the allowed list rather
+   * than silently overridden.
+   */
+  presentment_currency?: Currency
   deposit_amount?: Money
   expected_complete_at?: Timestamp
   completion_policy?: Partial<CompletionPolicy>
@@ -742,6 +770,14 @@ export interface CreateSellerInput {
    * See `_shared/seller-mask.ts` for why the provider's own guess needs one.
    */
   label?: string
+  /**
+   * Which mobile money wallet the number belongs to — "MTN", "Airtel Money".
+   * Required for a `flutterwave_momo` destination: a beneficiary is registered
+   * against one carrier and there is no default that is safe to assume.
+   */
+  network?: string
+  /** The bank's own code, required for a `flutterwave_bank` destination. */
+  bank_code?: string
 }
 
 /**
@@ -760,6 +796,10 @@ export interface AddDestinationInput {
   label?: string
   /** 'primary' moves where the money goes. Defaults to primary. */
   role?: 'primary' | 'backup'
+  /** The wallet, for a mobile money destination. See `CreateSellerInput`. */
+  network?: string
+  /** The bank's own code, for a bank-account destination. */
+  bank_code?: string
 }
 
 export type PayHoldErrorCode =

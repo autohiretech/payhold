@@ -31,6 +31,8 @@ export function SettingsPage() {
   const [aiBudget, setAiBudget] = useState('')
   const [riskEnabled, setRiskEnabled] = useState(true)
   const [riskThreshold, setRiskThreshold] = useState('')
+  const [autoVerify, setAutoVerify] = useState(false)
+  const [holdHours, setHoldHours] = useState('')
   const [saved, setSaved] = useState(false)
 
   // Seed the form once the real values arrive, then leave it alone so typing
@@ -46,6 +48,8 @@ export function SettingsPage() {
     setAiBudget((settings.data.ai_monthly_budget_usd / 100).toString())
     setRiskEnabled(settings.data.risk_rules_enabled)
     setRiskThreshold((settings.data.risk_review_threshold_usd / 100).toString())
+    setAutoVerify(settings.data.seller_auto_verify ?? false)
+    setHoldHours((settings.data.destination_hold_hours ?? 24).toString())
   }, [settings.data])
 
   const save = useMoneyAction(() =>
@@ -59,6 +63,8 @@ export function SettingsPage() {
       ai_monthly_budget_usd: Math.round(Number(aiBudget) * 100),
       risk_rules_enabled: riskEnabled,
       risk_review_threshold_usd: Math.round(Number(riskThreshold) * 100),
+      seller_auto_verify: autoVerify,
+      destination_hold_hours: Number(holdHours),
     }),
   )
 
@@ -200,6 +206,53 @@ export function SettingsPage() {
                   </button>
                 )
               })}
+            </div>
+          </Card>
+
+          <Card>
+            <CardHeader
+              title="Seller onboarding"
+              subtitle="Who checks that a seller is who they say they are, and how long a new payout destination waits before it can be used."
+            />
+            <div className="space-y-5 px-6 py-5">
+              <label className="flex items-start gap-3">
+                <input
+                  type="checkbox"
+                  checked={autoVerify}
+                  onChange={(e) => setAutoVerify(e.target.checked)}
+                  className="mt-0.5 size-4 rounded border-line-strong text-brand focus:ring-brand/30"
+                />
+                <span>
+                  <span className="block text-sm font-semibold text-fg">
+                    My own onboarding verifies sellers
+                  </span>
+                  <span className="mt-1 block text-xs leading-relaxed text-fg-muted">
+                    A new seller and their payout destination are recorded as
+                    verified when they are registered, instead of waiting for
+                    someone here to check them one at a time. This is your
+                    attestation that your own signup checks identity, sanctions
+                    and ownership — made once for the account rather than once
+                    per seller, and recorded against you. Sellers already
+                    registered are unaffected; verify those on their own page.
+                  </span>
+                </span>
+              </label>
+
+              <Field
+                label="New destination hold"
+                hint="Hours a freshly added payout destination waits before money can be sent to it. This is what stops someone who got into a seller's account from redirecting their earnings, so zero is a real trade rather than a formality."
+              >
+                <div className="flex items-center gap-2">
+                  <Input
+                    type="number"
+                    min="0"
+                    max="720"
+                    value={holdHours}
+                    onChange={(e) => setHoldHours(e.target.value)}
+                  />
+                  <span className="text-sm text-fg-muted">hours</span>
+                </div>
+              </Field>
             </div>
           </Card>
 

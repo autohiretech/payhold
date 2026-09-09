@@ -940,9 +940,10 @@ export interface LedgerEntry {
 }
 
 /**
- * Six buckets, per currency. V2 §7 added `reserved` and `fees_retained`, and
- * both describe money that is still physically with the provider — only
- * `paid_out` has actually gone.
+ * Seven buckets, per currency. V2 §7 added `reserved` and `fees_retained`, and
+ * both describe money still physically with the provider; `tenant_funds` came
+ * later for the same reason one rail further out. Only `paid_out` has gone, and
+ * only from the rail it names.
  */
 export interface Balance {
   currency: Currency
@@ -964,7 +965,21 @@ export interface Balance {
    * ignored them reported drift equal to the fee on every released deal.
    */
   fees_retained: Money
-  /** Lifetime total already sent to sellers. */
+  /**
+   * This account's own money on this rail, owed to no seller.
+   *
+   * Two things land here. A deal collected on one rail and paid out on another
+   * — a foreign card charged by Stripe, a Rwandan host paid by Flutterwave —
+   * leaves what the buyer paid sitting at the rail that collected it, because
+   * nothing sweeps it across; the payout came out of the other balance. And a
+   * top-up moved between your own provider accounts, which PayHold cannot see
+   * and somebody records.
+   *
+   * Like `fees_retained` it is counted in reconciliation and absent from every
+   * seller's wallet.
+   */
+  tenant_funds: Money
+  /** Lifetime total already sent to sellers, from this rail. */
   paid_out: Money
 }
 
@@ -1274,6 +1289,15 @@ export interface TenantSettings {
   ai_risk_narrator?: boolean
   /** §5.1's change protection: how long a moved destination holds a payout. */
   destination_hold_hours?: number
+  /**
+   * The account owner's standing attestation that their own onboarding checks
+   * who a seller is — so a new seller and a new destination are written
+   * verified and out of hold rather than waiting for someone to click Verify
+   * here. Off by default. It changes what is *written*; the gates that read
+   * those columns are unchanged, and `verify_seller(…, false)` still stops a
+   * payout.
+   */
+  seller_auto_verify?: boolean
   /** After this, a sanctions screening is stale and the gate holds the payout. */
   sanctions_max_age_days?: number
   /** §10.1: how long a hosted payment link lives. */

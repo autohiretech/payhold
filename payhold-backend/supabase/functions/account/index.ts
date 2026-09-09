@@ -1,8 +1,9 @@
 /**
  * Accounts — how a person gets into the dashboard at all.
  *
- *   POST /account/signup   create a company and its first owner
- *   GET  /account/me       who am I, and which company am I acting for
+ *   POST /account/signup          create a company and its first owner
+ *   GET  /account/me              who am I, and which company am I acting for
+ *   POST /account/reset-sandbox   wipe this company's test data and start over
  *
  * **Signing in does not come here.** The dashboard exchanges an email and
  * password with Supabase Auth directly (`/auth/v1/token`) and holds the JWT it
@@ -23,7 +24,7 @@
  */
 
 import type { SupabaseClient } from 'npm:@supabase/supabase-js@2'
-import { callerFromJwt, serviceClient } from '../_shared/auth.ts'
+import { callerFromJwt, requireRole, serviceClient } from '../_shared/auth.ts'
 import { handler, json, readJson, required } from '../_shared/http.ts'
 import { slugify } from '../_shared/slug.ts'
 import { PayHoldError } from '../_shared/types.ts'
@@ -207,6 +208,77 @@ async function me(req: Request, db: SupabaseClient): Promise<Response> {
   })
 }
 
+/**
+ * Wipe this company's own test data and start over — `reset_tenant_sandbox`
+ * in the database, spec'd in `20260817000001_tenant_sandbox_reset.sql`.
+ *
+ * **Owner, dashboard session only.** The same reasoning `/settings` PATCH and
+ * `/sellers/:id/verify` use: this is a decision for a named person inside the
+ * company, not something a client's server should be able to trigger with
+ * its own API key, and `staff`/`viewer` are deliberately not senior enough —
+ * this deletes every deal, seller, payout and ledger entry the company has.
+ *
+ * **Requires typing the company's own slug** as `confirm`, so a misclick
+ * cannot fire it — the dashboard shows the same confirmation GitHub uses
+ * before it deletes a repository. The database is where the *real* guard
+ * lives (a tenant that ever connected live credentials is refused
+ * permanently, regardless of what this endpoint checks), so this is a UX
+ * safety net on top of an enforced one, not instead of it.
+ */
+async function resetSandbox(req: Request, db: SupabaseClient): Promise<Response> {
+  if (req.headers.get('x-api-key')) {
+    throw new PayHoldError(
+      'policy_violation',
+      'Resetting a company\'s data is a person\'s decision and cannot be done with an API key',
+    )
+  }
+
+  const caller = await callerFromJwt(db, req)
+  requireRole(caller, 'owner')
+
+  const body = await readJson<{ confirm?: string }>(req)
+
+  const { data: tenant, error: tenantError } = await db
+    .from('tenants')
+    .select('id, slug')
+    .eq('id', caller.tenant_id)
+    .maybeSingle()
+
+  if (tenantError || !tenant) {
+    throw new PayHoldError('not_found', 'No such company')
+  }
+
+  if (body.confirm !== tenant.slug) {
+    throw new PayHoldError(
+      'policy_violation',
+      `Type this company's slug ("${tenant.slug}") in "confirm" to reset it`,
+    )
+  }
+
+  const { error } = await db.rpc('reset_tenant_sandbox', {
+    p_tenant: caller.tenant_id,
+    p_actor: caller.actor,
+  })
+
+  if (error) throw rpcError(error, 'reset this company\'s data')
+
+  return json(req, { reset: true })
+}
+
+/** Same mechanical mapping every other function wrapping a SQL RPC uses. */
+function rpcError(error: { message: string }, what: string): PayHoldError {
+  const message = error.message
+
+  for (const code of ['not_found', 'invalid_state', 'policy_violation'] as const) {
+    if (message.startsWith(code)) {
+      return new PayHoldError(code, message.slice(code.length + 2).trim())
+    }
+  }
+
+  console.error(`unmapped ${what} failure`, { message })
+  return new PayHoldError('policy_violation', `Could not ${what}`)
+}
+
 Deno.serve(handler(async (req) => {
   const db = serviceClient()
   const segments = new URL(req.url).pathname.split('/').filter(Boolean)
@@ -214,6 +286,7 @@ Deno.serve(handler(async (req) => {
 
   if (req.method === 'POST' && action === 'signup') return await signup(req, db)
   if (req.method === 'GET' && action === 'me') return await me(req, db)
+  if (req.method === 'POST' && action === 'reset-sandbox') return await resetSandbox(req, db)
 
   throw new PayHoldError('not_found', 'No such endpoint')
 }))

@@ -69,7 +69,7 @@ environment or a build log.
 
 | Function | Serves |
 |---|---|
-| `account` | `/signup` creates a company and its first owner; `/me` turns a session into a tenant and a role |
+| `account` | `/signup` creates a company and its first owner; `/me` turns a session into a tenant and a role; `/reset-sandbox` wipes the company's own test data — owner, dashboard session only, refused permanently once the tenant has ever gone live |
 | `deals` | create (with §14's `completion_policy`), list, get, `/pay`, `/confirm`, `/refund`, `/deposit`, `/capture`, `/release-deposit` |
 | `checkout` | §10.1's sessions. `/sessions` for the client's server; `/public/:token` for the buyer, with no credential |
 | `payment-options` | what a buyer in a market can pay with; the catalogue a client renders its checkout from |
@@ -229,6 +229,60 @@ hold for what actually arrived: the money genuinely reached the provider, and
 omitting the entry would hand the reconciliation pass a drift nobody could
 explain.
 
+## Resetting a tenant's sandbox — migration `20260817000001`
+
+`POST /account/reset-sandbox` is a tenant's own "start over": it wipes every
+deal, seller, payout, refund, dispute, ledger entry and audit row a company
+has accumulated, and leaves the tenant, its logins, its role assignments, its
+settings and its connected provider credentials exactly as they were —
+configuration is not test data, and a reset that logged everybody out or
+forgot the fee rate would be a worse footgun than the one it fixes.
+
+**Refused permanently once a tenant has ever gone live.** `tenants.went_live_at`
+is stamped, once, the moment `provider-accounts` stores a `mode: 'live'`
+credential, and nothing ever clears it — not a disconnect, not a reconnect in
+test mode. It has to be its own column rather than a read of
+`tenant_provider_accounts.mode`: that field is overwritten on every reconnect
+(`20260816000002`'s header is the story of the bug that taught this), so it
+cannot answer "has real money ever moved here" on its own. `reset_tenant_sandbox`
+checks this column and refuses outright when it is set — real buyer money is
+exactly what invariant 6 and the append-only ledger exist to make
+unforgettable, and a reconciliation case, a chargeback response or a
+regulator's question can arrive long after a tenant would like the screen
+clear.
+
+**The ledger's and audit log's append-only triggers get one narrow, explicit
+bypass**, not a second door. `reject_mutation()` now permits a `DELETE` only
+when a transaction-local GUC (`payhold.sandbox_wipe`) reads `'on'` — set with
+`set_config(..., true)`, invisible to every other session and gone the instant
+the transaction ends. Only `reset_tenant_sandbox` ever sets it, only after it
+has already refused a live tenant, and it turns the flag back off immediately
+after the two deletes it needed, before doing anything else — so the bypass
+cannot outlive the two statements it was opened for, let alone leak to a
+caller in a different transaction. `tests/tenant-sandbox-reset.test.ts` proves
+the ledger is exactly as append-only as before once the function returns.
+
+**Owner, dashboard session only** — `resetSandbox` in `functions/account/`
+refuses an `X-Api-Key` outright, the same ground `/settings` PATCH and
+`/sellers/:id/verify` stand on: a client's server holding an API key should
+not be able to erase a company's history any more than it should be able to
+set its own commission. The dashboard additionally requires typing the
+company's own slug as `confirm`, the same shape GitHub uses before deleting a
+repository — a UX safety net on top of the database's own enforced one, not a
+substitute for it.
+
+Deletion order follows the same `restrict` foreign keys that make a careless
+`delete from tenants` fail loudly rather than silently take the ledger with
+it (`ledger.tenant_id`/`deal_id`, `payouts.deal_id`/`seller_id`,
+`refunds.deal_id`, `deals.seller_id` are all `on delete restrict`, on
+purpose): refunds and payouts before deals, ledger and audit log before deals
+under the bypass above, deals last among those (which cascades confirmations,
+checkout sessions, disputes with their offers and evidence, risk signals,
+request context, AI suggestions and deal outcomes for free), sellers last of
+all. The final act, after everything else is gone, is one `write_audit` call
+recording `tenant.sandbox_reset` against the owner who did it — the first row
+in the company's new, empty history.
+
 ## Hosted checkout sessions — §10.1, migration `20260807000012`
 
 One migration, not two: nothing here uses a value from `alter type ... add
@@ -359,6 +413,74 @@ connection string it gives you, then add *that* IP to Flutterwave's
 whitelist in their dashboard (Settings → API → IP Whitelist, as of this
 writing) — not PayHold's Supabase project, which has no IP of its own to
 offer them.
+
+### A beneficiary needs a carrier, and a transfer needs asking about
+
+Two Flutterwave payout blockers, found by reading their documentation against
+this adapter rather than by any test — every test in this repository runs
+against `FakeProvider`, an intercepted `fetch` or PGlite, so both looked fine
+here and would have failed on the first live transfer with a buyer's money
+already collected.
+
+**`account_bank` is required on every corridor.** `tokenize` sent
+`account_bank: currency === 'RWF' ? 'MPS' : undefined` and a constant
+`beneficiary_name`, so every MoMo seller outside Rwanda and every bank seller
+anywhere was registered against a beneficiary Flutterwave will not transfer to.
+A destination is now one of exactly two shapes and neither has a default: a
+`network` naming the wallet, or a `bank_code`. `_shared/momo.ts` holds the
+country → wallet → `account_bank` table plus `normalizeMsisdn`, because
+`+250 788 123 456` is what a person types and `250788123456` is what the rail
+takes. **`MOMO_UNVERIFIED` is `RAILS_VERIFIED`'s counterpart** — the codes are
+transcribed from documentation and no corridor has survived a live transfer, so
+an unknown `(country, network)` pair **refuses** rather than falling back to
+something plausible. `destinationCredentials` in `functions/sellers/` is the one
+place registering and changing a destination are checked identically, and
+`GET /v1/payment-options?payout_country=XX` now returns the `networks` a seller
+may pick (plus `banks`, opt-in with `&banks=1`, since bank codes are a list
+Flutterwave publishes rather than one we can transcribe).
+
+**A transfer is asked about, never re-sent.** Their API answers `NEW` on
+creation and never `SUCCESSFUL`, so `release` returned `pending`, the payout went
+to `processing`, and nothing moved it on — no webhook handled the event and
+nothing polled. A seller watched "Sending" forever while the money had arrived.
+`dispatchPayout` used to re-POST `release` on the same idempotency key and read
+the reply as a poll, which assumes the rail replays the original response for a
+repeated key; Flutterwave documents that for charges, not transfers, so the
+second POST is either refused as a duplicate reference — booked as a failure, on
+money that had gone — or sends twice. `PaymentProvider.transferStatus` is the
+question actually being asked, and `flutterwave-webhook` routes a `transfer.*`
+event through `dispatchPayout` rather than booking anything itself: **the
+doorbell rule holds for outbound transfers too**, so a settlement arriving by
+webhook cannot skip a check the cron makes. An unrecognised status waits rather
+than failing — a seller must never be told their money bounced because we
+misread a word.
+
+### `seller_auto_verify` — when the client's own onboarding is the check
+
+Migration `20260817000002`. Off by default, and off is what every tenant keeps
+unless its owner turns it on from Settings (person-only; the endpoint refuses an
+API key). Turning it on is that owner's standing attestation — the same claim
+`verify_seller` records per seller, made once for the account and audited on the
+settings row that flipped it.
+
+With it on, a seller is **inserted** `verified` with a fresh
+`sanctions_checked_at`, and a destination — seeded at registration or added
+later — lands `verified_at = now()` with `security_hold_until = now()`.
+
+**The gates are untouched, and that is the whole design.** `screen_payout`,
+`seller_capabilities` and `route_payout` read exactly the columns they always
+read and still refuse an unverified seller or a live hold; the flag only decides
+what gets *written* on the way in. One fact, one set of readers — the failure
+`20260809000002`'s header describes at length. Two consequences fall out of that
+and both are pinned in `tests/seller-auto-verify.test.ts`: `verify_seller(…,
+false)` still stops a payout on an auto-verified seller, and turning the flag on
+does **not** retroactively verify sellers already registered (those are a
+per-seller Verify, or a sandbox reset).
+
+`security_hold_until` is `now()` rather than null for `end_destination_hold`'s
+reason: null means "never had a hold" to every reader, and they then fall back to
+`sellers.destination_changed_at`, which the sync trigger stamps — so a null here
+would be a 24-hour hold wearing the flag's name.
 
 ## The database is the money engine
 
@@ -653,7 +775,7 @@ behind a legal bar rather than a coding one.
 ## The capability matrix
 
 Migrations `20260807000010` (the adapter enum values) and `20260807000011`.
-Same two-file split as the lifecycle and the six buckets, same reason.
+Same two-file split as the lifecycle and the seven buckets, same reason.
 
 Two tables, two different questions:
 
@@ -826,7 +948,7 @@ exempt `disputed` for the same reason — a deal disputed during clearing has a
 it describes the state machine rather than being a way into it, and the
 dashboard uses it to grey out an action that could not succeed.
 
-## The six buckets, and the drift that was not drift
+## The seven buckets, and the drift that was not drift
 
 Migrations `20260807000003` (entry types) and `20260807000004` (everything
 else). Same two-file split as the lifecycle, same reason.
@@ -846,7 +968,62 @@ The three-way distinction is the thing to hold on to:
 |---|---|---|
 | `fee`, `tax` | no — reclassified, still ours to hold | yes, as `fees_retained` |
 | `reserve` | no — carved out of the pool | yes, as `reserved` |
+| `cross_rail_offset` | no — it is on the rail that collected it | yes, as `tenant_funds` |
+| `cross_rail_payout` | **yes** — from the rail that paid the seller | yes, as `tenant_funds` (negative) |
+| `external_transfer` | either way, and no deal behind it | yes, as `tenant_funds` |
 | `provider_fee` | **yes** — the rail took it | no |
+
+### The seventh bucket — `20260817000003` / `20260817000004`
+
+`tenant_funds` is the same class of fix as `fees_retained`, found the same way
+and one rail further out. `settle_payout` booked its `payout` entry through
+`write_ledger`, which stamps the **deal's** rail and presentment currency — so a
+deal collected on Stripe in USD and paid out on Flutterwave in RWF told the
+ledger that USD had left Stripe. It had not: the USD is still in the tenant's
+Stripe balance and RWF left Flutterwave. Drift on **both** rails at once, on the
+first cross-border deal, every time. Same-rail deals were fine, which is exactly
+why nothing caught it — every fixture in `tests/` is same-rail, and
+`tests/cross-rail-payout.test.ts` is the one that is not.
+
+So a cross-rail settlement writes an offsetting pair beside the unchanged
+`payout` entry: `cross_rail_offset` (+leaving, collecting rail, presentment
+currency — nothing physical, it reclassifies a drained pool into money that is
+simply the tenant's) and `cross_rail_payout` (−`payouts.amount`, paying rail,
+payout currency — the money that actually went, and a genuinely different number
+in a different currency, which is why it is not a conversion of `leaving`).
+The `payout` entry itself does **not** move, because `deal_amounts.paid_out` and
+§7's identity both read it.
+
+**`settle_payout` gained `p_rail` with no default, and cross-checks it.** A
+default would let every existing call site keep compiling while booking on the
+wrong rail — the bug itself. It is read back from the latest `routed`
+`payout_decisions` row under the payout's lock rather than trusted from the
+caller: a caller that could name any rail could book a payout against a balance
+that never sent it. With no decision at all — the fixture case, and every payout
+predating the migration — only the collecting rail is accepted.
+
+**`rail_balances` now groups by the entry's own rail** rather than by the deal's
+first entry. That `array_agg(...)[1]` was correct while a deal's entries could
+only share one rail, and it is precisely what put the cross-rail payout on the
+rail that did not pay it. For a same-rail deal the two are the same thing, so no
+existing row moves.
+
+**`POOL_ENTRY_TYPES` and the `clearing` case list did not change**, and that is
+deliberate rather than an oversight: the three new types are not the seller's
+pool. That is also why `seller_wallet_rows` needed no change — they fall to its
+`else 0` — and why the wallets-sum invariant generalises rather than breaking:
+a wallet is the ledger less everything that stopped being a seller's, which is
+now `fees_retained` **and** `tenant_funds`.
+
+**Top-ups are recorded by a person.** Under bring-your-own-keys PayHold never
+moves money between a tenant's own provider accounts; they top Flutterwave up
+from their Stripe payouts through their bank, over days, entirely outside
+anything this system observes. `record_external_transfer` /
+`POST /v1/balance/external-transfers` is where that enters the ledger, and it
+**refuses an API key and requires a reference** for
+`paid_needs_a_provider_reference`'s reason. Reconciling Flutterwave on a delta
+basis was the alternative and was rejected: it would have silenced real drift
+along with this.
 
 `amountLeaving` in `_shared/figures.ts` has a matching list, `POOL_ENTRY_TYPES`,
 and **the two must agree** — there was a third copy in the dashboard mock, and
@@ -1206,7 +1383,7 @@ recreated function is granted to PUBLIC again.
 
 ## Payout routing — §5.1, migrations `20260807000008` and `20260807000009`
 
-Same two-file split as the lifecycle and the six buckets, same reason: Postgres
+Same two-file split as the lifecycle and the seven buckets, same reason: Postgres
 refuses to use an enum value added in the same transaction.
 
 `payout_routes` replaces `_shared/rails.ts`'s `payoutProviderFor` **on the

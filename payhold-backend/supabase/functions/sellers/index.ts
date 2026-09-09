@@ -21,6 +21,7 @@ import { resolveCaller, serviceClient, type Caller } from '../_shared/auth.ts'
 import { dispatchPayout } from '../_shared/dispatch.ts'
 import { handler, json, readJson, required } from '../_shared/http.ts'
 import { loadProvider } from '../_shared/load-provider.ts'
+import { momoBankCode, momoNetworksFor } from '../_shared/momo.ts'
 import { countryInfo, payoutRoute } from '../_shared/rails.ts'
 import { withCallerLabel } from '../_shared/seller-mask.ts'
 import { StripeProvider } from '../_shared/stripe.ts'
@@ -46,6 +47,60 @@ const DESTINATION_COLUMNS =
   'id, seller_id, label, country, payout_currency, payout_provider, ' +
   'masked_destination, is_primary, is_backup, verified_at, ' +
   'security_hold_until, created_at'
+
+/**
+ * What the rail needs to know about a destination beyond the number itself.
+ *
+ * Registering a destination and moving one are different operations with
+ * different guards, but this rule is the same for both, so it is written once:
+ * a mobile money beneficiary is registered against a **carrier** and a bank
+ * beneficiary against a **bank code**, and neither has a default that is safe
+ * to assume. Sending nothing — which every corridor except RWF did until this
+ * was fixed — registers a beneficiary Flutterwave will not transfer to, and
+ * the failure lands weeks later on a payout with the buyer's money already
+ * collected.
+ *
+ * Refused here, before anything is sent to a provider, so the client is told
+ * what to ask its seller for rather than being handed a rail's error.
+ */
+function destinationCredentials(
+  rail: string,
+  country: string,
+  body: { network?: string; bank_code?: string },
+): { network?: string; bank_code?: string } {
+  if (rail === 'flutterwave_momo') {
+    if (!body.network?.trim()) {
+      const available = momoNetworksFor(country).map((n) => n.label)
+      throw new PayHoldError(
+        'policy_violation',
+        available.length
+          ? `A mobile money destination needs its network. In ${country} that is: ${
+            available.join(', ')
+          }`
+          : `PayHold cannot pay a mobile money wallet in ${country} yet`,
+      )
+    }
+    // Resolved now rather than at the provider call, so an unknown wallet is
+    // refused before a beneficiary exists anywhere.
+    momoBankCode(country, body.network)
+    return { network: body.network.trim() }
+  }
+
+  if (rail === 'flutterwave_bank') {
+    if (!body.bank_code?.trim()) {
+      throw new PayHoldError(
+        'policy_violation',
+        'A bank destination needs the bank code. ' +
+          `GET /v1/payment-options?payout_country=${country}&banks=1 lists them.`,
+      )
+    }
+    return { bank_code: body.bank_code.trim() }
+  }
+
+  // Stripe Connect takes an `acct_…` and nothing else; the wallets are
+  // declared-and-refused rails that never reach a tokenize call.
+  return {}
+}
 
 async function create(
   req: Request,
@@ -90,6 +145,10 @@ async function create(
       throw new PayHoldError('policy_violation', route.reason)
     }
 
+    // Which wallet or bank, checked before anything is sent anywhere. A
+    // beneficiary registered without it is one the rail will not transfer to.
+    const credentials = destinationCredentials(body.payout_provider!, country, body)
+
     // Tokenize on the rail that will actually carry the payout, not on
     // whichever rail happens to be connected: a Rwandan seller is paid by
     // Flutterwave even when the buyer's card was charged by Stripe.
@@ -98,6 +157,8 @@ async function create(
       destination,
       currency: payoutCurrency,
       country,
+      beneficiary_name: body.name,
+      ...credentials,
     })
     // The provider's own mask guesses its leading word from a field it does
     // not always get back (Flutterwave's `bank_name`, unset for every RWF
@@ -529,13 +590,13 @@ async function addDestination(
 ): Promise<Response> {
   const { data } = await db
     .from('sellers')
-    .select('id, country, payout_currency')
+    .select('id, name, country, payout_currency')
     .eq('id', id)
     .eq('tenant_id', caller.tenant_id)
     .maybeSingle()
 
   if (!data) throw new PayHoldError('not_found', `Seller ${id} not found`)
-  const seller = data as unknown as Pick<Seller, 'country' | 'payout_currency'>
+  const seller = data as unknown as Pick<Seller, 'name' | 'country' | 'payout_currency'>
 
   const body = await readJson<AddDestinationInput>(req)
   required(body as unknown as Record<string, unknown>, 'payout_provider', 'destination')
@@ -571,11 +632,15 @@ async function addDestination(
   const route = payoutRoute(country, payoutCurrency)
   if (route.blocked) throw new PayHoldError('policy_violation', route.reason)
 
+  const credentials = destinationCredentials(body.payout_provider, country, body)
+
   const { provider } = await loadProvider(db, caller.tenant_id, route.provider!)
   const token = await provider.tokenize({
     destination: body.destination,
     currency: payoutCurrency,
     country,
+    beneficiary_name: seller.name ?? undefined,
+    ...credentials,
   })
   // Same reasoning as `create`'s tokenize call — the mask's guessed prefix is
   // less trustworthy than the label the caller already has for this method.

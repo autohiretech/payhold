@@ -784,7 +784,7 @@ describe('payouts', () => {
       `select id from payouts where deal_id = $1`, [s.deal],
     )
     await rejects(
-      () => h.db.query(`select settle_payout($1, 95000, 'trf_1')`, [p.id]),
+      () => h.db.query(`select settle_payout($1, 95000, 'trf_1', 'fake')`, [p.id]),
       /insufficient_balance/,
     )
   })
@@ -803,7 +803,7 @@ describe('payouts', () => {
     const { rows: [p] } = await h.db.query<{ id: string }>(
       `select id from payouts where deal_id = $1`, [s.deal],
     )
-    await h.db.query(`select settle_payout($1, 90000, 'trf_1')`, [p.id])
+    await h.db.query(`select settle_payout($1, 90000, 'trf_1', 'fake')`, [p.id])
 
     const { rows: [deal] } = await h.db.query<{ status: string }>(
       `select status from deals where id = $1`, [s.deal],
@@ -832,8 +832,8 @@ describe('payouts', () => {
     const { rows: [p] } = await h.db.query<{ id: string }>(
       `select id from payouts where deal_id = $1`, [s.deal],
     )
-    await h.db.query(`select settle_payout($1, 90000, 'trf_1')`, [p.id])
-    await h.db.query(`select settle_payout($1, 90000, 'trf_1')`, [p.id])
+    await h.db.query(`select settle_payout($1, 90000, 'trf_1', 'fake')`, [p.id])
+    await h.db.query(`select settle_payout($1, 90000, 'trf_1', 'fake')`, [p.id])
 
     const { rows } = await h.db.query<{ n: number }>(
       `select count(*)::int as n from ledger where deal_id = $1 and entry_type = 'payout'`,

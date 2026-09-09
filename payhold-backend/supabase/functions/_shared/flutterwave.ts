@@ -28,6 +28,7 @@ import type {
   TokenizeResult,
   VerifiedTransaction,
 } from './provider.ts'
+import { momoBankCode, normalizeMsisdn } from './momo.ts'
 import { PayHoldError, type Currency, type Money, type PaymentMethod } from './types.ts'
 
 const API = 'https://api.flutterwave.com/v3'
@@ -922,26 +923,161 @@ export class FlutterwaveProvider implements PaymentProvider {
   // Beneficiaries and balances
   // -------------------------------------------------------------------------
 
+  /**
+   * Register the destination and keep only the token.
+   *
+   * **`account_bank` is required on every corridor**, and until this was fixed
+   * it was sent only for RWF (`'MPS'`) and left `undefined` everywhere else —
+   * so every MoMo seller outside Rwanda and every bank seller anywhere was
+   * registered against a beneficiary Flutterwave will not transfer to. Nothing
+   * caught it because every test runs against `FakeProvider`; it surfaces as a
+   * payout that fails at the rail with the buyer's money already collected.
+   *
+   * A destination is therefore one of exactly two shapes, and neither has a
+   * default:
+   *
+   *   mobile money  `network` names the wallet; the number is normalised to
+   *                 the international form the API takes
+   *   bank account  `bank_code` is the rail's own code for the bank
+   *
+   * `beneficiary_name` is the seller's own name rather than the constant this
+   * used to send. Rails match it against the account being registered, and a
+   * payout nobody can trace to a person is the thing §12 exists to prevent.
+   */
   async tokenize(req: TokenizeRequest): Promise<TokenizeResult> {
+    const isBank = Boolean(req.bank_code)
+
+    if (!isBank && !req.network) {
+      throw new PayHoldError(
+        'policy_violation',
+        'A mobile money destination needs the network it belongs to, and a bank ' +
+          'account needs its bank code',
+      )
+    }
+
+    const accountBank = isBank
+      ? req.bank_code!
+      : momoBankCode(req.country, req.network!)
+
+    // A bank account number is digits as given; a mobile number is normalised,
+    // because `+250 788 123 456` is what people actually type and
+    // `250788123456` is what the rail takes.
+    const accountNumber = isBank
+      ? req.destination.replace(/\s+/g, '')
+      : normalizeMsisdn(req.destination, req.country)
+
     const data = await this.call<{ id: number; account_number: string; bank_name?: string }>(
       '/beneficiaries',
       {
         method: 'POST',
         body: JSON.stringify({
-          account_number: req.destination,
-          account_bank: req.currency === 'RWF' ? 'MPS' : undefined,
+          account_number: accountNumber,
+          account_bank: accountBank,
           currency: req.currency,
-          beneficiary_name: 'PayHold seller',
+          beneficiary_name: req.beneficiary_name ?? 'PayHold seller',
         }),
       },
     )
 
-    const tail = req.destination.replace(/\D/g, '').slice(-4).padStart(4, '0')
+    const tail = accountNumber.replace(/\D/g, '').slice(-4).padStart(4, '0')
     return {
       beneficiary_token: String(data.id),
-      // What we persist. The full number stays with Flutterwave.
-      masked_destination: `${data.bank_name ?? 'Mobile money'} •••• ${tail}`,
+      // What we persist. The full number stays with Flutterwave. Their
+      // `bank_name` is unset for every mobile corridor, so the wallet we were
+      // told is a better word than "Mobile money" — and it is the one the
+      // seller would use for it.
+      masked_destination: `${data.bank_name ?? req.network ?? 'Mobile money'} •••• ${tail}`,
     }
+  }
+
+  /**
+   * What became of a transfer we already sent.
+   *
+   * Their transfer statuses are `NEW`, `PENDING`, `SUCCESSFUL` and `FAILED`.
+   * Only the last two are answers; the first two mean ask again next pass.
+   * A transfer we cannot read is **not** a failure — booking one would tell a
+   * seller their money bounced because our request timed out.
+   */
+  async transferStatus(providerRef: string): Promise<'paid' | 'pending' | 'failed'> {
+    const data = await this.call<{ status: string; complete_message?: string }>(
+      `/transfers/${encodeURIComponent(providerRef)}`,
+      { method: 'GET' },
+    )
+
+    const status = (data.status ?? '').toUpperCase()
+    if (status === 'SUCCESSFUL') return 'paid'
+    if (status === 'FAILED') return 'failed'
+    return 'pending'
+  }
+
+  /**
+   * What this rail will actually convert a corridor at, right now.
+   *
+   * `amount=1` makes the answer a rate rather than a total, which is what gets
+   * locked onto a deal and reused for every figure derived from it afterwards.
+   *
+   * The rate is read from `source.amount` / `destination.amount` in preference
+   * to their bare `rate` field, whose direction their documentation does not
+   * pin down. That matters more than it sounds: an inverted rate does not look
+   * wrong on a screen, it looks like a very good exchange, and it would be
+   * locked onto the deal before anybody noticed.
+   */
+  async transferRate(from: Currency, to: Currency): Promise<number> {
+    const data = await this.call<{
+      rate?: number
+      source?: { currency?: string; amount?: number }
+      destination?: { currency?: string; amount?: number }
+    }>(
+      `/transfers/rates?amount=1&destination_currency=${encodeURIComponent(to)}` +
+        `&source_currency=${encodeURIComponent(from)}`,
+      { method: 'GET' },
+    )
+
+    const refuse = (why: string): never => {
+      throw new PayHoldError(
+        'policy_violation',
+        `Flutterwave's ${from}→${to} rate could not be read (${why})`,
+      )
+    }
+
+    const src = data.source
+    const dst = data.destination
+    const srcCurrency = src?.currency?.toUpperCase()
+    const dstCurrency = dst?.currency?.toUpperCase()
+
+    // Checked rather than trusted, for the reason invariant 2 re-fetches a
+    // webhook's transaction: a reply about a corridor we did not ask about is
+    // not an answer to our question, and `rate` is **not** a safe fallback for
+    // one — it would be that other corridor's rate wearing this one's name.
+    if (
+      (srcCurrency && srcCurrency !== from.toUpperCase()) ||
+      (dstCurrency && dstCurrency !== to.toUpperCase())
+    ) {
+      return refuse(`they answered about ${srcCurrency ?? '?'}→${dstCurrency ?? '?'}`)
+    }
+
+    // Self-describing and unambiguous, so preferred over the bare `rate`.
+    const derived = Number(dst?.amount) / Number(src?.amount)
+    if (Number.isFinite(derived) && derived > 0) return derived
+
+    const bare = Number(data.rate)
+    if (Number.isFinite(bare) && bare > 0) return bare
+
+    return refuse('no usable rate in the reply')
+  }
+
+  /**
+   * The banks this rail can pay into, for a client to render a picker from.
+   *
+   * Bank codes are not a table we can transcribe the way `MOMO_NETWORKS` is —
+   * they change, they are per country, and Flutterwave publishes them.
+   */
+  async banks(country: string): Promise<{ code: string; name: string }[]> {
+    const data = await this.call<{ id: number; code: string; name: string }[]>(
+      `/banks/${country.toUpperCase()}`,
+      { method: 'GET' },
+    )
+    return data.map((b) => ({ code: b.code, name: b.name }))
   }
 
   async balances(): Promise<{ currency: Currency; amount: Money }[]> {

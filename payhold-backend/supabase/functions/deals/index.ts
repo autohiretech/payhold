@@ -45,6 +45,7 @@ import {
   PayHoldError,
   type ConfirmSide,
   type CreateDealInput,
+  type Currency,
   type Deal,
   type DealAmounts,
   type Money,
@@ -229,10 +230,32 @@ async function create(
   // an Indian card cannot be charged RWF — find one it can and convert.
   // Refusing would turn away a legitimate customer over a mechanical detail
   // they cannot control.
-  const presentmentCurrency = presentmentCurrencyFor(
-    currenciesFor(buyerCountry),
-    body.currency,
-  )
+  const payable = currenciesFor(buyerCountry)
+
+  // A client may name the currency instead: AutoHire wants a "Pay in" picker,
+  // and a renter who would rather see EUR than USD is asking for something we
+  // can honestly give them. What they cannot do is name a currency their own
+  // market has no rail to collect — that is not a preference, it is a payment
+  // that fails at the provider — so the choice is checked against the same
+  // list `presentmentCurrencyFor` picks from and refused with that list
+  // named, because "EUR is not allowed" without saying what is leaves the
+  // client guessing at a set only we can see.
+  let presentmentCurrency: Currency | null
+  if (body.presentment_currency) {
+    if (!payable.includes(body.presentment_currency)) {
+      throw new PayHoldError(
+        'policy_violation',
+        `A buyer in ${countryInfo(buyerCountry).name} cannot be charged ` +
+          `${body.presentment_currency}. Allowed: ${
+            payable.length > 0 ? payable.join(', ') : 'nothing PayHold can collect there'
+          }`,
+      )
+    }
+    presentmentCurrency = body.presentment_currency
+  } else {
+    presentmentCurrency = presentmentCurrencyFor(payable, body.currency)
+  }
+
   if (!presentmentCurrency) {
     throw new PayHoldError(
       'policy_violation',
@@ -241,8 +264,15 @@ async function create(
   }
 
   // Indicative until the buyer actually pays: `fx_rate` stays null and is
-  // locked from the provider's rate at funding.
-  const converted = convertOrThrow(body.amount, body.currency, presentmentCurrency)
+  // locked from the provider's rate at funding, which is the number every
+  // later conversion on this deal reads.
+  //
+  // Quoting this from the rail instead is written and deliberately not
+  // deployed — the quote is a Flutterwave call, and until this project has a
+  // static egress IP their whitelist accepts, asking would turn a merely
+  // indicative figure into a booking that cannot be created at all.
+  const presentmentAmount =
+    convertOrThrow(body.amount, body.currency, presentmentCurrency).amount
 
   // `presentment_amount` becomes the FIRST installment for a split deal —
   // `fund_deal` needs no changes because it already just funds whatever this
@@ -250,9 +280,9 @@ async function create(
   // second percentage of the total, so the two always add back up exactly
   // even when the split does not divide evenly.
   const firstInstallment = body.split_percent
-    ? Math.round(converted.amount * body.split_percent / 100)
-    : converted.amount
-  const balanceAmount = body.split_percent ? converted.amount - firstInstallment : null
+    ? Math.round(presentmentAmount * body.split_percent / 100)
+    : presentmentAmount
+  const balanceAmount = body.split_percent ? presentmentAmount - firstInstallment : null
 
   const { data, error } = await db
     .from('deals')

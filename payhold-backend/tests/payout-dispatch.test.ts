@@ -278,7 +278,7 @@ describe('payout dispatch', () => {
     const leaving = await clearing(s.deal)
     expect(leaving).toBe(s.presentment - s.feePresentment)
 
-    await h.db.query(`select * from settle_payout($1, $2, 'FLW-TRF-1')`, [p.id, leaving])
+    await h.db.query(`select * from settle_payout($1, $2, 'FLW-TRF-1', 'flutterwave')`, [p.id, leaving])
 
     expect(await clearing(s.deal)).toBe(0)
   })
@@ -296,7 +296,7 @@ describe('payout dispatch', () => {
     const p = await payoutFor(s.deal)
 
     const leaving = await clearing(s.deal)
-    await h.db.query(`select * from settle_payout($1, $2, 'FLW-TRF-2')`, [p.id, leaving])
+    await h.db.query(`select * from settle_payout($1, $2, 'FLW-TRF-2', 'flutterwave')`, [p.id, leaving])
 
     expect(await clearing(s.deal)).toBe(0)
 
@@ -312,7 +312,7 @@ describe('payout dispatch', () => {
     const p = await payoutFor(s.deal)
 
     await h.db.query(
-      `select * from settle_payout($1, $2, 'FLW-TRF-3')`,
+      `select * from settle_payout($1, $2, 'FLW-TRF-3', 'flutterwave')`,
       [p.id, await clearing(s.deal)],
     )
 
@@ -333,10 +333,10 @@ describe('payout dispatch', () => {
     const p = await payoutFor(s.deal)
     const leaving = await clearing(s.deal)
 
-    await h.db.query(`select * from settle_payout($1, $2, 'FLW-TRF-4')`, [p.id, leaving])
+    await h.db.query(`select * from settle_payout($1, $2, 'FLW-TRF-4', 'flutterwave')`, [p.id, leaving])
     // The retry a timed-out cron pass makes. The provider returns the same
     // transfer on the same idempotency key; this must return the same payout.
-    await h.db.query(`select * from settle_payout($1, $2, 'FLW-TRF-4')`, [p.id, leaving])
+    await h.db.query(`select * from settle_payout($1, $2, 'FLW-TRF-4', 'flutterwave')`, [p.id, leaving])
 
     const { rows } = await h.db.query<{ n: number }>(
       `select count(*)::int as n from ledger where deal_id = $1 and entry_type = 'payout'`,
@@ -352,7 +352,7 @@ describe('payout dispatch', () => {
     const tooMuch = (await clearing(s.deal)) + 1
 
     await rejects(
-      () => h.db.query(`select * from settle_payout($1, $2, 'FLW-TRF-5')`, [p.id, tooMuch]),
+      () => h.db.query(`select * from settle_payout($1, $2, 'FLW-TRF-5', 'flutterwave')`, [p.id, tooMuch]),
       /insufficient_balance/,
     )
   })
@@ -369,7 +369,7 @@ describe('payout dispatch', () => {
 
     // The retry succeeds and the attempt counter carries.
     await h.db.query(
-      `select * from settle_payout($1, $2, 'FLW-TRF-6')`,
+      `select * from settle_payout($1, $2, 'FLW-TRF-6', 'flutterwave')`,
       [p.id, await clearing(s.deal)],
     )
     expect((await payoutFor(s.deal)).status).toBe('paid')
@@ -412,7 +412,7 @@ describe('mark_payout_processing', () => {
     // The next pass re-sends on the same idempotency key and the provider now
     // reports it settled.
     await h.db.query(
-      `select * from settle_payout($1, $2, 'FLW-TRF-P2')`,
+      `select * from settle_payout($1, $2, 'FLW-TRF-P2', 'flutterwave')`,
       [p.id, await clearing(s.deal)],
     )
 
@@ -423,7 +423,7 @@ describe('mark_payout_processing', () => {
   test('cannot walk a paid payout backwards', async () => {
     const { s, p } = await scheduled()
     await h.db.query(
-      `select * from settle_payout($1, $2, 'FLW-TRF-P3')`,
+      `select * from settle_payout($1, $2, 'FLW-TRF-P3', 'flutterwave')`,
       [p.id, await clearing(s.deal)],
     )
 

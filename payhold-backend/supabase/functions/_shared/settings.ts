@@ -80,6 +80,12 @@ export interface FullSettings extends Settings {
   /** §5.1's change protection: how long a moved destination holds a payout. */
   destination_hold_hours: number
   sanctions_max_age_days: number
+  /**
+   * The owner's attestation that their own onboarding checks sellers, so a
+   * new seller and a new destination are written verified and out of hold.
+   * Off by default; the gates that read those columns are unchanged.
+   */
+  seller_auto_verify: boolean
 }
 
 type Kind = 'rate' | 'money' | 'count' | 'flag' | 'currencies' | 'payout_mode'
@@ -131,6 +137,7 @@ const SPEC: Record<keyof Omit<FullSettings, 'tenant_id'>, Spec> = {
   payout_mode: { kind: 'payout_mode', fallback: 'auto' },
   destination_hold_hours: { kind: 'count', fallback: 24, min: 0, max: 720 },
   sanctions_max_age_days: { kind: 'count', fallback: 365, min: 1, max: 3_650 },
+  seller_auto_verify: { kind: 'flag', fallback: false },
   checkout_session_hours: { kind: 'count', fallback: 24, min: 1, max: 720 },
   // False, and it must stay false for anyone who has not deliberately turned
   // it on — see the note on `Settings.raw_card_relay`.

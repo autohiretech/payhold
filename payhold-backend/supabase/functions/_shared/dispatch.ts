@@ -262,14 +262,46 @@ export async function dispatchPayout(
     }
     const { provider } = await loadProvider(db, payout.tenant_id, decision.provider)
 
-    outcome = await provider.release({
-      payout_id: payout.id,
-      beneficiary_token: destination.beneficiary_token,
-      amount: payout.amount,
-      currency: payout.currency,
-      // Stable across retries, which is what makes step 4 safe to repeat.
-      idempotency_key: `payout:${payout.id}`,
-    })
+    // A transfer the rail already has is **asked about**, never re-sent.
+    //
+    // This used to re-POST `release` with the same idempotency key and read
+    // the reply as a poll, which assumes the rail replays the original
+    // response for a repeated key. Flutterwave documents that for charges and
+    // not for transfers, so the second POST either comes back refused as a
+    // duplicate reference — booked as a failure, on money that had already
+    // gone — or sends the seller a second payment. `transferStatus` is the
+    // question actually being asked.
+    //
+    // A rail with no `transferStatus` is synchronous and never lands here:
+    // it answered `paid` in the call that sent the money.
+    if (payout.status === 'processing' && payout.provider_ref && provider.transferStatus) {
+      const settled = await provider.transferStatus(payout.provider_ref)
+
+      if (settled === 'pending') {
+        // Still with the rail. Nothing to book, and nothing has gone wrong —
+        // this is not an outcome the caller should count as an attempt.
+        return 'processing'
+      }
+      if (settled === 'failed') {
+        const { error } = await db.rpc('fail_payout', {
+          p_payout_id: payout.id,
+          p_reason: 'The rail reported this transfer as failed',
+        })
+        if (error) throw new Error(`fail_payout failed: ${error.message}`)
+        return 'failed'
+      }
+
+      outcome = { provider_ref: payout.provider_ref, status: 'paid' }
+    } else {
+      outcome = await provider.release({
+        payout_id: payout.id,
+        beneficiary_token: destination.beneficiary_token,
+        amount: payout.amount,
+        currency: payout.currency,
+        // Stable across retries, which is what makes step 4 safe to repeat.
+        idempotency_key: `payout:${payout.id}`,
+      })
+    }
   } catch (err) {
     // A corridor we cannot pay, a rail with no implementation, a refused
     // transfer. All of them are the same thing to the seller — nothing arrived
@@ -297,10 +329,15 @@ export async function dispatchPayout(
     return 'processing'
   }
 
+  // The rail that actually sent it, which is not always the one that collected
+  // — a Stripe-funded deal is paid out on Flutterwave for any African seller.
+  // `settle_payout` books the offsetting pair off this, and cross-checks it
+  // against the routing decision rather than taking our word for it.
   const { error } = await db.rpc('settle_payout', {
     p_payout_id: payout.id,
     p_leaving: leaving,
     p_provider_ref: outcome.provider_ref,
+    p_rail: decision.provider,
   })
   if (error) throw new Error(`settle_payout failed: ${error.message}`)
 

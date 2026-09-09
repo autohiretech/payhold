@@ -25,13 +25,14 @@
 
 import type { SupabaseClient } from 'npm:@supabase/supabase-js@2'
 import { serviceClient } from '../_shared/auth.ts'
+import { dispatchPayout } from '../_shared/dispatch.ts'
 import { convert } from '../_shared/fx.ts'
 import { handler, json } from '../_shared/http.ts'
 import { loadProvider } from '../_shared/load-provider.ts'
 import { normaliseIp, recordContext } from '../_shared/request-context.ts'
 import { persistSavedPaymentMethod } from '../_shared/settle.ts'
 import { loadSettings } from '../_shared/settings.ts'
-import { PayHoldError, type PaymentMethod } from '../_shared/types.ts'
+import { PayHoldError, type PaymentMethod, type Payout } from '../_shared/types.ts'
 
 /** A path segment that is not a uuid cannot be a tenant, and must not reach a query. */
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
@@ -45,6 +46,12 @@ interface FlutterwaveEvent {
     status?: string
     payment_type?: string
     card?: { type?: string }
+    /**
+     * Outbound transfers only. This is the `reference` we set when the
+     * transfer was created — our own `payouts.id` — and it is how a settlement
+     * finds the payout it belongs to. Charges use `tx_ref` for the same job.
+     */
+    reference?: string
   }
 }
 
@@ -100,6 +107,64 @@ async function recordEvent(
   if (error?.code === '23505') return 'duplicate'
   if (error) throw new Error(`could not record provider event: ${error.message}`)
   return 'new'
+}
+
+/** Close out a `provider_events` row, with or without a complaint against it. */
+async function markProcessed(
+  db: SupabaseClient,
+  eventId: string,
+  error?: string,
+): Promise<void> {
+  await db
+    .from('provider_events')
+    .update({ processed_at: new Date().toISOString(), ...(error ? { error } : {}) })
+    .eq('provider', 'flutterwave')
+    .eq('event_id', eventId)
+}
+
+/**
+ * An outbound transfer reported settled or failed.
+ *
+ * Everything that decides anything is `dispatchPayout`: it re-asks the rail
+ * through `transferStatus`, books through `settle_payout` or `fail_payout`,
+ * and applies the same frozen-tenant and payable-deal checks the cron does.
+ * This function's whole job is to find the payout the event names and hand it
+ * over — which is what stops a settlement arriving by webhook from taking a
+ * shortcut the scheduled pass would not have taken.
+ */
+async function settleTransfer(
+  req: Request,
+  db: SupabaseClient,
+  tenantId: string,
+  eventId: string,
+  event: FlutterwaveEvent,
+): Promise<Response> {
+  // Our own `payouts.id`, set as the transfer's `reference` when it was sent.
+  const reference = event.data?.reference
+
+  if (!reference || !UUID.test(reference)) {
+    await markProcessed(db, eventId, 'Transfer event carries no payout reference')
+    throw new PayHoldError('policy_violation', 'Transfer event carries no reference')
+  }
+
+  const { data: payout } = await db
+    .from('payouts')
+    .select('*')
+    .eq('id', reference)
+    .eq('tenant_id', tenantId)
+    .maybeSingle()
+
+  if (!payout) {
+    // A transfer we cannot attribute, which is §11.8's triage case pointing
+    // the other way. The event row is the record that it happened.
+    await markProcessed(db, eventId, 'No matching payout for transfer reference')
+    throw new PayHoldError('not_found', 'No payout matches that reference')
+  }
+
+  const outcome = await dispatchPayout(db, payout as unknown as Payout)
+
+  await markProcessed(db, eventId)
+  return json(req, { status: outcome, payout_id: payout.id })
 }
 
 Deno.serve(handler(async (req) => {
@@ -175,6 +240,23 @@ Deno.serve(handler(async (req) => {
     // and acting on it unverified would defeat the point of step 4.
     throw new PayHoldError('policy_violation', 'No Flutterwave account is connected')
   }
+  // An outbound transfer settling, rather than a payment arriving.
+  //
+  // Until this existed, `release` returned `pending` for every Flutterwave
+  // transfer (their API answers `NEW`, never `SUCCESSFUL`, on creation), the
+  // payout went to `processing`, and **nothing ever moved it on** — no webhook
+  // handled the event and no code asked the rail. A seller watched "Sending"
+  // forever while the money had in fact arrived.
+  //
+  // The doorbell rule holds here exactly as it does for charges: this event is
+  // not the evidence. `dispatchPayout` is called with the payout as it stands,
+  // and it re-asks Flutterwave through `transferStatus` before booking
+  // anything — the same path the cron takes, so a settlement can never skip a
+  // check by arriving through this door instead.
+  if (event.event?.startsWith('transfer')) {
+    return await settleTransfer(req, db, tenantId, eventId, event)
+  }
+
   if (!txRef) {
     throw new PayHoldError('policy_violation', 'Event carries no tx_ref')
   }

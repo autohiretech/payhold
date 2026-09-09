@@ -719,3 +719,104 @@ Deno.test('a settlement that lands late is still preferred over app_fee', async 
     globalThis.fetch = original
   }
 })
+
+// ---------------------------------------------------------------------------
+// Tokenizing a destination, and asking what became of a transfer
+// ---------------------------------------------------------------------------
+//
+// Both of these were live-payout blockers rather than unit-test gaps: every
+// test in this file runs against an intercepted fetch, so a beneficiary
+// registered with no `account_bank` and a transfer nothing ever settled both
+// looked fine here until somebody read Flutterwave's own documentation.
+
+Deno.test('tokenize: a mobile money beneficiary names its carrier', async () => {
+  const { seen, restore } = intercept({
+    status: 'success',
+    data: { id: 88, account_number: '250788123456' },
+  })
+  try {
+    const p = new FlutterwaveProvider(CREDS, '')
+    const result = await p.tokenize({
+      destination: '+250 788 123 456',
+      currency: 'RWF',
+      country: 'RW',
+      network: 'MTN',
+      beneficiary_name: 'Aline U.',
+    })
+
+    const body = JSON.parse(seen.body!)
+    assertEquals(body.account_bank, 'MTN')
+    // Normalised: the rail takes digits led by the dialling code, and
+    // "+250 788 123 456" is what a person actually types.
+    assertEquals(body.account_number, '250788123456')
+    // The seller's own name, not the constant this used to send.
+    assertEquals(body.beneficiary_name, 'Aline U.')
+    assertEquals(result.beneficiary_token, '88')
+    // Their `bank_name` is unset for every mobile corridor, so the wallet is
+    // the honest word for it.
+    assertEquals(result.masked_destination, 'MTN •••• 3456')
+  } finally {
+    restore()
+  }
+})
+
+Deno.test('tokenize: a bank beneficiary carries its bank code', async () => {
+  const { seen, restore } = intercept({
+    status: 'success',
+    data: { id: 91, account_number: '0690000031', bank_name: 'Access Bank' },
+  })
+  try {
+    const p = new FlutterwaveProvider(CREDS, '')
+    const result = await p.tokenize({
+      destination: '0690000031',
+      currency: 'NGN',
+      country: 'NG',
+      bank_code: '044',
+      beneficiary_name: 'Chidi O.',
+    })
+
+    const body = JSON.parse(seen.body!)
+    assertEquals(body.account_bank, '044')
+    assertEquals(body.account_number, '0690000031')
+    assertEquals(result.masked_destination, 'Access Bank •••• 0031')
+  } finally {
+    restore()
+  }
+})
+
+Deno.test('tokenize: a destination naming neither is refused before it is sent', async () => {
+  const { seen, restore } = intercept({ status: 'success', data: { id: 1 } })
+  try {
+    const p = new FlutterwaveProvider(CREDS, '')
+    await assertRejects(
+      () => p.tokenize({ destination: '0788123456', currency: 'RWF', country: 'RW' }),
+      PayHoldError,
+    )
+    // Nothing left the building: the old code sent `account_bank: undefined`
+    // here and registered a beneficiary no transfer could reach.
+    assertEquals(seen.url, undefined)
+  } finally {
+    restore()
+  }
+})
+
+Deno.test('transferStatus: only SUCCESSFUL and FAILED are answers', async () => {
+  for (const [reported, expected] of [
+    ['SUCCESSFUL', 'paid'],
+    ['FAILED', 'failed'],
+    ['NEW', 'pending'],
+    ['PENDING', 'pending'],
+    // Anything we do not recognise waits rather than booking a failure — a
+    // seller must never be told their money bounced because we misread a word.
+    ['SOMETHING_ELSE', 'pending'],
+  ] as const) {
+    const { seen, restore } = intercept({ status: 'success', data: { status: reported } })
+    try {
+      const p = new FlutterwaveProvider(CREDS, '')
+      assertEquals(await p.transferStatus('12345'), expected, reported)
+      assert(seen.url!.endsWith('/transfers/12345'))
+    } finally {
+      restore()
+    }
+  }
+})

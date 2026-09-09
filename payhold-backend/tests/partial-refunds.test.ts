@@ -284,7 +284,7 @@ describe('§7.1.4 — after payout', () => {
     const { rows: [p] } = await h.db.query<{ id: string }>(
       `select id from payouts where deal_id = $1`, [deal],
     )
-    await h.db.query(`select settle_payout($1, 90000, 'FLW-PAID')`, [p.id])
+    await h.db.query(`select settle_payout($1, 90000, 'FLW-PAID', 'fake')`, [p.id])
     return deal
   }
 

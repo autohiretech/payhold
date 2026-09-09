@@ -134,7 +134,7 @@ describe('the platform fee is not drift — regression', () => {
       `update deals set payout_due_at = now() - interval '1 hour' where id = $1`, [deal],
     )
     await h.db.query(`select * from mature_clearing_deals()`)
-    await h.db.query(`select settle_payout($1, 45000, 'FLW-1')`, [p.id])
+    await h.db.query(`select settle_payout($1, 45000, 'FLW-1', 'fake')`, [p.id])
 
     const b = await buckets()
     // The commission stays in the tenant's provider balance. It is ours and it
@@ -380,7 +380,7 @@ describe('the new-seller reserve — §6.1', () => {
     await h.db.query(`select * from mature_clearing_deals()`)
 
     await rejects(
-      () => h.db.query(`select settle_payout($1, 90000, 'FLW-RESERVE')`, [p.id]),
+      () => h.db.query(`select settle_payout($1, 90000, 'FLW-RESERVE', 'fake')`, [p.id]),
       /insufficient_balance/,
     )
 
@@ -470,7 +470,7 @@ describe('the new-seller reserve — §6.1', () => {
     await h.db.query(`select * from mature_clearing_deals()`)
     // The first deal was reserved against, so only the un-reserved part is
     // payable; that is enough to make the seller established.
-    await h.db.query(`select settle_payout($1, 21600, 'FLW-EST')`, [p.id])
+    await h.db.query(`select settle_payout($1, 21600, 'FLW-EST', 'fake')`, [p.id])
 
     const second = await fundedDeal({ amount: 30_000, fee: 3_000 })
     await release(second, 3_000)

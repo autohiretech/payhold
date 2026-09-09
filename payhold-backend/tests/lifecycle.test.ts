@@ -355,7 +355,7 @@ describe('payout states drag the deal', () => {
 
     const payout = await payoutFor(deal)
     await rejects(
-      () => h.db.query(`select settle_payout($1, 90000, 'FLW-SETTLED-2')`, [payout]),
+      () => h.db.query(`select settle_payout($1, 90000, 'FLW-SETTLED-2', 'fake')`, [payout]),
       /disputed — its payout is frozen/,
     )
     expect(await statusOf(deal)).toBe('disputed')
@@ -367,7 +367,7 @@ describe('payout states drag the deal', () => {
 
     // No maturing pass: this is the forced-retry case, where the transfer
     // settles while the deal still says it is inside its safety window.
-    await h.db.query(`select settle_payout($1, 90000, 'FLW-SETTLED-1')`,
+    await h.db.query(`select settle_payout($1, 90000, 'FLW-SETTLED-1', 'fake')`,
                      [await payoutFor(deal)])
 
     expect(await statusOf(deal)).toBe('paid_out')

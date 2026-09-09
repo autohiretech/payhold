@@ -19,6 +19,13 @@
  * has to absorb. `lockedRate()` is how a funded deal is converted afterwards;
  * nothing should re-derive a rate for a deal that has already been paid.
  *
+ * **`_shared/rates.ts` is what makes that sentence true rather than aspirational.**
+ * It asks the rail for the corridor and refuses when it cannot get an answer,
+ * and it is the only caller allowed to reach for `tableRate` below — and only
+ * for a tenant with no connected rail at all, where there is no credential to
+ * ask with and demo mode has to keep working. A new caller of `convert` on a
+ * path that moves real money is this table pricing a live charge again.
+ *
  * The table lives in TypeScript rather than the database on purpose: SQL owns
  * atomicity and the ledger, TypeScript owns FX and fee policy, and the money
  * functions take already-converted figures. See payhold-backend/CLAUDE.md.
@@ -97,6 +104,28 @@ function toMinor(major: number, currency: Currency): Money {
 
 export function canConvert(from: Currency, to: Currency): boolean {
   return PER_USD[from] !== undefined && PER_USD[to] !== undefined
+}
+
+/**
+ * The indicative table's own rate for a corridor — `to` per 1 `from`, major
+ * units — or null where either side is missing.
+ *
+ * This exists so `rates.ts` can serve demo mode without either re-deriving
+ * `PER_USD`'s arithmetic (a second copy that would drift) or calling `convert`
+ * with a made-up amount just to read the rate back off the result. It is a
+ * read of the same table `convert` uses and adds no new maths.
+ *
+ * **A caller of this is asserting it is in demo mode.** Everything else asks
+ * `rates.ts` for a quote and takes the refusal when there is not one.
+ */
+export function tableRate(from: Currency, to: Currency): number | null {
+  if (from === to) return 1
+
+  const fromRate = PER_USD[from]
+  const toRate = PER_USD[to]
+  if (fromRate === undefined || toRate === undefined) return null
+
+  return toRate / fromRate
 }
 
 /**

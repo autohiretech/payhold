@@ -79,10 +79,29 @@ the `auto_release_at` timer fires. Otherwise it refunds.
 A tenant's balance is *derived*: `sum(ledger entries)`. It is never a stored
 column. Payouts may never exceed it, checked inside the same transaction.
 
-**Six buckets, not four** (spec §7). `held`, `pending_clearance`, `available`,
-`reserved`, `fees_retained`, `paid_out` — and only the last describes money that
-actually left. The reconciliation pass expects the provider to be holding the
-other five summed.
+**Seven buckets, not four** (spec §7). `held`, `pending_clearance`, `available`,
+`reserved`, `fees_retained`, `tenant_funds`, `paid_out` — and only the last
+describes money that left *this* rail. The reconciliation pass expects the
+provider to be holding the other six summed.
+
+`tenant_funds` is the tenant's own money on a rail, owed to no seller, and it
+exists because **a deal is routinely collected on one rail and paid out on
+another**: a foreign renter's card charged by Stripe in USD, a Rwandan host paid
+by Flutterwave in RWF. The payout entry says what the seller's claim on the
+deal's pool was worth, in the presentment currency, on the rail that collected
+it — and the money did not leave from there. So a cross-rail settlement writes
+an offsetting pair (`cross_rail_offset` on the collecting rail,
+`cross_rail_payout` on the paying one), leaving the collected money visible where
+it actually still is. Without it the ledger reported drift on *both* rails at
+once on every cross-border deal, and drift freezes payouts automatically.
+
+The other thing in that bucket is the tenant's own top-ups. Under
+bring-your-own-keys nothing moves money between their Stripe and Flutterwave
+accounts — they do it through their bank, over days, where PayHold cannot see
+it — so `POST /v1/balance/external-transfers` is where a person records one,
+with a reference. Person-only, for `paid_needs_a_provider_reference`'s reason:
+a claim that money moved somewhere we cannot check is how a difference gets
+papered over rather than explained.
 
 `fees_retained` exists because of a bug it is worth not reintroducing. Our
 commission is a debit in the clearing pool, but **nothing sweeps it out of the
@@ -334,7 +353,11 @@ Flutterwave.** Adding Paystack/DPO later = one new class + one webhook function
 (**default 14** — spec §6.1, §29.7; was 7 in V1, with per-market values in §5),
 `auto_release_days` (default 3), `currencies`, `ai_enabled`
 (default true), `ai_monthly_budget_usd`, `ai_dispute_assistant`,
-`ai_risk_narrator`, `risk_rules_enabled` (default true),
+`ai_risk_narrator`, `seller_auto_verify` (default **false** — when a tenant's own onboarding checks
+who a seller is, sellers and destinations are written verified and out of hold
+rather than waiting for a person here; the gates that read those columns are
+unchanged, so `verify_seller(…, false)` still stops a payout),
+`risk_rules_enabled` (default true),
 `risk_review_threshold_usd` (default $1,000, converted to the payout currency
 at compare time), `payout_backup_enabled` (default true),
 `payout_primary_attempts` (default 2) — §5.1's explicit routing-policy check
@@ -365,7 +388,7 @@ Auth: `X-Api-Key`, hashed at rest, rate-limited per key.
 | `POST /v1/deals/:id/confirm` | `side=buyer\|seller` + end-user token; both → atomic release |
 | `POST /v1/deals/:id/refund` | Client-initiated, full or partial, policy-checked |
 | `POST /v1/deals/:id/deposit` `/capture` `/release` | Card pre-auth deposit lifecycle |
-| `GET /v1/payment-options` | What a buyer in a market can pay with — methods, wallets, card schemes, currencies |
+| `GET /v1/payment-options` | What a buyer in a market can pay with — methods, wallets, card schemes, currencies. `?payout_country=` answers the seller side, including the `networks` a mobile money destination may name and (with `&banks=1`) the banks that rail can reach |
 | `POST /v1/sellers` | Register payout destination → tokenized beneficiary. Takes the client's own `external_user_id`, unique per tenant, so their system can find this seller again |
 | `GET /v1/sellers` | This tenant's sellers, or `?external_user_id=` to find the one registered against the client's own handle. No match is an empty list, not a 404 — that is the question a get-or-create asks |
 | `GET /v1/sellers/:id/capabilities` | Can this seller be paid, and if not, every reason. Two lists, kept apart |
@@ -406,6 +429,12 @@ key, which is a server credential and belongs on a server. `POST /account/signup
 creates the company and its first `owner`; `GET /account/me` is what turns a
 session into a tenant and a role. Signing in itself never touches our code: the
 dashboard exchanges the password with Supabase Auth directly.
+
+An `owner` may also wipe the company's own test data and start clean —
+`POST /account/reset-sandbox`, refused permanently the moment the tenant has
+ever connected a live provider account. See `payhold-backend/CLAUDE.md`'s
+"Resetting a tenant's sandbox" for why that check cannot be undone by
+disconnecting.
 
 The dashboard is behind that gate in full. The hosted buyer and seller pages
 (`/pay/:token`, `/status/:id`) are not, and must never be — someone opening a

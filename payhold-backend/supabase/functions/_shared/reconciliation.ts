@@ -47,6 +47,7 @@ interface RailBalance {
   available: number
   reserved: number
   fees_retained: number
+  tenant_funds: number
   paid_out: number
 }
 
@@ -76,7 +77,15 @@ function expected(rail: RailBalance): Money {
     rail.pending_clearance +
     rail.available +
     rail.reserved +
-    rail.fees_retained
+    rail.fees_retained +
+    // `tenant_funds` — the tenant's own money on this rail, owed to no seller.
+    // A cross-rail payout leaves the collected money sitting at the rail that
+    // collected it (nothing sweeps it out under bring-your-own-keys) and takes
+    // the payout out of the rail that sent it; a top-up between their own
+    // accounts is the same kind of fact with no deal behind it. Omitting this
+    // reported drift on both rails at once for every cross-border deal, which
+    // freezes payouts automatically.
+    rail.tenant_funds
   )
 }
 

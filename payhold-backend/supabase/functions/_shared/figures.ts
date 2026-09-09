@@ -9,7 +9,7 @@
  */
 
 import type { SupabaseClient } from 'npm:@supabase/supabase-js@2'
-import { convertOrThrow } from './fx.ts'
+import { atLockedRate, convertOrThrow } from './fx.ts'
 import { feeFor, loadSettings } from './settings.ts'
 import { PayHoldError, type Deal, type Money } from './types.ts'
 
@@ -17,6 +17,50 @@ export interface ReleaseFigures {
   p_payout_amount: number
   p_payout_currency: string
   p_fee_presentment: number
+}
+
+/**
+ * What the seller is actually sent, in their own payout currency.
+ *
+ * Three cases, and the ordering is the point — each one is exact where it can
+ * be, and only the last needs a rate at all:
+ *
+ *   1. **The seller banks in the currency the deal settles in.** Nothing to
+ *      convert; this is every AutoHire host with a listing priced in their own
+ *      market, which is nearly all of them.
+ *   2. **The seller banks in what the buyer was charged.** Then this is the
+ *      corridor the deal already locked at funding, so the locked rate applies
+ *      exactly and no rate is fetched. Same reasoning as the fee below.
+ *   3. **A third currency**, reached when a host prices a listing in a currency
+ *      that is neither their own nor the buyer's. Nothing was ever locked for
+ *      that corridor, so it is the only case that needs a rate from anywhere.
+ *
+ * Case 3 still reads `fx.ts`'s indicative table, which that file's own header
+ * says must not price a live charge. Replacing it with a quoted rate is written
+ * and deliberately not deployed: the quote comes from Flutterwave, and until
+ * this project has a static egress IP their whitelist will accept, asking would
+ * turn a table that is merely stale into a release that fails outright. Cases 1
+ * and 2 are exact and reach no table at all, which is every AutoHire host
+ * today.
+ */
+function payoutAmount(
+  deal: Deal,
+  net: Money,
+  payoutCurrency: string,
+): Money {
+  if (payoutCurrency === deal.currency) return net
+
+  if (payoutCurrency === deal.presentment_currency && deal.fx_rate !== null) {
+    return atLockedRate(
+      net,
+      deal.fx_rate,
+      deal.currency,
+      deal.presentment_currency,
+      'settlement_to_presentment',
+    )
+  }
+
+  return convertOrThrow(net, deal.currency, payoutCurrency).amount
 }
 
 /**
@@ -39,15 +83,32 @@ export async function releaseFigures(
 
   return {
     // The seller is owed the settlement currency, whatever the buyer paid in.
-    p_payout_amount: convertOrThrow(net, deal.currency, payoutCurrency).amount,
+    p_payout_amount: payoutAmount(deal, net, payoutCurrency),
     p_payout_currency: payoutCurrency,
     // The fee leaves the balance we actually hold, so it is expressed in what
     // was collected.
-    p_fee_presentment: convertOrThrow(
-      deal.fee_amount,
-      deal.currency,
-      deal.presentment_currency,
-    ).amount,
+    //
+    // **At the rate the deal locked when the buyer paid, not today's.** This
+    // used to call `convertOrThrow`, which reads the indicative table — so a
+    // deal funded in January had its fee repriced at release against whatever
+    // that table said in March, against money that was collected once and has
+    // not moved since. `fx.ts`'s own header forbids exactly that ("nothing
+    // should re-derive a rate for a deal that has already been paid"), and it
+    // is what `deals.fx_rate` is stored for.
+    //
+    // The difference lands in `fees_retained`, which reconciliation checks
+    // against a real provider balance, so a stale rate here reads as drift and
+    // drift freezes payouts. A null rate means no conversion happened, so there
+    // is nothing to apply.
+    p_fee_presentment: deal.fx_rate === null
+      ? deal.fee_amount
+      : atLockedRate(
+        deal.fee_amount,
+        deal.fx_rate,
+        deal.currency,
+        deal.presentment_currency,
+        'settlement_to_presentment',
+      ),
   }
 }
 

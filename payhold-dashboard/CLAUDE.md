@@ -218,7 +218,7 @@ retry. All of it is deleted, and the claims moved rather than disappearing:
 | What was pinned here | Where it is pinned now |
 |---|---|
 | release needs both confirmations, no double release, refund blocked after release | `payhold-backend/tests/lifecycle.test.ts` |
-| balances derived purely from ledger entries, six buckets | `tests/money-breakdown.test.ts`, `tests/seller-wallet.test.ts` |
+| balances derived purely from ledger entries, seven buckets | `tests/money-breakdown.test.ts`, `tests/seller-wallet.test.ts` |
 | a rule holds a payout and does nothing else; only a person clears it | `tests/manual-hold.test.ts`, `tests/payout-routing.test.ts` |
 | drift is found by comparing against a provider balance; nothing unfreezes itself | `tests/reconciliation-runs.test.ts` |
 | the backoff ladder, and null meaning no machine may retry | `tests/payout-retry.test.ts` |
@@ -910,11 +910,16 @@ Two rules are structural rather than configurable:
   figures would be describing money that has already moved differently.
 - **Money is integer minor units everywhere.** Only `lib/format.ts` divides by
   100. Forms take major units and convert at the boundary.
-- **Balances have six buckets** (spec §7): `held`, `pending_clearance`,
-  `available`, `reserved`, `fees_retained`, `paid_out`. Only the last is money
-  that left. Every one of them is derived on the backend and read, never
-  computed here — `getDealAmounts` is the per-deal breakdown and it is a call,
-  not a function.
+- **Balances have seven buckets** (spec §7): `held`, `pending_clearance`,
+  `available`, `reserved`, `fees_retained`, `tenant_funds`, `paid_out`. Only the
+  last is money that left *that rail*. Every one of them is derived on the
+  backend and read, never computed here — `getDealAmounts` is the per-deal
+  breakdown and it is a call, not a function.
+  `tenant_funds` is the account's own money on a rail, owed to no seller: what a
+  cross-rail payout leaves sitting at the rail that collected it, and the
+  top-ups the account makes between its own provider balances. Like
+  `fees_retained` it belongs on an operator's screen and **not** in a seller's
+  wallet.
 - Rail vocabulary (`METHOD_LABEL`, `COUNTRY_LABEL`, `PROVIDER_LABEL`) lives in
   `lib/rails.ts`. Never inline a provider or method name in a screen.
 - **Light theme only.** There is no dark mode and no theme toggle. Don't add

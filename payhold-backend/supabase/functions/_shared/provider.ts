@@ -364,6 +364,24 @@ export interface TokenizeRequest {
   destination: string
   currency: Currency
   country: string
+  /**
+   * Which wallet, for a mobile money destination — "MTN", "Airtel Money".
+   *
+   * Not optional in practice on the African rails and only optional in the
+   * type because Stripe Connect has no equivalent: a beneficiary is registered
+   * against a specific carrier, and Flutterwave refuses a transfer whose
+   * `account_bank` does not name one. `_shared/momo.ts` maps it to the wire
+   * code and **refuses an unknown pair** rather than sending a default.
+   */
+  network?: string
+  /** The rail's own bank code, for a bank-account destination. */
+  bank_code?: string
+  /**
+   * Who the account belongs to. Rails check it against the account they are
+   * registering, so a constant here — which is what this used to send — is a
+   * beneficiary that may be refused, and is a payout nobody can trace.
+   */
+  beneficiary_name?: string
 }
 
 export interface TokenizeResult {
@@ -464,6 +482,45 @@ export interface PaymentProvider {
 
   /** Turn a raw payout destination into a token we can safely store. */
   tokenize(req: TokenizeRequest): Promise<TokenizeResult>
+
+  /**
+   * Ask the rail what became of a transfer it accepted.
+   *
+   * Async rails answer `pending` when a transfer is created and settle it
+   * minutes or hours later, so something has to *ask* — and re-sending the
+   * original request is not that question. `dispatchPayout` used to re-POST
+   * with the same idempotency key and read the reply as a poll, which works
+   * only if the rail replays the original response; Flutterwave documents
+   * idempotency for charges, not for transfers, so the second POST is either
+   * refused as a duplicate reference (booked as a failure, on money that
+   * actually left) or sends twice. Neither is a poll.
+   *
+   * Optional because a synchronous rail has nothing to add: it already told
+   * us `paid` in the call that sent the money.
+   */
+  transferStatus?(providerRef: string): Promise<PayoutResult['status'] | 'failed'>
+
+  /**
+   * What this rail will convert a corridor at, right now.
+   *
+   * Optional for the same reason `banks` is: it is a real capability of a rail
+   * that moves money across currencies, not something every adapter could
+   * answer, and declaring it required would mean adapters throwing to satisfy
+   * a signature. `_shared/rates.ts` is the only caller and refuses rather than
+   * falling back to an indicative table when no connected rail offers it.
+   */
+  transferRate?(from: Currency, to: Currency): Promise<number>
+
+  /**
+   * The banks this rail can pay into in one country, so a client can render a
+   * picker instead of asking a seller to type a code.
+   *
+   * Optional because it is not a universal capability: bank codes are a
+   * Flutterwave concept, while a Stripe destination is a connected account
+   * that carries its own bank details. Unlike `MOMO_NETWORKS` this cannot be
+   * a table we transcribe — the list changes, and the rail publishes it.
+   */
+  banks?(country: string): Promise<{ code: string; name: string }[]>
 
   /**
    * What the provider says it is holding for us, per currency. The

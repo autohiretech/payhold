@@ -221,6 +221,20 @@ async function connect(
     throw new PayHoldError('policy_violation', 'Could not store those credentials')
   }
 
+  // Stamped once and never cleared — not even by a later disconnect or a
+  // reconnect in test mode. `tenant_provider_accounts.mode` is overwritten on
+  // every reconnect (`20260816000002`'s header explains why that bit it
+  // once already), so it cannot answer "has this tenant ever taken real
+  // money" on its own. This column is the durable answer, and it is what
+  // `reset_tenant_sandbox` refuses permanently against.
+  if (body.mode === 'live') {
+    await db
+      .from('tenants')
+      .update({ went_live_at: new Date().toISOString() })
+      .eq('id', caller.tenant_id)
+      .is('went_live_at', null)
+  }
+
   // Audited, never with the credentials themselves — only that a connection
   // happened, by whom, on which rail.
   await db.rpc('write_audit', {

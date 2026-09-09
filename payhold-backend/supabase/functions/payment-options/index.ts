@@ -40,6 +40,8 @@ import {
   type CardScheme,
 } from '../_shared/rails.ts'
 import { COUNTRIES } from '../_shared/countries.ts'
+import { loadProvider } from '../_shared/load-provider.ts'
+import { momoNetworksFor } from '../_shared/momo.ts'
 import { allMarketsVerified, marketVerified } from '../_shared/launch.ts'
 import { closedMarkets, liveProviders } from '../_shared/matrix.ts'
 import { loadSettings } from '../_shared/settings.ts'
@@ -141,9 +143,38 @@ Deno.serve(handler(async (req) => {
       }
       : { ...payoutRoute(payoutCountry, currency), verified }
 
+    // What a seller here actually has to *pick*, which is the half of this
+    // answer a payout-setup form needs. A beneficiary is registered against a
+    // named carrier or a bank code — there is no default that is safe to
+    // assume — so a client that cannot list them can only guess, and a guess
+    // registers a destination the rail will not transfer to.
+    const networks = momoNetworksFor(payoutCountry).map((n) => n.label)
+
+    // Banks are a provider round trip and most callers only want the route, so
+    // they are opt-in. Their failure is not fatal: a rail we cannot reach right
+    // now should not make the corridor look shut.
+    let banks: { code: string; name: string }[] | null = null
+    if (params.get('banks') && route.provider === 'flutterwave') {
+      try {
+        const { provider } = await loadProvider(db, caller.tenant_id, 'flutterwave')
+        banks = provider.banks ? await provider.banks(payoutCountry) : null
+      } catch (err) {
+        console.error('bank list unavailable', {
+          country: payoutCountry,
+          message: err instanceof Error ? err.message : String(err),
+        })
+      }
+    }
+
     return json(req, {
       country: { code: info.code, name: info.name, flag: flag(info.code) },
       payout: route,
+      // The wallets a mobile money destination may name here, in the words a
+      // seller would use for them. Empty means this market has none.
+      networks,
+      // Null means "not asked for", or "asked for and the rail was
+      // unreachable" — distinct from `[]`, which would claim there are none.
+      banks,
       // False until §16's written confirmation for this market is signed off —
       // a client should treat an unverified route as "probably" rather than
       // "yes".

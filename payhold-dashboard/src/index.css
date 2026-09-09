@@ -42,10 +42,10 @@
   --color-danger-soft: var(--danger-soft);
 
   --font-sans:
-    ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue',
-    sans-serif;
+    'Inter Variable', 'Inter', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto,
+    'Helvetica Neue', sans-serif;
   --font-mono:
-    ui-monospace, 'SFMono-Regular', 'JetBrains Mono', 'Menlo', monospace;
+    'JetBrains Mono', ui-monospace, 'SFMono-Regular', 'Menlo', monospace;
 
   /* Soft, layered elevation — cards lift off the canvas without a hard edge. */
   --shadow-card: 0 1px 2px oklch(0.4 0.03 260 / 0.05), 0 8px 24px -16px oklch(0.4 0.03 260 / 0.28);

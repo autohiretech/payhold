@@ -269,7 +269,7 @@ describe('a person putting the clock back', () => {
       `update deals set payout_due_at = now() - interval '1 minute' where id = $1`, [s.deal],
     )
     await h.db.query(`select mature_clearing_deals()`)
-    await h.db.query(`select settle_payout($1, 90000, 'FLW-DONE')`, [s.payout])
+    await h.db.query(`select settle_payout($1, 90000, 'FLW-DONE', 'flutterwave')`, [s.payout])
 
     await rejects(
       () => h.db.query(`select reset_payout_retry($1, 'grace@payhold.io')`, [s.payout]),
