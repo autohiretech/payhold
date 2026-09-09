@@ -29,7 +29,7 @@ import { assertPayoutsNotFrozen, resolveCaller, type Caller } from '../_shared/a
 import { serviceClient } from '../_shared/auth.ts'
 import { releaseFigures } from '../_shared/figures.ts'
 import { collectBalanceThenConfirm, setOverageOverride } from '../_shared/settle-balance.ts'
-import { convertOrThrow, presentmentCurrencyFor } from '../_shared/fx.ts'
+import { canConvert, convertOrThrow, presentmentCurrencyFor } from '../_shared/fx.ts'
 import { handler, json, readJson, required } from '../_shared/http.ts'
 import { startCharge } from '../_shared/checkout.ts'
 import { loadProvider } from '../_shared/load-provider.ts'
@@ -240,20 +240,37 @@ async function create(
   // list `presentmentCurrencyFor` picks from and refused with that list
   // named, because "EUR is not allowed" without saying what is leaves the
   // client guessing at a set only we can see.
+  //
+  // That list used to be `payable` alone, and two things it did not check
+  // both failed *after* validation had said yes. A currency the tenant has
+  // not enabled passed here and was refused nowhere — `payment-options`
+  // already intersects with `settings.currencies`, so the picker never
+  // offered it, but a client sending it by hand got a deal in a currency the
+  // account does not accept. And a currency `PER_USD` cannot convert the
+  // settlement currency into passed here and threw in `convertOrThrow` a few
+  // lines down, as a bare error on a request the client had every reason to
+  // think was valid. Both are now part of the one list the choice is checked
+  // against and the one list the refusal names, so what a buyer is offered,
+  // what this accepts, and what can actually be charged are the same set.
+  const enabled = settings.currencies.length > 0
+    ? payable.filter((c) => settings.currencies.includes(c))
+    : payable
+  const chargeable = enabled.filter((c) => c === body.currency || canConvert(body.currency, c))
+
   let presentmentCurrency: Currency | null
   if (body.presentment_currency) {
-    if (!payable.includes(body.presentment_currency)) {
+    if (!chargeable.includes(body.presentment_currency)) {
       throw new PayHoldError(
         'policy_violation',
         `A buyer in ${countryInfo(buyerCountry).name} cannot be charged ` +
-          `${body.presentment_currency}. Allowed: ${
-            payable.length > 0 ? payable.join(', ') : 'nothing PayHold can collect there'
+          `${body.presentment_currency} for a deal in ${body.currency}. Allowed: ${
+            chargeable.length > 0 ? chargeable.join(', ') : 'nothing PayHold can collect and convert there'
           }`,
       )
     }
     presentmentCurrency = body.presentment_currency
   } else {
-    presentmentCurrency = presentmentCurrencyFor(payable, body.currency)
+    presentmentCurrency = presentmentCurrencyFor(chargeable, body.currency)
   }
 
   if (!presentmentCurrency) {

@@ -26,7 +26,7 @@
  */
 
 import { resolveCaller, serviceClient } from '../_shared/auth.ts'
-import { convert, presentmentCurrencyFor } from '../_shared/fx.ts'
+import { canConvert, convert, presentmentCurrencyFor } from '../_shared/fx.ts'
 import { handler, json } from '../_shared/http.ts'
 import {
   collectionRails,
@@ -306,8 +306,16 @@ Deno.serve(handler(async (req) => {
     charged_in: currency,
     methods: methodsFor(country, currency, live),
     // Everything this market could be charged in, intersected with what the
-    // tenant has enabled.
-    currencies: payable.filter((c) => enabled.includes(c)),
+    // tenant has enabled — and, when the caller named the deal's settlement
+    // currency, with what PayHold can actually convert it into. `POST /deals`
+    // checks a chosen `presentment_currency` against exactly this set now, so
+    // a picker rendered from this list can never offer a currency that
+    // creation then refuses. Without `?currency=` there is nothing to convert
+    // from, and the list stays the market's own.
+    currencies: payable.filter((c) =>
+      enabled.includes(c) &&
+      (settlement === null || c === settlement || canConvert(settlement, c))
+    ),
     presentment,
     rails_verified: railsVerified,
   })
