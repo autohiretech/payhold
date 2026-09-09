@@ -122,13 +122,23 @@ function buildRails(): Rail[] {
             : 'Cards collect only — a refund returns to the card, but a payout never does.',
       })
 
+    }
+
+    // Flutterwave's bank rail, in whichever directions it documents. Collection
+    // (`flutterwaveLocal`) and transfers (`flutterwavePayout`) come from
+    // separate pages and disagree: Ethiopia has a transfer guide and no
+    // collection channel, Egypt the reverse. So the row exists where either
+    // holds and each flag sets its own side. `collectionRails`, `currenciesFor`
+    // and `marketSummary` all filter on `collect`, so a payout-only row never
+    // reaches a checkout.
+    if (info.flutterwaveLocal || info.flutterwavePayout) {
       rails.push({
         method: 'bank_transfer',
         country: code,
         currencies: [currency],
         provider: 'flutterwave',
         networks: [],
-        collect: true,
+        collect: info.flutterwaveLocal,
         payout: info.flutterwavePayout,
       })
     }

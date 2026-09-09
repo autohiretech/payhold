@@ -16,11 +16,22 @@
  *      is well under half the world, and the rest can pay but cannot be paid.
  * ─────────────────────────────────────────────────────────────────────────────
  *
- * Sources, checked August 2026 — re-check before launch, coverage changes:
- *   stripe.com/global
- *   flutterwave.com/gb/support/payment-methods/payment-channels
- *   flutterwave.com/mw/support/payment-methods/pay-with-mobile-money
- *   flutterwave.com/mu/support/general/what-are-the-currencies-accepted-on-flutterwave
+ * Sources, each read on 2026-09-09 — re-check before launch, coverage changes:
+ *   https://stripe.com/global
+ *   https://docs.stripe.com/_endpoint/get-platform-countries
+ *   https://docs.stripe.com/connect/cross-border-payouts
+ *   https://flutterwave.com/gb/support/payment-methods/payment-channels
+ *   https://developer.flutterwave.com/v3.0.0/docs/payment-methods.md
+ *   https://developer.flutterwave.com/v3.0.0/docs/mobile-money-1.md   (momo collection)
+ *   https://developer.flutterwave.com/v3.0.0/docs/francophone.md
+ *   https://developer.flutterwave.com/v3.0.0/docs/bank-account.md     (bank transfers out)
+ *   https://developer.flutterwave.com/v3.0.0/docs/mobile-money.md     (momo transfers out)
+ *   https://flutterwave.com/mu/support/general/what-are-the-currencies-accepted-on-flutterwave
+ *
+ * `flutterwaveLocal` (collection) and `flutterwavePayout` (transfers) are
+ * separate flags from separate pages, and they disagree: Egypt and Malawi
+ * collect but payouts are "not available by default"; Ethiopia has a transfer
+ * guide and no collection channel.
  *
  * Nothing here is verified against a signed provider agreement. See
  * `RAILS_VERIFIED` in rails.ts.
@@ -32,13 +43,17 @@ export interface CountryInfo {
   /** ISO-4217 code of the local currency. */
   currency: Currency
   region: Region
-  /** Flutterwave supports collection in this country's own currency. */
+  /** Flutterwave documents collection in this country's own currency. */
   flutterwaveLocal: boolean
   /** Mobile money is available here. */
   momo: boolean
   /** Named wallets. Empty with `momo: true` means the list is unconfirmed. */
   momoNetworks: string[]
-  /** Flutterwave can send funds to a beneficiary here. */
+  /**
+   * Flutterwave documents a transfer here with no request/registration gate —
+   * by bank, by mobile money, or both. Independent of `flutterwaveLocal`: a
+   * market can collect and not pay out (EG, MW) or pay out and not collect (ET).
+   */
   flutterwavePayout: boolean
   /** Stripe supports a business account with payouts here. */
   stripePayout: boolean
@@ -119,43 +134,43 @@ export type Currency =
 export const COUNTRIES: CountryInfo[] = [
   // --- North Africa ------------------------------------------------------
   { code: 'DZ', name: 'Algeria', currency: 'DZD', region: 'North Africa', flutterwaveLocal: false, momo: false, momoNetworks: [], flutterwavePayout: false, stripePayout: false, stripePreview: false, restricted: false },
-  { code: 'EG', name: 'Egypt', currency: 'EGP', region: 'North Africa', flutterwaveLocal: true, momo: false, momoNetworks: [], flutterwavePayout: true, stripePayout: false, stripePreview: false, restricted: false },
+  { code: 'EG', name: 'Egypt', currency: 'EGP', region: 'North Africa', flutterwaveLocal: true, momo: false, momoNetworks: [], flutterwavePayout: false, stripePayout: false, stripePreview: false, restricted: false },
   { code: 'LY', name: 'Libya', currency: 'LYD', region: 'North Africa', flutterwaveLocal: false, momo: false, momoNetworks: [], flutterwavePayout: false, stripePayout: false, stripePreview: false, restricted: false },
   { code: 'MA', name: 'Morocco', currency: 'MAD', region: 'North Africa', flutterwaveLocal: false, momo: false, momoNetworks: [], flutterwavePayout: false, stripePayout: false, stripePreview: false, restricted: false },
   { code: 'SD', name: 'Sudan', currency: 'SDG', region: 'North Africa', flutterwaveLocal: false, momo: false, momoNetworks: [], flutterwavePayout: false, stripePayout: false, stripePreview: false, restricted: false },
   { code: 'TN', name: 'Tunisia', currency: 'TND', region: 'North Africa', flutterwaveLocal: false, momo: false, momoNetworks: [], flutterwavePayout: false, stripePayout: false, stripePreview: false, restricted: false },
   // --- West Africa -------------------------------------------------------
-  { code: 'BJ', name: 'Benin', currency: 'XOF', region: 'West Africa', flutterwaveLocal: true, momo: false, momoNetworks: [], flutterwavePayout: true, stripePayout: false, stripePreview: false, restricted: false },
+  { code: 'BJ', name: 'Benin', currency: 'XOF', region: 'West Africa', flutterwaveLocal: false, momo: false, momoNetworks: [], flutterwavePayout: false, stripePayout: false, stripePreview: false, restricted: false },
   { code: 'BF', name: 'Burkina Faso', currency: 'XOF', region: 'West Africa', flutterwaveLocal: true, momo: true, momoNetworks: ['Orange Money', 'Mobicash'], flutterwavePayout: true, stripePayout: false, stripePreview: false, restricted: false },
   { code: 'CV', name: 'Cabo Verde', currency: 'CVE', region: 'West Africa', flutterwaveLocal: false, momo: false, momoNetworks: [], flutterwavePayout: false, stripePayout: false, stripePreview: false, restricted: false },
   { code: 'CI', name: 'Côte d\'Ivoire', currency: 'XOF', region: 'West Africa', flutterwaveLocal: true, momo: true, momoNetworks: ['MTN', 'Orange Money', 'Wave'], flutterwavePayout: true, stripePayout: false, stripePreview: false, restricted: false },
   { code: 'GM', name: 'Gambia', currency: 'GMD', region: 'West Africa', flutterwaveLocal: false, momo: false, momoNetworks: [], flutterwavePayout: false, stripePayout: false, stripePreview: false, restricted: false },
   { code: 'GH', name: 'Ghana', currency: 'GHS', region: 'West Africa', flutterwaveLocal: true, momo: true, momoNetworks: ['MTN', 'Telecel', 'AirtelTigo'], flutterwavePayout: true, stripePayout: false, stripePreview: false, restricted: false },
   { code: 'GN', name: 'Guinea', currency: 'GNF', region: 'West Africa', flutterwaveLocal: false, momo: false, momoNetworks: [], flutterwavePayout: false, stripePayout: false, stripePreview: false, restricted: false },
-  { code: 'GW', name: 'Guinea-Bissau', currency: 'XOF', region: 'West Africa', flutterwaveLocal: true, momo: false, momoNetworks: [], flutterwavePayout: true, stripePayout: false, stripePreview: false, restricted: false },
+  { code: 'GW', name: 'Guinea-Bissau', currency: 'XOF', region: 'West Africa', flutterwaveLocal: false, momo: false, momoNetworks: [], flutterwavePayout: false, stripePayout: false, stripePreview: false, restricted: false },
   { code: 'LR', name: 'Liberia', currency: 'LRD', region: 'West Africa', flutterwaveLocal: false, momo: false, momoNetworks: [], flutterwavePayout: false, stripePayout: false, stripePreview: false, restricted: false },
-  { code: 'ML', name: 'Mali', currency: 'XOF', region: 'West Africa', flutterwaveLocal: true, momo: false, momoNetworks: [], flutterwavePayout: true, stripePayout: false, stripePreview: false, restricted: false },
+  { code: 'ML', name: 'Mali', currency: 'XOF', region: 'West Africa', flutterwaveLocal: false, momo: false, momoNetworks: [], flutterwavePayout: false, stripePayout: false, stripePreview: false, restricted: false },
   { code: 'MR', name: 'Mauritania', currency: 'MRU', region: 'West Africa', flutterwaveLocal: false, momo: false, momoNetworks: [], flutterwavePayout: false, stripePayout: false, stripePreview: false, restricted: false },
-  { code: 'NE', name: 'Niger', currency: 'XOF', region: 'West Africa', flutterwaveLocal: true, momo: false, momoNetworks: [], flutterwavePayout: true, stripePayout: false, stripePreview: false, restricted: false },
+  { code: 'NE', name: 'Niger', currency: 'XOF', region: 'West Africa', flutterwaveLocal: false, momo: false, momoNetworks: [], flutterwavePayout: false, stripePayout: false, stripePreview: false, restricted: false },
   { code: 'NG', name: 'Nigeria', currency: 'NGN', region: 'West Africa', flutterwaveLocal: true, momo: false, momoNetworks: [], flutterwavePayout: true, stripePayout: false, stripePreview: false, restricted: false },
   { code: 'SN', name: 'Senegal', currency: 'XOF', region: 'West Africa', flutterwaveLocal: true, momo: true, momoNetworks: ['Orange Money', 'Free Money', 'Wave'], flutterwavePayout: true, stripePayout: false, stripePreview: false, restricted: false },
-  { code: 'SL', name: 'Sierra Leone', currency: 'SLE', region: 'West Africa', flutterwaveLocal: true, momo: false, momoNetworks: [], flutterwavePayout: true, stripePayout: false, stripePreview: false, restricted: false },
-  { code: 'TG', name: 'Togo', currency: 'XOF', region: 'West Africa', flutterwaveLocal: true, momo: false, momoNetworks: [], flutterwavePayout: true, stripePayout: false, stripePreview: false, restricted: false },
+  { code: 'SL', name: 'Sierra Leone', currency: 'SLE', region: 'West Africa', flutterwaveLocal: false, momo: false, momoNetworks: [], flutterwavePayout: false, stripePayout: false, stripePreview: false, restricted: false },
+  { code: 'TG', name: 'Togo', currency: 'XOF', region: 'West Africa', flutterwaveLocal: false, momo: false, momoNetworks: [], flutterwavePayout: false, stripePayout: false, stripePreview: false, restricted: false },
   // --- Central Africa ----------------------------------------------------
   { code: 'CM', name: 'Cameroon', currency: 'XAF', region: 'Central Africa', flutterwaveLocal: true, momo: true, momoNetworks: ['MTN', 'Orange Money'], flutterwavePayout: true, stripePayout: false, stripePreview: false, restricted: false },
-  { code: 'CF', name: 'Central African Republic', currency: 'XAF', region: 'Central Africa', flutterwaveLocal: true, momo: false, momoNetworks: [], flutterwavePayout: true, stripePayout: false, stripePreview: false, restricted: false },
-  { code: 'TD', name: 'Chad', currency: 'XAF', region: 'Central Africa', flutterwaveLocal: true, momo: false, momoNetworks: [], flutterwavePayout: true, stripePayout: false, stripePreview: false, restricted: false },
-  { code: 'CG', name: 'Congo', currency: 'XAF', region: 'Central Africa', flutterwaveLocal: true, momo: false, momoNetworks: [], flutterwavePayout: true, stripePayout: false, stripePreview: false, restricted: false },
+  { code: 'CF', name: 'Central African Republic', currency: 'XAF', region: 'Central Africa', flutterwaveLocal: false, momo: false, momoNetworks: [], flutterwavePayout: false, stripePayout: false, stripePreview: false, restricted: false },
+  { code: 'TD', name: 'Chad', currency: 'XAF', region: 'Central Africa', flutterwaveLocal: false, momo: false, momoNetworks: [], flutterwavePayout: false, stripePayout: false, stripePreview: false, restricted: false },
+  { code: 'CG', name: 'Congo', currency: 'XAF', region: 'Central Africa', flutterwaveLocal: false, momo: false, momoNetworks: [], flutterwavePayout: false, stripePayout: false, stripePreview: false, restricted: false },
   { code: 'CD', name: 'DR Congo', currency: 'CDF', region: 'Central Africa', flutterwaveLocal: false, momo: false, momoNetworks: [], flutterwavePayout: false, stripePayout: false, stripePreview: false, restricted: false },
-  { code: 'GQ', name: 'Equatorial Guinea', currency: 'XAF', region: 'Central Africa', flutterwaveLocal: true, momo: false, momoNetworks: [], flutterwavePayout: true, stripePayout: false, stripePreview: false, restricted: false },
-  { code: 'GA', name: 'Gabon', currency: 'XAF', region: 'Central Africa', flutterwaveLocal: true, momo: false, momoNetworks: [], flutterwavePayout: true, stripePayout: false, stripePreview: false, restricted: false },
+  { code: 'GQ', name: 'Equatorial Guinea', currency: 'XAF', region: 'Central Africa', flutterwaveLocal: false, momo: false, momoNetworks: [], flutterwavePayout: false, stripePayout: false, stripePreview: false, restricted: false },
+  { code: 'GA', name: 'Gabon', currency: 'XAF', region: 'Central Africa', flutterwaveLocal: false, momo: false, momoNetworks: [], flutterwavePayout: false, stripePayout: false, stripePreview: false, restricted: false },
   { code: 'ST', name: 'São Tomé and Príncipe', currency: 'STN', region: 'Central Africa', flutterwaveLocal: false, momo: false, momoNetworks: [], flutterwavePayout: false, stripePayout: false, stripePreview: false, restricted: false },
   // --- East Africa -------------------------------------------------------
   { code: 'BI', name: 'Burundi', currency: 'BIF', region: 'East Africa', flutterwaveLocal: false, momo: false, momoNetworks: [], flutterwavePayout: false, stripePayout: false, stripePreview: false, restricted: false },
   { code: 'KM', name: 'Comoros', currency: 'KMF', region: 'East Africa', flutterwaveLocal: false, momo: false, momoNetworks: [], flutterwavePayout: false, stripePayout: false, stripePreview: false, restricted: false },
   { code: 'DJ', name: 'Djibouti', currency: 'DJF', region: 'East Africa', flutterwaveLocal: false, momo: false, momoNetworks: [], flutterwavePayout: false, stripePayout: false, stripePreview: false, restricted: false },
   { code: 'ER', name: 'Eritrea', currency: 'ERN', region: 'East Africa', flutterwaveLocal: false, momo: false, momoNetworks: [], flutterwavePayout: false, stripePayout: false, stripePreview: false, restricted: false },
-  { code: 'ET', name: 'Ethiopia', currency: 'ETB', region: 'East Africa', flutterwaveLocal: false, momo: false, momoNetworks: [], flutterwavePayout: false, stripePayout: false, stripePreview: false, restricted: false },
+  { code: 'ET', name: 'Ethiopia', currency: 'ETB', region: 'East Africa', flutterwaveLocal: false, momo: false, momoNetworks: [], flutterwavePayout: true, stripePayout: false, stripePreview: false, restricted: false },
   { code: 'KE', name: 'Kenya', currency: 'KES', region: 'East Africa', flutterwaveLocal: true, momo: true, momoNetworks: ['M-Pesa'], flutterwavePayout: true, stripePayout: false, stripePreview: false, restricted: false },
   { code: 'MG', name: 'Madagascar', currency: 'MGA', region: 'East Africa', flutterwaveLocal: false, momo: false, momoNetworks: [], flutterwavePayout: false, stripePayout: false, stripePreview: false, restricted: false },
   { code: 'MU', name: 'Mauritius', currency: 'MUR', region: 'East Africa', flutterwaveLocal: false, momo: false, momoNetworks: [], flutterwavePayout: false, stripePayout: false, stripePreview: false, restricted: false },
@@ -170,11 +185,11 @@ export const COUNTRIES: CountryInfo[] = [
   { code: 'BW', name: 'Botswana', currency: 'BWP', region: 'Southern Africa', flutterwaveLocal: false, momo: false, momoNetworks: [], flutterwavePayout: false, stripePayout: false, stripePreview: false, restricted: false },
   { code: 'SZ', name: 'Eswatini', currency: 'SZL', region: 'Southern Africa', flutterwaveLocal: false, momo: false, momoNetworks: [], flutterwavePayout: false, stripePayout: false, stripePreview: false, restricted: false },
   { code: 'LS', name: 'Lesotho', currency: 'LSL', region: 'Southern Africa', flutterwaveLocal: false, momo: false, momoNetworks: [], flutterwavePayout: false, stripePayout: false, stripePreview: false, restricted: false },
-  { code: 'MW', name: 'Malawi', currency: 'MWK', region: 'Southern Africa', flutterwaveLocal: true, momo: true, momoNetworks: [], flutterwavePayout: true, stripePayout: false, stripePreview: false, restricted: false },
+  { code: 'MW', name: 'Malawi', currency: 'MWK', region: 'Southern Africa', flutterwaveLocal: true, momo: true, momoNetworks: [], flutterwavePayout: false, stripePayout: false, stripePreview: false, restricted: false },
   { code: 'MZ', name: 'Mozambique', currency: 'MZN', region: 'Southern Africa', flutterwaveLocal: false, momo: false, momoNetworks: [], flutterwavePayout: false, stripePayout: false, stripePreview: false, restricted: false },
   { code: 'NA', name: 'Namibia', currency: 'NAD', region: 'Southern Africa', flutterwaveLocal: false, momo: false, momoNetworks: [], flutterwavePayout: false, stripePayout: false, stripePreview: false, restricted: false },
   { code: 'ZA', name: 'South Africa', currency: 'ZAR', region: 'Southern Africa', flutterwaveLocal: true, momo: false, momoNetworks: [], flutterwavePayout: true, stripePayout: false, stripePreview: false, restricted: false },
-  { code: 'ZM', name: 'Zambia', currency: 'ZMW', region: 'Southern Africa', flutterwaveLocal: true, momo: true, momoNetworks: ['MTN', 'Airtel Money', 'Zamtel'], flutterwavePayout: true, stripePayout: false, stripePreview: false, restricted: false },
+  { code: 'ZM', name: 'Zambia', currency: 'ZMW', region: 'Southern Africa', flutterwaveLocal: false, momo: true, momoNetworks: ['MTN', 'Airtel Money', 'Zamtel'], flutterwavePayout: true, stripePayout: false, stripePreview: false, restricted: false },
   { code: 'ZW', name: 'Zimbabwe', currency: 'ZWG', region: 'Southern Africa', flutterwaveLocal: false, momo: false, momoNetworks: [], flutterwavePayout: false, stripePayout: false, stripePreview: false, restricted: false },
   // --- Europe ------------------------------------------------------------
   { code: 'AL', name: 'Albania', currency: 'ALL', region: 'Europe', flutterwaveLocal: false, momo: false, momoNetworks: [], flutterwavePayout: false, stripePayout: false, stripePreview: false, restricted: false },

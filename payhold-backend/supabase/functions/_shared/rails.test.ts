@@ -123,6 +123,50 @@ Deno.test('a corridor we cannot reach is refused rather than queued', () => {
   )
 })
 
+Deno.test('a market Flutterwave pays out to but does not collect in gets a payout-only bank rail', () => {
+  // Ethiopia: a transfer guide and a momo transfer code, no collection page.
+  // The registry says so with `flutterwavePayout` and not `flutterwaveLocal`,
+  // and the rail table has to carry that shape or `payoutRoute` promises a
+  // corridor no row describes.
+  const et = RAILS.filter((r) => r.country === 'ET' && r.provider === 'flutterwave')
+  assertEquals(et.length, 1)
+  assertEquals(et[0].method, 'bank_transfer')
+  assertEquals(et[0].collect, false)
+  assertEquals(et[0].payout, true)
+
+  // …and it never leaks into a checkout.
+  assertEquals(collectionRails('ET', 'ETB'), [])
+  assert(!currenciesFor('ET').includes('ETB'))
+  assert(!SUPPORTED_CURRENCIES.includes('ETB'))
+
+  const route = payoutRoute('ET', 'ETB')
+  assertEquals(route.provider, 'flutterwave')
+  assertEquals(route.kind, 'bank')
+  assertEquals(route.blocked, false)
+})
+
+Deno.test('a market Flutterwave collects in but cannot pay out to is refused at registration', () => {
+  // Egypt: card and Fawry collection, and transfers "not available by default
+  // — submit a request". Buyers there pay locally; the money cannot go back
+  // out, and the seller hears that before a destination is stored.
+  assert(collectionRails('EG', 'EGP').some((r) => r.provider === 'flutterwave'))
+  const route = payoutRoute('EG', 'EGP')
+  assertEquals(route.blocked, true)
+  assertEquals(route.provider, null)
+  assertThrows(() => payoutProviderFor('EG', 'EGP'), PayHoldError)
+})
+
+Deno.test('Kenya and Tanzania are paid by mobile money — the bank corridor is gated', () => {
+  // The registry flag is per country; the SQL `payout_routes` rows carry the
+  // bank-vs-wallet split and have both off the bank row. Here the wallet wins
+  // because one exists, which is also what the transfer table documents.
+  for (const [country, currency] of [['KE', 'KES'], ['TZ', 'TZS']]) {
+    const route = payoutRoute(country, currency)
+    assertEquals(route.provider, 'flutterwave', country)
+    assertEquals(route.kind, 'momo', country)
+  }
+})
+
 Deno.test('the default rail for a market is one that can actually take money', () => {
   for (const info of COUNTRIES) {
     if (info.restricted) continue

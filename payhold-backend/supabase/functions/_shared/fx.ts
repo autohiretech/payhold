@@ -75,6 +75,17 @@ const PER_USD: Record<string, number> = {
   CHF: 0.88,
   SGD: 1.34,
   ZWG: 26,
+  // Non-euro EEA — the Stripe Connect corridors 20260909000006 opened. A
+  // corridor `route_payout` can pick but this table cannot price fails at
+  // conversion, which is why 20260909000003 left them out until now.
+  BGN: 1.80,
+  CZK: 23,
+  DKK: 6.9,
+  HUF: 365,
+  NOK: 10.6,
+  PLN: 3.95,
+  RON: 4.6,
+  SEK: 10.4,
 }
 
 export interface Conversion {

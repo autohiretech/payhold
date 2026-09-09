@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { api, type Currency } from '@/api'
+import { api, type Country, type Currency } from '@/api'
 import {
   Button,
   Card,
@@ -12,6 +12,7 @@ import {
   cx,
 } from '@/components/ui'
 import { formatMoney, formatPercent } from '@/lib/format'
+import { countriesByRegion } from '@/lib/countries'
 import { SUPPORTED_CURRENCIES } from '@/lib/rails'
 import { useMoneyAction, useSettings } from '@/lib/queries'
 import { useAuth } from '@/auth/AuthProvider'
@@ -28,6 +29,7 @@ export function SettingsPage() {
   const [clearanceDays, setClearanceDays] = useState('')
   const [autoReleaseDays, setAutoReleaseDays] = useState('')
   const [currencies, setCurrencies] = useState<Currency[]>([])
+  const [country, setCountry] = useState<Country | ''>('')
   const [aiEnabled, setAiEnabled] = useState(true)
   const [aiBudget, setAiBudget] = useState('')
   const [riskEnabled, setRiskEnabled] = useState(true)
@@ -45,6 +47,7 @@ export function SettingsPage() {
     setClearanceDays(settings.data.clearance_days.toString())
     setAutoReleaseDays(settings.data.auto_release_days.toString())
     setCurrencies(settings.data.currencies)
+    setCountry(settings.data.country ?? '')
     setAiEnabled(settings.data.ai_enabled)
     setAiBudget((settings.data.ai_monthly_budget_usd / 100).toString())
     setRiskEnabled(settings.data.risk_rules_enabled)
@@ -60,6 +63,7 @@ export function SettingsPage() {
       clearance_days: Number(clearanceDays),
       auto_release_days: Number(autoReleaseDays),
       currencies,
+      country,
       ai_enabled: aiEnabled,
       ai_monthly_budget_usd: Math.round(Number(aiBudget) * 100),
       risk_rules_enabled: riskEnabled,
@@ -173,6 +177,36 @@ export function SettingsPage() {
                   />
                   <span className="text-sm text-fg-muted">days</span>
                 </div>
+              </Field>
+            </div>
+          </Card>
+
+          <Card>
+            <CardHeader
+              title="Company country"
+              // Named because a transfer carries it: Flutterwave refuses a
+              // Kenya M-Pesa payout whose sender has no country, and nothing on
+              // the backend guesses one.
+              subtitle="Where this company is registered. Sent as the sender country on payouts; some rails refuse a transfer without it."
+            />
+            <div className="px-6 py-5">
+              <Field label="Country">
+                <select
+                  value={country}
+                  onChange={(e) => setCountry(e.target.value as Country | '')}
+                  className="w-full rounded-lg border border-line-strong bg-surface px-3 py-2 text-sm text-fg"
+                >
+                  <option value="">Not set</option>
+                  {countriesByRegion().map((group) => (
+                    <optgroup key={group.region} label={group.region}>
+                      {group.countries.map((c) => (
+                        <option key={c.code} value={c.code}>
+                          {c.name}
+                        </option>
+                      ))}
+                    </optgroup>
+                  ))}
+                </select>
               </Field>
             </div>
           </Card>

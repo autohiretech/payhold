@@ -35,7 +35,15 @@
 import type { SupabaseClient } from 'npm:@supabase/supabase-js@2'
 import { amountLeaving } from './figures.ts'
 import { loadProvider } from './load-provider.ts'
-import { PayHoldError, type Deal, type Payout, type Provider } from './types.ts'
+import { loadSettings } from './settings.ts'
+import {
+  type Country,
+  type Deal,
+  PayHoldError,
+  type Payout,
+  type PayoutProvider,
+  type Provider,
+} from './types.ts'
 
 export type DispatchOutcome =
   /** Sent and booked. */
@@ -111,9 +119,12 @@ export async function dispatchPayout(
   db: SupabaseClient,
   payout: Payout,
 ): Promise<DispatchOutcome> {
+  // `name` is read here as well because it is the sender on a transfer: some
+  // corridors (Flutterwave's Kenya M-Pesa) refuse a payout that does not say
+  // who is sending it.
   const { data: tenant } = await db
     .from('tenants')
-    .select('status')
+    .select('status, name')
     .eq('id', payout.tenant_id)
     .maybeSingle()
 
@@ -222,18 +233,38 @@ export async function dispatchPayout(
   // copy of it. That copy exists because Phase 4 could not move fifty call
   // sites at once; this is the one that had to move, because a seller now has
   // more than one destination and only the decision knows which was picked.
-  const { data: destination } = await db
+  //
+  // The rail and country ride along with the token: an adapter cannot tell a
+  // wallet from a bank account by its token, and Flutterwave's Kenya M-Pesa
+  // corridor wants facts on the transfer that a Rwandan wallet transfer must
+  // not carry. Still the mask and never the number — the number stays with
+  // the rail, and the adapter that needs it asks the rail for it.
+  const { data: destinationRow } = await db
     .from('seller_destinations')
-    .select('beneficiary_token, masked_destination')
+    .select('beneficiary_token, masked_destination, payout_provider, country')
     .eq('id', decision.destination_id ?? '')
     .maybeSingle()
 
-  if (!destination) {
+  if (!destinationRow) {
     throw new PayHoldError(
       'not_found',
       `Destination ${decision.destination_id} for payout ${payout.id} not found`,
     )
   }
+  const destination = destinationRow as unknown as {
+    beneficiary_token: string
+    masked_destination: string
+    payout_provider: PayoutProvider
+    country: Country
+  }
+
+  // Who the money is going to, by name — the same value `tokenize` was given
+  // at registration, wanted again on the transfer by the corridor above.
+  const { data: sellerRow } = await db
+    .from('sellers')
+    .select('name')
+    .eq('id', deal.seller_id)
+    .maybeSingle()
 
   // What departs our balance, read back off the ledger rather than converted —
   // see `amountLeaving`. Computed before the transfer so a figure we cannot
@@ -300,6 +331,15 @@ export async function dispatchPayout(
         currency: payout.currency,
         // Stable across retries, which is what makes step 4 safe to repeat.
         idempotency_key: `payout:${payout.id}`,
+        rail: destination.payout_provider,
+        country: destination.country,
+        beneficiary_name: (sellerRow as { name?: string } | null)?.name ?? undefined,
+        sender_name: (tenant as { name?: string } | null)?.name ?? undefined,
+        // The owner's own answer on the Settings screen, or nothing. The
+        // adapter that needs it (Flutterwave, Kenya M-Pesa) refuses with the
+        // gap named, `fail_payout` records that sentence on the payout, and the
+        // next pass retries once the country has been set.
+        sender_country: (await loadSettings(db, payout.tenant_id)).country || undefined,
       })
     }
   } catch (err) {

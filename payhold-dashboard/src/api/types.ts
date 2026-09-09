@@ -1246,6 +1246,12 @@ export interface TenantSettings {
   reserve_after_payouts?: number
   currencies: Currency[]
   /**
+   * Where the company is. Empty until the owner says. It is the sender country
+   * on a transfer — Flutterwave refuses a Kenya M-Pesa payout without one — and
+   * the backend never guesses it.
+   */
+  country?: Country | ''
+  /**
    * Intelligence (§12). Off means no drafts and no chat — and nothing else.
    * Every money path behaves identically either way, which is the point.
    */

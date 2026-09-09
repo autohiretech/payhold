@@ -17,9 +17,11 @@
  */
 
 import type {
+  Country,
   Currency,
   Money,
   PaymentMethod,
+  PayoutProvider,
   Provider,
 } from './types.ts'
 
@@ -319,6 +321,36 @@ export interface PayoutRequest {
   amount: Money
   currency: Currency
   idempotency_key: string
+  /**
+   * The rail the destination was tokenized for, and the country it is in —
+   * `seller_destinations.payout_provider` and `.country`.
+   *
+   * A token alone does not say what kind of account it stands for, and some
+   * corridors want more than a token: Flutterwave's Kenya M-Pesa transfers are
+   * refused without a `meta` block that a Rwandan MTN transfer must not carry.
+   * An adapter reads these to decide whether it is on such a corridor. This is
+   * an adapter looking at its own corridor, not a caller branching on a
+   * provider's identity — the rule at the top of this file is untouched.
+   */
+  rail?: PayoutProvider
+  country?: Country
+  /**
+   * Who the money is going to — `sellers.name`, the same value `tokenize` was
+   * given. Kenya M-Pesa wants it again on the transfer, split into first and
+   * last name.
+   */
+  beneficiary_name?: string
+  /**
+   * Who is sending it — the tenant's name and resident country, as Flutterwave
+   * wants them on an M-Pesa transfer (`meta.sender`, `meta.sender_country`).
+   *
+   * `sender_country` has no column behind it yet: `tenants` carries a name and
+   * nothing about where the company is. A caller that cannot fill it leaves it
+   * out, and the adapter that needs it refuses with the gap named rather than
+   * sending a transfer the rail will reject with the money already collected.
+   */
+  sender_name?: string
+  sender_country?: Country
 }
 
 export interface PayoutResult {

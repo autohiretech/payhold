@@ -95,12 +95,28 @@ describe('every country can pay — the coverage guarantee', () => {
 })
 
 describe('local rails appear only where they really exist', () => {
-  it('offers mobile money in exactly the ten markets Flutterwave documents', () => {
+  it('offers mobile money collection in exactly the eleven markets Flutterwave names a wallet for', () => {
     const momoCountries = COUNTRIES.filter((c) => c.momo).map((c) => c.code)
 
     expect(momoCountries.sort()).toEqual(
       ['BF', 'CI', 'CM', 'GH', 'KE', 'MW', 'RW', 'SN', 'TZ', 'UG', 'ZM'].sort(),
     )
+  })
+
+  it('keeps where Flutterwave collects apart from where it pays out', () => {
+    // Two different pages, and they disagree. Egypt and Malawi have a
+    // collection channel and a "submit a request" gate on transfers; Ethiopia
+    // has a transfer guide and no collection channel; Zambia's wallets collect
+    // but no collection page names a local card rail there.
+    for (const code of ['EG', 'MW'] as const) {
+      expect(countryInfo(code).flutterwaveLocal, code).toBe(true)
+      expect(countryInfo(code).flutterwavePayout, code).toBe(false)
+    }
+    expect(countryInfo('ET').flutterwaveLocal).toBe(false)
+    expect(countryInfo('ET').flutterwavePayout).toBe(true)
+    expect(countryInfo('ZM').flutterwaveLocal).toBe(false)
+    expect(countryInfo('ZM').momo).toBe(true)
+    expect(countryInfo('ZM').flutterwavePayout).toBe(true)
   })
 
   it('names the wallets that actually operate in each market', () => {
@@ -219,10 +235,13 @@ describe('payout routing — where money can actually go', () => {
     expect(route.reason).toMatch(/confirm with/i)
   })
 
-  it('blocks outright where neither provider can reach the seller', () => {
-    // Ethiopia has no Flutterwave payout rail and no Stripe presence.
-    const route = payoutRoute('ET', 'ETB')
-    expect(route.provider).toBeNull()
+  it('blocks outright where neither provider can reach the seller — Egypt collects, and Flutterwave transfers there are request-only', () => {
+    // Egypt is the sharper case than a market with no Flutterwave presence at
+    // all: buyers there pay on a local rail, and the money still cannot go
+    // back out, because Flutterwave documents EGP bank and wallet transfers as
+    // "not available by default — submit a request".
+    expect(countryInfo('EG').flutterwaveLocal).toBe(true)
+    const route = payoutRoute('EG', 'EGP')
 
     expect(route.blocked).toBe(true)
     expect(route.provider).toBeNull()
@@ -230,8 +249,23 @@ describe('payout routing — where money can actually go', () => {
   })
 
   it('says collection still works even where payout does not', () => {
-    const route = payoutRoute('ET', 'ETB')
+    const route = payoutRoute('EG', 'EGP')
     expect(route.reason).toMatch(/collection works everywhere/i)
+    expect(collectionRails('EG', 'EGP').length).toBeGreaterThan(0)
+  })
+
+  it('pays an Ethiopian seller by bank transfer even though nothing collects locally there', () => {
+    // The reverse of Egypt: a transfer guide and a momo transfer code, no
+    // collection channel. The rail is payout-only and never reaches checkout.
+    const route = payoutRoute('ET', 'ETB')
+    expect(route.provider).toBe('flutterwave')
+    expect(route.kind).toBe('bank')
+    expect(route.blocked).toBe(false)
+
+    expect(payoutRails('ET')).toHaveLength(1)
+    expect(payoutRails('ET')[0]?.collect).toBe(false)
+    expect(collectionRails('ET', 'ETB')).toHaveLength(0)
+    expect(marketSummary('ET').hasLocalRails).toBe(false)
   })
 
   it('never returns a provider when blocked, nor a block when routed', () => {
@@ -379,8 +413,15 @@ describe('rail provenance — what has been checked against provider documentati
   })
 
   it('an unlisted row is unchecked, never silently documented', () => {
-    const card = RAILS.find((r) => r.provider === 'stripe' && r.method === 'card' && r.collect)!
-    expect(provenanceFor(card, 'collect').state).toBe('unchecked')
+    // A rail no provenance entry can name — nothing is keyed on the fake
+    // adapter — so the lookup has to fall through to `unchecked` rather than
+    // to whatever the nearest real row says.
+    expect(
+      provenanceFor(
+        { provider: 'fake', country: 'RW', method: 'card', currencies: [], networks: [], collect: true, payout: false },
+        'collect',
+      ).state,
+    ).toBe('unchecked')
   })
 
   it('the launch corridor is documented on both sides', () => {
@@ -390,7 +431,13 @@ describe('rail provenance — what has been checked against provider documentati
   })
 
   it('a corridor the routing table was pruned of reads as not supported here', () => {
-    const sl = RAILS.find((r) => r.provider === 'flutterwave' && r.country === 'SL' && r.method === 'bank_transfer')!
-    expect(provenanceFor(sl, 'payout').state).toBe('unsupported')
+    // Kenya keeps its Flutterwave bank row in the registry — the flag is per
+    // country and M-Pesa is documented — and 20260909000006 took the bank
+    // corridor out of `payout_routes` because Flutterwave documents it as
+    // "not available by default — submit a request". Unsupported here and
+    // absent there is the two halves agreeing.
+    const ke = RAILS.find((r) => r.provider === 'flutterwave' && r.country === 'KE' && r.method === 'bank_transfer')
+    expect(ke).toBeDefined()
+    expect(provenanceFor(ke!, 'payout').state).toBe('unsupported')
   })
 })

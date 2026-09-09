@@ -1,9 +1,23 @@
 """Generate the world registry, for both the dashboard and the backend.
 
-Data sources (checked August 2026):
-  Stripe fully-supported countries : stripe.com/global
-  Flutterwave channels + currencies: flutterwave.com/gb/support/payment-methods/payment-channels
-  Flutterwave mobile money         : flutterwave.com/mw/support/payment-methods/pay-with-mobile-money
+Data sources (each page read on 2026-09-09; the sets below are transcribed
+from them, not inferred from currency zones):
+  Stripe fully-supported countries : https://stripe.com/global
+  Stripe platform countries        : https://docs.stripe.com/_endpoint/get-platform-countries
+  Stripe cross-border payouts      : https://docs.stripe.com/connect/cross-border-payouts
+  Flutterwave collection channels  : https://flutterwave.com/gb/support/payment-methods/payment-channels
+                                     https://developer.flutterwave.com/v3.0.0/docs/payment-methods.md
+  Flutterwave momo collection      : https://developer.flutterwave.com/v3.0.0/docs/mobile-money-1.md
+                                     https://developer.flutterwave.com/v3.0.0/docs/francophone.md
+  Flutterwave bank transfers (out) : https://developer.flutterwave.com/v3.0.0/docs/bank-account.md
+                                     plus one per-country guide under the same path, e.g.
+                                     .../docs/ethiopian-bank-account-transfers.md, .../docs/kenya-1.md
+  Flutterwave momo transfers (out) : https://developer.flutterwave.com/v3.0.0/docs/mobile-money.md
+
+Collection and payout are separate flags because Flutterwave documents them
+separately and they disagree: Egypt and Malawi collect but payouts there are
+"not available by default — submit a request"; Ethiopia has a transfer guide
+and a momo transfer code but no collection channel page.
 """
 
 from pathlib import Path
@@ -232,13 +246,35 @@ STRIPE_PAYOUT = {
 # Stripe "Preview" — contact sales, not generally available.
 STRIPE_PREVIEW = {"IN", "ID"}
 
-# Flutterwave local-currency collection, from its published channel list.
+# Flutterwave local-currency COLLECTION — only the countries a collection page
+# names. The channel list gives XOF and XAF as zones; the francophone momo page
+# names Burkina Faso, Côte d'Ivoire, Senegal and Cameroon and nobody else, so
+# the other CFA members (BJ GW ML NE TG, CF TD CG GQ GA) are not here — a buyer
+# there still pays on the international card rail. Sierra Leone is on the
+# card-currency list (in SLL) but has no collection channel page. Zambia's
+# momo collection is documented but request-only for non-Zambian merchants,
+# so it is a `MOMO` network and not a local rail.
 FLUTTERWAVE_LOCAL = {
-    "NG", "GH", "KE", "UG", "RW", "TZ", "ZA", "ZM", "MW", "EG", "SL",
-    # XOF zone
-    "BJ", "BF", "CI", "GW", "ML", "NE", "SN", "TG",
-    # XAF zone
-    "CM", "CF", "TD", "CG", "GQ", "GA",
+    "NG", "GH", "KE", "UG", "RW", "TZ", "ZA", "MW", "EG",
+    # XOF zone — named on francophone.md
+    "BF", "CI", "SN",
+    # XAF zone — named on francophone.md
+    "CM",
+}
+
+# Flutterwave PAYOUT — a transfer guide with no "on request" / registration
+# gate, or a documented mobile-money transfer code. Per country, because the
+# registry flag is per country; the SQL `payout_routes` rows carry the
+# bank-vs-wallet split.
+#   Bank and wallet: RW UG GH ZM CI SN CM ET.
+#   Bank only:       NG BF ZA (no momo transfer code exists for any of them).
+#   Wallet only:     KE (bank "not available by default — submit a request"),
+#                    TZ (bank "only available to businesses registered in Tanzania").
+# Not here: EG and MW (bank and wallet both "submit a request"), SL (documented
+# in SLL, which this registry does not price).
+FLUTTERWAVE_PAYOUT = {
+    "RW", "UG", "GH", "NG", "ZA", "ZM", "CI", "SN", "CM", "BF", "ET",
+    "KE", "TZ",
 }
 
 # Mobile money, with the wallets Flutterwave names per market.
@@ -309,11 +345,22 @@ def render(backend: bool) -> str:
  *      is well under half the world, and the rest can pay but cannot be paid.
  * ─────────────────────────────────────────────────────────────────────────────
  *
- * Sources, checked August 2026 — re-check before launch, coverage changes:
- *   stripe.com/global
- *   flutterwave.com/gb/support/payment-methods/payment-channels
- *   flutterwave.com/mw/support/payment-methods/pay-with-mobile-money
- *   flutterwave.com/mu/support/general/what-are-the-currencies-accepted-on-flutterwave
+ * Sources, each read on 2026-09-09 — re-check before launch, coverage changes:
+ *   https://stripe.com/global
+ *   https://docs.stripe.com/_endpoint/get-platform-countries
+ *   https://docs.stripe.com/connect/cross-border-payouts
+ *   https://flutterwave.com/gb/support/payment-methods/payment-channels
+ *   https://developer.flutterwave.com/v3.0.0/docs/payment-methods.md
+ *   https://developer.flutterwave.com/v3.0.0/docs/mobile-money-1.md   (momo collection)
+ *   https://developer.flutterwave.com/v3.0.0/docs/francophone.md
+ *   https://developer.flutterwave.com/v3.0.0/docs/bank-account.md     (bank transfers out)
+ *   https://developer.flutterwave.com/v3.0.0/docs/mobile-money.md     (momo transfers out)
+ *   https://flutterwave.com/mu/support/general/what-are-the-currencies-accepted-on-flutterwave
+ *
+ * `flutterwaveLocal` (collection) and `flutterwavePayout` (transfers) are
+ * separate flags from separate pages, and they disagree: Egypt and Malawi
+ * collect but payouts are "not available by default"; Ethiopia has a transfer
+ * guide and no collection channel.
  *
  * Nothing here is verified against a signed provider agreement. See
  * `RAILS_VERIFIED` in rails.ts.
@@ -326,13 +373,17 @@ def render(backend: bool) -> str:
     w("  /** ISO-4217 code of the local currency. */")
     w("  currency: Currency")
     w("  region: Region")
-    w("  /** Flutterwave supports collection in this country's own currency. */")
+    w("  /** Flutterwave documents collection in this country's own currency. */")
     w("  flutterwaveLocal: boolean")
     w("  /** Mobile money is available here. */")
     w("  momo: boolean")
     w("  /** Named wallets. Empty with `momo: true` means the list is unconfirmed. */")
     w("  momoNetworks: string[]")
-    w("  /** Flutterwave can send funds to a beneficiary here. */")
+    w("  /**")
+    w("   * Flutterwave documents a transfer here with no request/registration gate —")
+    w("   * by bank, by mobile money, or both. Independent of `flutterwaveLocal`: a")
+    w("   * market can collect and not pay out (EG, MW) or pay out and not collect (ET).")
+    w("   */")
     w("  flutterwavePayout: boolean")
     w("  /** Stripe supports a business account with payouts here. */")
     w("  stripePayout: boolean")
@@ -397,7 +448,7 @@ def render(backend: bool) -> str:
             "momoNetworks: ["
             + ", ".join(ts_string(n) for n in (networks or []))
             + "]",
-            f"flutterwavePayout: {'true' if code in FLUTTERWAVE_LOCAL else 'false'}",
+            f"flutterwavePayout: {'true' if code in FLUTTERWAVE_PAYOUT else 'false'}",
             f"stripePayout: {'true' if code in STRIPE_PAYOUT else 'false'}",
             f"stripePreview: {'true' if code in STRIPE_PREVIEW else 'false'}",
             f"restricted: {'true' if code in RESTRICTED else 'false'}",
@@ -458,7 +509,8 @@ def main() -> None:
 
     print(f"{len(COUNTRIES)} countries, {len(currencies)} currencies")
     print(f"  stripe payout   : {len(STRIPE_PAYOUT)}")
-    print(f"  flutterwave     : {len(FLUTTERWAVE_LOCAL)}")
+    print(f"  flutterwave in  : {len(FLUTTERWAVE_LOCAL)}")
+    print(f"  flutterwave out : {len(FLUTTERWAVE_PAYOUT)}")
     print(f"  mobile money    : {len(MOMO)}")
     print(f"  restricted      : {len(RESTRICTED)}")
 

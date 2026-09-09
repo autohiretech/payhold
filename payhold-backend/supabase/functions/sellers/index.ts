@@ -24,7 +24,11 @@ import { loadProvider } from '../_shared/load-provider.ts'
 import { momoBankCode, momoNetworksFor } from '../_shared/momo.ts'
 import { countryInfo, payoutRoute } from '../_shared/rails.ts'
 import { withCallerLabel } from '../_shared/seller-mask.ts'
-import { assertRailOnRoute } from './rail-adapter.ts'
+import {
+  assertRailOnRoute,
+  assertRailRequirementsMet,
+  assertRailSwitchedOn,
+} from './rail-adapter.ts'
 import { StripeProvider } from '../_shared/stripe.ts'
 import {
   PayHoldError,
@@ -150,6 +154,12 @@ async function create(
     // caller named is the one that reaches it, and this is the registration
     // half of the hole `addDestination` was found through.
     assertRailOnRoute(body.payout_provider!, country, route)
+    // A corridor the adapter cannot send on (it wants fields PayHold does not
+    // collect), then the table's own answer to "is this rail on for this
+    // country" — the question neither the registry nor the adapter map can
+    // answer, and the one `route_payout` will ask when the money is due.
+    assertRailRequirementsMet(body.payout_provider!, country)
+    await assertRailSwitchedOn(db, caller.tenant_id, body.payout_provider!, country, payoutCurrency)
 
     // Which wallet or bank, checked before anything is sent anywhere. A
     // beneficiary registered without it is one the rail will not transfer to.
@@ -719,6 +729,9 @@ async function addDestination(
   // `route.provider` two calls below — Flutterwave — and was stored claiming
   // Stripe. `rail-adapter.ts` has the whole account; this is where it happened.
   assertRailOnRoute(body.payout_provider, country, route)
+  // Same two checks as `create`, same order, same reasons.
+  assertRailRequirementsMet(body.payout_provider, country)
+  await assertRailSwitchedOn(db, caller.tenant_id, body.payout_provider, country, payoutCurrency)
 
   const credentials = destinationCredentials(body.payout_provider, country, body)
 
@@ -1078,6 +1091,9 @@ async function connectStatus(
   // place — the account is real at Stripe, and clearing it would lose the only
   // handle anyone has to it.
   assertRailOnRoute('stripe_connect', seller.country!, payoutRoute(seller.country!, currency))
+  // And the table's own answer, for the same reason: the row written below is
+  // a `stripe_connect` destination whatever the routing says by now.
+  await assertRailSwitchedOn(db, caller.tenant_id, 'stripe_connect', seller.country!, currency)
 
   const token = await provider.tokenize({
     destination: accountId,

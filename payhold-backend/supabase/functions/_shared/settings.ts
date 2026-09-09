@@ -18,7 +18,8 @@
  */
 
 import type { SupabaseClient } from 'npm:@supabase/supabase-js@2'
-import { PayHoldError, type Currency, type Money } from './types.ts'
+import { COUNTRIES } from './countries.ts'
+import { PayHoldError, type Country, type Currency, type Money } from './types.ts'
 
 export interface Settings {
   tenant_id: string
@@ -28,6 +29,13 @@ export interface Settings {
   auto_release_days: number
   /** Empty means "no restriction recorded" — validated against the rails. */
   currencies: Currency[]
+  /**
+   * Where the company is. Empty until the owner says. It is the `sender_country`
+   * on a transfer — Flutterwave refuses a Kenya M-Pesa payout that does not name
+   * one — and nothing here guesses it, because a fact about the tenant invented
+   * on a money transfer is exactly the kind of row nobody can explain later.
+   */
+  country: Country | ''
   risk_rules_enabled: boolean
   risk_review_threshold_usd: Money
   /**
@@ -88,7 +96,7 @@ export interface FullSettings extends Settings {
   seller_auto_verify: boolean
 }
 
-type Kind = 'rate' | 'money' | 'count' | 'flag' | 'currencies' | 'payout_mode'
+type Kind = 'rate' | 'money' | 'count' | 'flag' | 'currencies' | 'payout_mode' | 'country'
 
 interface Spec {
   kind: Kind
@@ -123,6 +131,7 @@ const SPEC: Record<keyof Omit<FullSettings, 'tenant_id'>, Spec> = {
   reserve_days: { kind: 'count', fallback: 30, min: 0, max: 365 },
   reserve_after_payouts: { kind: 'count', fallback: 3, min: 0, max: 100 },
   currencies: { kind: 'currencies', fallback: [] },
+  country: { kind: 'country', fallback: '' },
   ai_enabled: { kind: 'flag', fallback: true },
   ai_monthly_budget_usd: { kind: 'money', fallback: 2_500, min: 0 },
   ai_dispute_assistant: { kind: 'flag', fallback: true },
@@ -146,6 +155,16 @@ const SPEC: Record<keyof Omit<FullSettings, 'tenant_id'>, Spec> = {
 
 type Key = keyof typeof SPEC
 
+const KNOWN_COUNTRIES = new Set(COUNTRIES.map((c) => c.code))
+
+/** The validators, exposed for tests; the stored shape is what `encode` returns. */
+export function encodeSetting(key: Key, value: unknown): number | string | Currency[] {
+  return encode(key, value)
+}
+export function decodeSetting(key: Key, raw: unknown): unknown {
+  return decode(key, raw)
+}
+
 /** Read one stored value back into the shape the spec says it has. */
 function decode(key: Key, raw: unknown): unknown {
   const spec = SPEC[key]
@@ -161,6 +180,10 @@ function decode(key: Key, raw: unknown): unknown {
       return Array.isArray(raw) ? raw as Currency[] : spec.fallback
     case 'payout_mode':
       return raw === 'wallet' ? 'wallet' : 'auto'
+    case 'country':
+      return typeof raw === 'string' && KNOWN_COUNTRIES.has(raw.toUpperCase())
+        ? raw.toUpperCase()
+        : spec.fallback
     default: {
       const value = Number(raw)
       if (!Number.isFinite(value)) return spec.fallback
@@ -193,6 +216,14 @@ function encode(key: Key, value: unknown): number | string | Currency[] {
     case 'payout_mode':
       if (value !== 'auto' && value !== 'wallet') refuse('must be "auto" or "wallet"')
       return value as string
+
+    case 'country': {
+      if (typeof value !== 'string') refuse('must be a two-letter country code, or empty to clear it')
+      const code = (value as string).trim().toUpperCase()
+      if (code === '') return ''
+      if (!KNOWN_COUNTRIES.has(code)) refuse(`"${value}" is not a country PayHold knows`)
+      return code
+    }
 
     default: {
       const num = Number(value)
@@ -290,6 +321,7 @@ export async function loadSettings(
     clearance_days,
     auto_release_days,
     currencies,
+    country,
     risk_rules_enabled,
     risk_review_threshold_usd,
     checkout_session_hours,
@@ -303,6 +335,7 @@ export async function loadSettings(
     clearance_days,
     auto_release_days,
     currencies,
+    country,
     risk_rules_enabled,
     risk_review_threshold_usd,
     checkout_session_hours,

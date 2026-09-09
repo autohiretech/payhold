@@ -361,6 +361,28 @@ export function transferReference(payoutId: string, mode: 'test' | 'live'): stri
   return payoutId
 }
 
+/**
+ * A seller's name as Flutterwave's M-Pesa transfer wants it: two fields.
+ *
+ * Split on the first run of whitespace — "Akinyi Kimwei" is `Akinyi` /
+ * `Kimwei`, "Jean de Dieu Habimana" is `Jean` / `de Dieu Habimana`. A single
+ * word fills both, because both fields are required and a person with one
+ * name is still a person the rail must pay. Nothing to split is `null`, and
+ * the caller refuses: inventing a name for a transfer is the one thing this
+ * must never do.
+ *
+ * Exported for the test.
+ */
+export function splitBeneficiaryName(
+  name: string | undefined,
+): { first_name: string; last_name: string } | null {
+  const trimmed = (name ?? '').trim().replace(/\s+/g, ' ')
+  if (!trimmed) return null
+  const space = trimmed.indexOf(' ')
+  if (space === -1) return { first_name: trimmed, last_name: trimmed }
+  return { first_name: trimmed.slice(0, space), last_name: trimmed.slice(space + 1) }
+}
+
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
 /**
@@ -959,6 +981,11 @@ export class FlutterwaveProvider implements PaymentProvider {
   // -------------------------------------------------------------------------
 
   async release(req: PayoutRequest): Promise<PayoutResult> {
+    // Read before the transfer is sent, so a corridor whose extra facts we
+    // cannot supply refuses here — with nothing at the rail — rather than
+    // after a POST the rail then rejects.
+    const meta = await this.transferMeta(req)
+
     // The beneficiary token stands in for the destination — PayHold never
     // holds the MoMo number itself.
     const data = await this.call<{ id: number; status: string }>('/transfers', {
@@ -973,6 +1000,10 @@ export class FlutterwaveProvider implements PaymentProvider {
         // the mock settle. See `transferReference`.
         reference: transferReference(req.payout_id, this.mode),
         narration: 'PayHold settlement',
+        // Absent on every corridor that does not demand it. A key carrying
+        // `undefined` is dropped by `JSON.stringify`, but saying so is clearer
+        // than relying on it.
+        ...(meta ? { meta } : {}),
       }),
     })
 
@@ -983,6 +1014,81 @@ export class FlutterwaveProvider implements PaymentProvider {
       // here would credit a payout that can still fail.
       status: data.status === 'SUCCESSFUL' ? 'paid' : 'pending',
     }
+  }
+
+  /**
+   * The `meta` block a transfer on this corridor must carry, or nothing.
+   *
+   * Kenya M-Pesa is the one corridor in the table that wants more than a
+   * beneficiary and an amount. Their create-a-transfer reference
+   * (developer.flutterwave.com/v3.0.0/reference/create-a-transfer, read
+   * 2026-09-09) marks five `meta` fields "required for … M-Pesa transfers":
+   * `sender` and `sender_country` describe the **sender**, and `first_name`,
+   * `last_name` and `mobile_number` describe the **beneficiary**. Their
+   * mobile-money guide summarises `mobile_number` as the sender's; the
+   * reference — the schema the API is generated from — says beneficiary, and
+   * is what this follows. Until this existed `release` sent no `meta` at all,
+   * so every KES wallet payout was refused at the rail with the buyer's money
+   * already collected.
+   *
+   * `meta` is an **array** of one object on a transfer. Their charge endpoints
+   * take a plain object (see `preauth`), and the Kenya guide's own example
+   * shows the array — the two endpoints differ, and this is the transfer.
+   *
+   * The beneficiary's number is not stored on our side — CLAUDE.md forbids a
+   * raw destination in any column — so it is read back from the rail's own
+   * record of the beneficiary we registered, which is where it has been since
+   * `tokenize`. That is one extra GET on this corridor only, and it is the
+   * whole reason `release` can honour the requirement without PayHold ever
+   * holding the number.
+   */
+  private async transferMeta(
+    req: PayoutRequest,
+  ): Promise<Record<string, string>[] | undefined> {
+    if (req.rail !== 'flutterwave_momo' || req.currency.toUpperCase() !== 'KES') {
+      return undefined
+    }
+
+    // Refused with the gap named. `dispatchPayout` records this sentence on
+    // the payout and retries later, which is the right shape: the fix is a
+    // fact about the tenant, not about this transfer.
+    if (!req.sender_name?.trim() || !req.sender_country?.trim()) {
+      throw new PayHoldError(
+        'policy_violation',
+        "Flutterwave requires the sender's name and country on every M-Pesa transfer, " +
+          'and this tenant has no country on file',
+      )
+    }
+
+    const names = splitBeneficiaryName(req.beneficiary_name)
+    if (!names) {
+      throw new PayHoldError(
+        'policy_violation',
+        "Flutterwave requires the beneficiary's name on every M-Pesa transfer, " +
+          'and this seller has none',
+      )
+    }
+
+    const beneficiary = await this.call<{ account_number?: string }>(
+      `/beneficiaries/${encodeURIComponent(req.beneficiary_token)}`,
+      { method: 'GET' },
+    )
+    const mobile = beneficiary?.account_number?.replace(/\D/g, '')
+    if (!mobile) {
+      throw new PayHoldError(
+        'policy_violation',
+        `Flutterwave holds no mobile number for beneficiary ${req.beneficiary_token}, ` +
+          'and an M-Pesa transfer cannot be sent without one',
+      )
+    }
+
+    return [{
+      sender: req.sender_name.trim(),
+      sender_country: req.sender_country.trim().toUpperCase(),
+      mobile_number: mobile,
+      first_name: names.first_name,
+      last_name: names.last_name,
+    }]
   }
 
   async refund(req: RefundRequest): Promise<{ provider_ref: string }> {

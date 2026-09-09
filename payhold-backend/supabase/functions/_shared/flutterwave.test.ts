@@ -13,6 +13,7 @@ import {
   FlutterwaveProvider,
   payoutIdFromTransferReference,
   proxyConfig,
+  splitBeneficiaryName,
   toMajor,
   toMinor,
   transferReference,
@@ -969,4 +970,204 @@ Deno.test('a proxy URL that is not a URL throws rather than being sent', () => {
     }
     assert(threw, bad)
   }
+})
+
+// ---------------------------------------------------------------------------
+// Kenya M-Pesa — the one transfer corridor that wants more than a beneficiary
+// ---------------------------------------------------------------------------
+//
+// Read from their create-a-transfer reference on 2026-09-09: `meta.sender`,
+// `sender_country`, `first_name`, `last_name` and `mobile_number` are "required
+// for … M-Pesa transfers", `meta` is an array of objects, and the last three
+// describe the beneficiary. `release` sent no `meta` at all, so every KES
+// wallet payout was refused at the rail with the buyer's money collected.
+
+/** Capture every request in order and answer each from the list. */
+function interceptMany(responses: unknown[]) {
+  const seen: { url: string; method: string; body?: string }[] = []
+  const original = globalThis.fetch
+
+  globalThis.fetch = ((url: string | URL | Request, init?: RequestInit) => {
+    seen.push({
+      url: String(url),
+      method: init?.method ?? 'GET',
+      body: init?.body ? String(init.body) : undefined,
+    })
+    const response = responses[seen.length - 1] ?? { status: 'error', message: 'unexpected call' }
+    return Promise.resolve(
+      new Response(JSON.stringify(response), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }),
+    )
+  }) as typeof fetch
+
+  return { seen, restore: () => { globalThis.fetch = original } }
+}
+
+const KES_MOMO_PAYOUT = {
+  payout_id: PAYOUT_ID,
+  beneficiary_token: '4242',
+  amount: 120_000, // KES 1,200.00 — a decimal currency
+  currency: 'KES',
+  idempotency_key: `payout:${PAYOUT_ID}`,
+  rail: 'flutterwave_momo' as const,
+  country: 'KE',
+  beneficiary_name: 'Akinyi Kimwei',
+  sender_name: 'AutoHire Ltd',
+  sender_country: 'RW',
+}
+
+Deno.test('a KES wallet transfer carries the five M-Pesa meta fields, read off the beneficiary', async () => {
+  const { seen, restore } = interceptMany([
+    // GET /beneficiaries/4242 — the number stays with the rail, never with us.
+    { status: 'success', data: { id: 4242, account_number: '254712345678', bank_code: 'MPS' } },
+    // POST /transfers
+    { status: 'success', data: { id: 9010, status: 'NEW' } },
+  ])
+  try {
+    const result = await new FlutterwaveProvider(CREDS, '', 'live').release(KES_MOMO_PAYOUT)
+
+    assertEquals(seen.length, 2)
+    assertEquals(seen[0].method, 'GET')
+    assert(seen[0].url.endsWith('/beneficiaries/4242'))
+    assertEquals(seen[1].method, 'POST')
+    assert(seen[1].url.endsWith('/transfers'))
+
+    const body = JSON.parse(seen[1].body!)
+    assertEquals(body.beneficiary, 4242)
+    assertEquals(body.currency, 'KES')
+    assertEquals(body.amount, 1200)
+    // An array of one object — the transfer shape, not the charge shape.
+    assert(Array.isArray(body.meta))
+    assertEquals(body.meta, [{
+      sender: 'AutoHire Ltd',
+      sender_country: 'RW',
+      mobile_number: '254712345678',
+      first_name: 'Akinyi',
+      last_name: 'Kimwei',
+    }])
+    assertEquals(result, { provider_ref: '9010', status: 'pending' })
+  } finally {
+    restore()
+  }
+})
+
+Deno.test('a RWF wallet transfer carries no meta and asks the rail nothing extra', async () => {
+  const { seen, restore } = interceptMany([
+    { status: 'success', data: { id: 9011, status: 'NEW' } },
+  ])
+  try {
+    await new FlutterwaveProvider(CREDS, '', 'live').release({
+      ...KES_MOMO_PAYOUT,
+      currency: 'RWF',
+      country: 'RW',
+      amount: 45_000,
+    })
+    // One call: the transfer itself. No beneficiary lookup for a corridor that
+    // does not need one.
+    assertEquals(seen.length, 1)
+    assert(seen[0].url.endsWith('/transfers'))
+    const body = JSON.parse(seen[0].body!)
+    assertEquals(body.meta, undefined)
+    assert(!('meta' in body))
+  } finally {
+    restore()
+  }
+})
+
+Deno.test('a KES bank transfer is not an M-Pesa transfer and carries no meta', async () => {
+  const { seen, restore } = interceptMany([
+    { status: 'success', data: { id: 9012, status: 'NEW' } },
+  ])
+  try {
+    await new FlutterwaveProvider(CREDS, '', 'live').release({
+      ...KES_MOMO_PAYOUT,
+      rail: 'flutterwave_bank',
+    })
+    assertEquals(seen.length, 1)
+    assert(!('meta' in JSON.parse(seen[0].body!)))
+  } finally {
+    restore()
+  }
+})
+
+Deno.test('a legacy caller naming no rail gets the transfer it always got', async () => {
+  const { seen, restore } = interceptMany([
+    { status: 'success', data: { id: 9013, status: 'NEW' } },
+  ])
+  try {
+    await new FlutterwaveProvider(CREDS, '', 'test').release({ ...PAYOUT, currency: 'KES' })
+    assertEquals(seen.length, 1)
+    assert(!('meta' in JSON.parse(seen[0].body!)))
+  } finally {
+    restore()
+  }
+})
+
+Deno.test('an M-Pesa transfer with no sender on file is refused before anything is sent', async () => {
+  const { seen, restore } = interceptMany([])
+  try {
+    const p = new FlutterwaveProvider(CREDS, '', 'live')
+    const err = await assertRejects(
+      () => p.release({ ...KES_MOMO_PAYOUT, sender_country: undefined }),
+      PayHoldError,
+    )
+    assertEquals(err.code, 'policy_violation')
+    assert(err.message.includes("sender's name and country"))
+    assert(err.message.includes('no country on file'))
+    // Nothing reached the rail — no lookup, no transfer.
+    assertEquals(seen.length, 0)
+  } finally {
+    restore()
+  }
+})
+
+Deno.test('an M-Pesa transfer with no beneficiary name is refused before anything is sent', async () => {
+  const { seen, restore } = interceptMany([])
+  try {
+    const p = new FlutterwaveProvider(CREDS, '', 'live')
+    const err = await assertRejects(
+      () => p.release({ ...KES_MOMO_PAYOUT, beneficiary_name: '   ' }),
+      PayHoldError,
+    )
+    assert(err.message.includes("beneficiary's name"))
+    assertEquals(seen.length, 0)
+  } finally {
+    restore()
+  }
+})
+
+Deno.test('an M-Pesa transfer whose beneficiary the rail holds no number for is refused, and no transfer is sent', async () => {
+  const { seen, restore } = interceptMany([
+    { status: 'success', data: { id: 4242 } },
+  ])
+  try {
+    const p = new FlutterwaveProvider(CREDS, '', 'live')
+    const err = await assertRejects(() => p.release(KES_MOMO_PAYOUT), PayHoldError)
+    assert(err.message.includes('holds no mobile number for beneficiary 4242'))
+    // The lookup happened; the transfer did not.
+    assertEquals(seen.length, 1)
+    assertEquals(seen[0].method, 'GET')
+  } finally {
+    restore()
+  }
+})
+
+Deno.test('a beneficiary name splits on the first space, and a single word fills both fields', () => {
+  assertEquals(splitBeneficiaryName('Akinyi Kimwei'), { first_name: 'Akinyi', last_name: 'Kimwei' })
+  // Everything after the first space is the last name — a compound surname is
+  // not truncated to its first word.
+  assertEquals(
+    splitBeneficiaryName('Jean de Dieu Habimana'),
+    { first_name: 'Jean', last_name: 'de Dieu Habimana' },
+  )
+  // A person with one name is still a person with two required fields.
+  assertEquals(splitBeneficiaryName('Wanjiru'), { first_name: 'Wanjiru', last_name: 'Wanjiru' })
+  // Stray whitespace is what people type; it is not part of a name.
+  assertEquals(splitBeneficiaryName('  Akinyi   Kimwei  '), { first_name: 'Akinyi', last_name: 'Kimwei' })
+  // Nothing to split is nothing — the caller refuses rather than inventing one.
+  assertEquals(splitBeneficiaryName(''), null)
+  assertEquals(splitBeneficiaryName('   '), null)
+  assertEquals(splitBeneficiaryName(undefined), null)
 })

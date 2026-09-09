@@ -356,8 +356,10 @@ export function RailsPage() {
           under the label opens it. <span className="text-danger">Not supported</span> rows were checked
           and the documentation does not back them — or backs them only on terms this account does not
           meet — and the routing table no longer carries them. <span className="font-semibold">Unchecked</span>{' '}
-          rows are still the original plan: nobody has read the provider’s page for that country yet, which
-          is true of nearly every international card row. None of this is the launch checklist — that
+          rows are still the original plan: nobody has read a provider page that answers for that row. After the
+          {PROVENANCE_CHECKED_ON} reading that is only PayPal collection outside PayPal’s Payouts recipient table,
+          because its buyer-country page could not be read; any other unchecked row means the registry gained a
+          row since, and the fix is to read the page, not to relabel the row. None of this is the launch checklist — that
           gates live money per market and is a person’s signature against a signed agreement, not a reading
           of documentation — and no row here carries live money until that is signed.
         </div>
