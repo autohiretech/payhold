@@ -123,16 +123,19 @@ Deno.test('a corridor we cannot reach is refused rather than queued', () => {
   )
 })
 
-Deno.test('a market Flutterwave pays out to but does not collect in gets a payout-only bank rail', () => {
+Deno.test('a market Flutterwave pays out to but does not collect in gets payout-only rails', () => {
   // Ethiopia: a transfer guide and a momo transfer code, no collection page.
   // The registry says so with `flutterwavePayout` and not `flutterwaveLocal`,
   // and the rail table has to carry that shape or `payoutRoute` promises a
   // corridor no row describes.
   const et = RAILS.filter((r) => r.country === 'ET' && r.provider === 'flutterwave')
-  assertEquals(et.length, 1)
-  assertEquals(et[0].method, 'bank_transfer')
-  assertEquals(et[0].collect, false)
-  assertEquals(et[0].payout, true)
+  assertEquals(et.map((r) => r.method).sort(), ['bank_transfer', 'mobile_money'])
+  // Both are payout-only. Amole Money is on Flutterwave's transfer table with
+  // no collection page behind it, which is the `momoPayout` half of the split.
+  for (const rail of et) {
+    assertEquals(rail.collect, false, rail.method)
+    assertEquals(rail.payout, true, rail.method)
+  }
 
   // …and it never leaks into a checkout.
   assertEquals(collectionRails('ET', 'ETB'), [])
@@ -141,7 +144,8 @@ Deno.test('a market Flutterwave pays out to but does not collect in gets a payou
 
   const route = payoutRoute('ET', 'ETB')
   assertEquals(route.provider, 'flutterwave')
-  assertEquals(route.kind, 'bank')
+  // A payable wallet wins over the bank, here as everywhere.
+  assertEquals(route.kind, 'momo')
   assertEquals(route.blocked, false)
 })
 

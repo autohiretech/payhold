@@ -94,6 +94,10 @@ export const MOMO_NETWORKS: Record<Country, MomoNetwork[]> = {
     { label: 'MTN', code: 'MTN' },
     { label: 'Orange Money', code: 'ORANGEMONEY' },
   ],
+  // Transfers only. Flutterwave's transfer table names Amole Money for
+  // Ethiopia and there is no v3 collection page behind it, which is why the
+  // registry marks ET `momoPayout` without `momo`.
+  ET: [{ label: 'Amole Money', code: 'AMOLEMONEY' }],
   CI: [
     { label: 'MTN', code: 'MTN' },
     { label: 'Orange Money', code: 'ORANGE' },
@@ -130,6 +134,7 @@ const DIAL_CODE: Record<Country, string> = {
   ZA: '27',
   EG: '20',
   BF: '226',
+  ET: '251',
   ML: '223',
 }
 

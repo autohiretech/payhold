@@ -1,4 +1,5 @@
-import { assertEquals, assertThrows } from 'jsr:@std/assert@1'
+import { assert, assertEquals, assertThrows } from 'jsr:@std/assert@1'
+import { COUNTRIES } from './countries.ts'
 import {
   MOMO_NETWORKS,
   momoBankCode,
@@ -83,4 +84,41 @@ Deno.test('normalizeMsisdn: nonsense refuses', () => {
   // A country we cannot pay has no dialling code here, and guessing one would
   // produce a beneficiary that looks fine.
   assertThrows(() => normalizeMsisdn('0788123456', 'JP'), PayHoldError)
+})
+
+// ---------------------------------------------------------------------------
+// The registry and this table have to agree, or a host is offered a corridor
+// that cannot be registered.
+//
+// This is the check that was missing. `countries.ts` said Burkina Faso could
+// be paid to a wallet; `MOMO_NETWORKS` had no Burkinabe entry, so
+// `momoNetworksFor` returned nothing, `momoBankCode` refused every wallet name
+// a host could type, and the bank list was empty too — a market advertised as
+// payable with no way to be paid. Nothing failed until someone in Ouagadougou
+// tried.
+
+Deno.test('every market with a payable wallet names its wallets and its dialling code', () => {
+  for (const info of COUNTRIES.filter((c) => c.momoPayout)) {
+    const networks = momoNetworksFor(info.code)
+    assert(
+      networks.length > 0,
+      `${info.code} is marked momoPayout and MOMO_NETWORKS names no wallet for it`,
+    )
+    for (const network of networks) {
+      // Refuses rather than guessing, so this is the whole registration path.
+      assert(momoBankCode(info.code, network.label), `${info.code}/${network.label}`)
+    }
+    // A beneficiary cannot be created without the number in the rail's shape.
+    assertEquals(
+      normalizeMsisdn('0788123456', info.code).startsWith('0'),
+      false,
+      `${info.code} has no dialling code`,
+    )
+  }
+})
+
+Deno.test('this table claims no market the registry does not', () => {
+  const payable = COUNTRIES.filter((c) => c.momoPayout).map((c) => c.code).sort()
+  const mapped = Object.keys(MOMO_NETWORKS).sort()
+  assertEquals(mapped, payable)
 })

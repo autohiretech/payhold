@@ -272,14 +272,21 @@ FLUTTERWAVE_LOCAL = {
 #                    TZ (bank "only available to businesses registered in Tanzania").
 # Not here: EG and MW (bank and wallet both "submit a request"), SL (documented
 # in SLL, which this registry does not price).
+# Burkina Faso is deliberately absent, against its own documentation. The
+# transfer guide exists, but Flutterwave's `/banks/BF` errors — no bank codes,
+# and `tokenize` cannot mint a bank beneficiary without one — while the momo
+# transfer table names no Burkinabe network either. Checked live 2026-09-10:
+# every neighbour answered (CI 30 banks, SN 25, RW 34, ET 21) and BF alone did
+# not. A corridor nobody can register a destination on is not a corridor.
 FLUTTERWAVE_PAYOUT = {
-    "RW", "UG", "GH", "NG", "ZA", "ZM", "CI", "SN", "CM", "BF", "ET",
+    "RW", "UG", "GH", "NG", "ZA", "ZM", "CI", "SN", "CM", "ET",
     "KE", "TZ",
 }
 
 # Mobile money, with the wallets Flutterwave names per market.
 MOMO = {
     "BF": ["Orange Money", "Mobicash"],
+    "ET": ["Amole Money"],
     "CI": ["MTN", "Orange Money", "Wave"],
     "CM": ["MTN", "Orange Money"],
     "GH": ["MTN", "Telecel", "AirtelTigo"],
@@ -291,6 +298,16 @@ MOMO = {
     "UG": ["MTN", "Airtel Money"],
     "ZM": ["MTN", "Airtel Money", "Zamtel"],
 }
+
+# **Collecting a wallet payment and sending one are different lists**, and
+# conflating them is what told a Burkinabe host they would be paid to a wallet
+# that could never be registered. Flutterwave documents mobile money collection
+# for BF and no transfer codes for it; Ethiopia is the exact reverse — Amole
+# Money is on the transfer table with no v3 collection page behind it. So the
+# registry carries both facts, and `momoNetworks` above stays the answer to
+# "which wallets exist here" rather than to either question.
+MOMO_COLLECT = {"BF", "CI", "CM", "GH", "KE", "MW", "RW", "SN", "TZ", "UG", "ZM"}
+MOMO_PAYOUT = {"CI", "CM", "ET", "GH", "KE", "RW", "SN", "TZ", "UG", "ZM"}
 
 # Comprehensively sanctioned or embargoed. No acquirer will process a card
 # here, so claiming universal coverage would be a lie. Needs legal review.
@@ -316,6 +333,8 @@ def render(backend: bool) -> str:
     copy drifts the first time coverage changes.
     """
     codes = [row[0] for row in COUNTRIES]
+    for code in MOMO_COLLECT | MOMO_PAYOUT:
+        assert code in MOMO, f"{code} is marked momo but names no wallets"
     assert len(codes) == len(set(codes)), "duplicate country code"
 
     currencies = sorted({row[2] for row in COUNTRIES} | {"USD", "EUR", "GBP"})
@@ -375,8 +394,10 @@ def render(backend: bool) -> str:
     w("  region: Region")
     w("  /** Flutterwave documents collection in this country's own currency. */")
     w("  flutterwaveLocal: boolean")
-    w("  /** Mobile money is available here. */")
+    w("  /** Flutterwave documents mobile money *collection* here. */")
     w("  momo: boolean")
+    w("  /** Flutterwave documents mobile money *transfers* to here. */")
+    w("  momoPayout: boolean")
     w("  /** Named wallets. Empty with `momo: true` means the list is unconfirmed. */")
     w("  momoNetworks: string[]")
     w("  /**")
@@ -437,16 +458,17 @@ def render(backend: bool) -> str:
         if region != current_region:
             w(f"  // --- {region} " + "-" * max(4, 66 - len(region)))
             current_region = region
-        networks = MOMO.get(code)
+        networks = MOMO.get(code, [])
         fields = [
             f"code: {ts_string(code)}",
             f"name: {ts_string(name)}",
             f"currency: {ts_string(currency)}",
             f"region: {ts_string(region)}",
             f"flutterwaveLocal: {'true' if code in FLUTTERWAVE_LOCAL else 'false'}",
-            f"momo: {'true' if networks is not None else 'false'}",
+            f"momo: {'true' if code in MOMO_COLLECT else 'false'}",
+            f"momoPayout: {'true' if code in MOMO_PAYOUT else 'false'}",
             "momoNetworks: ["
-            + ", ".join(ts_string(n) for n in (networks or []))
+            + ", ".join(ts_string(n) for n in networks)
             + "]",
             f"flutterwavePayout: {'true' if code in FLUTTERWAVE_PAYOUT else 'false'}",
             f"stripePayout: {'true' if code in STRIPE_PAYOUT else 'false'}",

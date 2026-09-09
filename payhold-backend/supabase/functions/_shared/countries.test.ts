@@ -40,7 +40,7 @@ Deno.test('Flutterwave collects locally in exactly the thirteen markets its coll
 Deno.test('Flutterwave pays out to exactly the thirteen markets with an ungated transfer guide or a momo transfer code', () => {
   assertEquals(
     codes((c) => c.flutterwavePayout),
-    ['BF', 'CI', 'CM', 'ET', 'GH', 'KE', 'NG', 'RW', 'SN', 'TZ', 'UG', 'ZA', 'ZM'],
+    ['CI', 'CM', 'ET', 'GH', 'KE', 'NG', 'RW', 'SN', 'TZ', 'UG', 'ZA', 'ZM'],
   )
 })
 

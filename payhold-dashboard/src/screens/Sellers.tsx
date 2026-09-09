@@ -141,7 +141,9 @@ function payoutOptionsFor(country: Country): PayoutProvider[] {
   if (!info) return []
 
   const options: PayoutProvider[] = []
-  if (info.momo && info.flutterwavePayout) options.push('flutterwave_momo')
+  // `momoPayout`, not `momo` — the second says a buyer there can pay from a
+  // wallet, which is a different question from whether we can send to one.
+  if (info.momoPayout) options.push('flutterwave_momo')
   if (info.flutterwavePayout) options.push('flutterwave_bank')
   if (info.stripePayout) options.push('stripe_connect')
   return options

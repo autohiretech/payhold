@@ -72,7 +72,7 @@ describe('payout_routes: widened to the registry, pruned, then matched to what t
 
   test('flutterwave_bank carries exactly the corridors with an ungated transfer guide', async () => {
     const r = await row('flutterwave_bank')
-    expect(sorted(r.countries)).toEqual(sorted(['RW', 'UG', 'GH', 'NG', 'ZA', 'ZM', 'CI', 'SN', 'CM', 'BF', 'ET']))
+    expect(sorted(r.countries)).toEqual(sorted(['RW', 'UG', 'GH', 'NG', 'ZA', 'ZM', 'CI', 'SN', 'CM', 'ET']))
     expect(sorted(r.currencies)).toEqual(sorted(['RWF', 'UGX', 'GHS', 'NGN', 'ZAR', 'ZMW', 'XOF', 'XAF', 'ETB']))
   })
 
@@ -115,7 +115,9 @@ describe('payout_routes: widened to the registry, pruned, then matched to what t
   })
 
   test('the Flutterwave bank row carries BF in XOF — a transfer guide exists', async () => {
-    expect(await inRoute('flutterwave_bank', 'BF', 'XOF')).toBe(true)
+    // Removed again by 20260910000002: the guide exists, the bank list does
+    // not, so nothing can be registered there. See that migration.
+    expect(await inRoute('flutterwave_bank', 'BF', 'XOF')).toBe(false)
   })
 
   test.each([

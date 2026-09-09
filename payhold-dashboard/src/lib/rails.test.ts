@@ -254,16 +254,20 @@ describe('payout routing — where money can actually go', () => {
     expect(collectionRails('EG', 'EGP').length).toBeGreaterThan(0)
   })
 
-  it('pays an Ethiopian seller by bank transfer even though nothing collects locally there', () => {
-    // The reverse of Egypt: a transfer guide and a momo transfer code, no
-    // collection channel. The rail is payout-only and never reaches checkout.
+  it('pays an Ethiopian seller to a wallet or a bank, though nothing collects locally there', () => {
+    // The reverse of Egypt: a transfer guide and an Amole Money transfer code,
+    // no collection channel behind either. Both rails are payout-only and
+    // neither reaches checkout.
     const route = payoutRoute('ET', 'ETB')
     expect(route.provider).toBe('flutterwave')
-    expect(route.kind).toBe('bank')
+    expect(route.kind).toBe('momo')
     expect(route.blocked).toBe(false)
 
-    expect(payoutRails('ET')).toHaveLength(1)
-    expect(payoutRails('ET')[0]?.collect).toBe(false)
+    expect(payoutRails('ET').map((r) => r.method).sort()).toEqual([
+      'bank_transfer',
+      'mobile_money',
+    ])
+    expect(payoutRails('ET').every((r) => !r.collect)).toBe(true)
     expect(collectionRails('ET', 'ETB')).toHaveLength(0)
     expect(marketSummary('ET').hasLocalRails).toBe(false)
   })

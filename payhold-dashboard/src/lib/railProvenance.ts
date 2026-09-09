@@ -200,7 +200,6 @@ const FW_BANK_DOCUMENTED_NOTE: Partial<Record<Country, string>> = {
   ET: 'Transfer guide exists for ETB with no extra fields — new since the table was first written.',
   CI: 'Transfer guide exists; destination_branch_code is optional.',
   SN: 'Transfer guide exists; destination_branch_code is optional.',
-  BF: 'Transfer guide exists; its example sends destination_branch_code, which varies by bank — plumb it before launch.',
   CM: 'Transfer guide exists; its example sends destination_branch_code, which varies by bank — plumb it before launch.',
   GH: 'Transfer guide exists; destination_branch_code is “required for banks that have branches” — plumb it before launch.',
   UG: 'Transfer guide exists; its example sends destination_branch_code, which varies by bank — plumb it before launch.',
@@ -209,6 +208,12 @@ const FW_BANK_DOCUMENTED_NOTE: Partial<Record<Country, string>> = {
 const FW_BANK_DOCUMENTED = Object.keys(FW_BANK_DOCUMENTED_NOTE)
 
 const FW_BANK_UNSUPPORTED_NOTE: Partial<Record<Country, string>> = {
+  // Documented, and still undeliverable: the transfer guide is real, but
+  // `/banks/BF` errors, so there is no bank code to render or to mint a
+  // beneficiary with. Checked live 2026-09-10 — CI, SN, RW and ET all
+  // answered on the same call and BF did not. Documented and deliverable are
+  // different claims and this row is the difference.
+  BF: 'Transfer guide exists, but Flutterwave returns no bank list for Burkina Faso, so no destination can be registered. Removed from the routing table 2026-09-10.',
   KE: 'Documented as “not available by default — submit a request”; also needs sender_id_number and sender_id_type in meta.',
   TZ: 'Documented as “only available to businesses registered in Tanzania”, with sender, sender_country and sender_address in meta.',
   EG: 'Documented as “not available by default — submit a request”, for Class A/B merchants with extensive meta.',

@@ -86,15 +86,22 @@ function buildRails(): Rail[] {
   for (const info of COUNTRIES) {
     const { code, currency } = info
 
-    if (info.momo) {
+    // Collecting a wallet payment and sending one are separate capabilities,
+    // and this rail carries both flags rather than one. Burkina Faso can be
+    // charged and cannot be paid — Flutterwave publishes no transfer codes for
+    // it — and Ethiopia is the reverse. Deriving `payout` from the country's
+    // flag instead told a Burkinabe host they would be paid to a wallet that
+    // `momoBankCode` would then refuse to register, with no bank list behind
+    // it either: a dead end presented as a working corridor.
+    if (info.momo || info.momoPayout) {
       rails.push({
         method: 'mobile_money',
         country: code,
         currencies: [currency],
         provider: 'flutterwave',
         networks: info.momoNetworks,
-        collect: true,
-        payout: info.flutterwavePayout,
+        collect: info.momo,
+        payout: info.momoPayout,
         note: info.momoNetworks.length
           ? undefined
           : 'Flutterwave lists mobile money here but does not name the networks — confirm which wallets work before launch.',
