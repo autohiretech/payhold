@@ -239,6 +239,14 @@ COUNTRIES = [
     ("VE", "Venezuela", "VES", "South America"),
 ]
 
+# **PayHold's own Stripe platform account is registered in the United States.**
+# Confirmed by the account holder 2026-09-10. Recorded here because every claim
+# in `STRIPE_PAYOUT` depends on it and it was written down nowhere: Stripe's
+# self-serve cross-border payouts are available only to platforms in the US,
+# UK, EEA, Canada or Switzerland, so a platform elsewhere — Rwanda, where the
+# business operates, is not a Stripe platform country at all — would reach none
+# of these. The US satisfies that test, which is why this list stands.
+#
 # Stripe: fully available for a business account with payouts. stripe.com/global.
 STRIPE_PAYOUT = {
     "AU", "AT", "BE", "BR", "BG", "CA", "HR", "CY", "CZ", "DK", "EE", "FI",

@@ -443,6 +443,17 @@ place registering and changing a destination are checked identically, and
 may pick (plus `banks`, opt-in with `&banks=1`, since bank codes are a list
 Flutterwave publishes rather than one we can transcribe).
 
+**PayHold's Stripe platform account is registered in the United States**, and
+the business operates from Rwanda. Confirmed 2026-09-10; recorded because every
+Stripe corridor depends on it and it was written down nowhere, so each time the
+question came up it had to be asked again. Self-serve cross-border payouts are
+open only to platforms in the US, UK, EEA, Canada or Switzerland — Rwanda is not
+a Stripe platform country at all — so the US registration is what makes the 35
+`stripe_connect` corridors reachable rather than aspirational. It also settles
+the UAE, which `docs.stripe.com/payouts` limits to cross-border payouts
+accounts: a US platform can hold one. What still binds the UAE is narrower and
+real — Stripe onboards licensed businesses only there, no individuals.
+
 **`payout.methods` is the list a client offers from — not `payout.kind`.**
 `kind` names the preferred destination and is a single value; a market is not.
 Kenya, Tanzania and Malawi take a wallet while their bank corridor sits behind

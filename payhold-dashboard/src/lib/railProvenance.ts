@@ -129,6 +129,7 @@ const STRIPE_CROSS_BORDER = 'https://docs.stripe.com/connect/cross-border-payout
 const STRIPE_EXPRESS = 'https://docs.stripe.com/connect/express-accounts'
 const STRIPE_CURRENCIES = 'https://docs.stripe.com/currencies'
 const STRIPE_GLOBAL = 'https://stripe.com/global'
+const STRIPE_UAE = 'https://support.stripe.com/questions/connect-availability-in-the-uae'
 
 const PAYPAL_COUNTRIES = 'https://developer.paypal.com/docs/payouts/standard/reference/country-feature/'
 const PAYPAL_CURRENCIES = 'https://developer.paypal.com/api/rest/reference/currency-codes/'
@@ -216,6 +217,20 @@ const STRIPE_IN_REGION = [
   'AT', 'BE', 'BG', 'CY', 'CZ', 'DE', 'DK', 'EE', 'ES', 'FI', 'FR', 'GR', 'HR', 'HU', 'IE', 'IT',
   'LI', 'LT', 'LU', 'LV', 'MT', 'NL', 'NO', 'PL', 'PT', 'RO', 'SE', 'SI', 'SK',
 ]
+// **PayHold's own Stripe account is registered in the United States** — the
+// pivotal fact these rows turn on, confirmed by the account holder 2026-09-10
+// and recorded here because it was previously written down nowhere and every
+// Stripe claim depends on it. The US is inside the self-serve cross-border
+// region, so the region test below is satisfied rather than assumed.
+//
+// It also means "the platform would have to be in this country" is the wrong
+// reason for these ten. Stripe's own platform-country endpoint, asked for
+// platformCountry=US, returns every one of them as an onboardable account
+// country — AU, BR, GI, HK, JP, MX, NZ, SG and TH with a full service
+// agreement, MY as recipient-only. That contradicts the cross-border page's
+// "recipients must be in those same regions", and the contradiction is not
+// resolvable from public documentation, so these stay `unsupported` and the
+// note says which way the evidence points rather than pretending it is settled.
 const STRIPE_OUT_OF_REGION = ['AU', 'BR', 'GI', 'HK', 'JP', 'MX', 'MY', 'NZ', 'SG', 'TH']
 
 // --- Flutterwave bank-transfer payouts -------------------------------------
@@ -362,11 +377,18 @@ const paypalPayoutUnsupported = {
 export const PROVENANCE_CLAIMS: Record<string, ProvenanceRecord> = {
   // --- Stripe Connect payouts -----------------------------------------------
   ...many('payout', 'stripe', STRIPE_IN_REGION,
-    doc(STRIPE_CROSS_BORDER, 'Full service agreement; inside Stripe’s self-serve cross-border region (US, UK, EEA, CA, CH) — requires PayHold’s own Stripe account to be in that region.'), 'bank_transfer'),
+    doc(STRIPE_CROSS_BORDER, 'Full service agreement; inside Stripe’s self-serve cross-border region (US, UK, EEA, CA, CH), and PayHold’s own Stripe account is registered in the United States, so that condition is met.'), 'bank_transfer'),
   ...many('payout', 'stripe', STRIPE_OUT_OF_REGION,
-    no(STRIPE_CROSS_BORDER, `Outside Stripe’s self-serve cross-border region — the platform account would have to be in this country (see also ${STRIPE_EXPRESS}).`), 'bank_transfer'),
+    no(STRIPE_CROSS_BORDER, `Outside Stripe’s self-serve cross-border region. Stripe’s platform-country endpoint does list this as onboardable from a US platform, which PayHold is, so the evidence is genuinely mixed — not re-opened on a reading of two pages that disagree (see also ${STRIPE_EXPRESS}).`), 'bank_transfer'),
+  // The UAE was flagged as the one country in this table promising a payout
+  // that might not be deliverable. With the platform account in the US that
+  // reason falls away: `docs.stripe.com/payouts` restricts the UAE to
+  // cross-border payouts accounts, which a US platform can hold, and Stripe's
+  // own platform-country endpoint returns AE as onboardable from US with the
+  // `transfers` capability. What survives is narrower and real — no
+  // individuals — which for a marketplace of private hosts is most of them.
   [keyOf('payout', 'stripe', 'AE', 'bank_transfer')]:
-    no(STRIPE_CROSS_BORDER, `Outside Stripe’s self-serve cross-border region, and Stripe onboards licensed businesses only in the UAE — no individuals (see also ${STRIPE_EXPRESS}).`),
+    doc(STRIPE_UAE, `Onboardable from a US platform, which PayHold is, and the UAE's cross-border-payouts-account restriction is satisfied by that. Licensed businesses only — Stripe onboards no individuals in the UAE, so a private host cannot be paid here (see also ${STRIPE_EXPRESS}).`),
 
   // --- Flutterwave bank-transfer payouts ------------------------------------
   ...each('payout', 'flutterwave', FW_BANK_DOCUMENTED,
