@@ -804,6 +804,25 @@ export interface AddDestinationInput {
 
 export type PayHoldErrorCode =
   | 'not_found'
+  /**
+   * No such route on this function — as distinct from `not_found`, which means
+   * the route exists and the *thing* does not.
+   *
+   * Both are 404s and were the same code until 2026-09-10, which forced every
+   * client to tell them apart by reading the message. A real one did: four
+   * AutoHire functions treated any PayHold 404 as "this seller is gone" and
+   * repaired the link by clearing it and re-registering, on the reasoning that
+   * the call named no other resource. That reasoning was sound until the
+   * router's 404 began echoing the request path — at which point
+   * `POST /sellers/<uuid>/connect is not a route` was a 404 containing the word
+   * "sellers", and a renamed endpoint would have silently unlinked a host and
+   * re-registered them from scratch.
+   *
+   * A code is the fix; a better-worded message is not. String-matching an error
+   * is a contract nobody wrote down, and changing an error's *shape* is an API
+   * change even when the wording is an improvement.
+   */
+  | 'unknown_route'
   | 'invalid_state'
   | 'policy_violation'
   | 'insufficient_balance'
@@ -823,6 +842,10 @@ export class PayHoldError extends Error {
 /** HTTP status for each error code, so handlers never pick one by hand. */
 export const ERROR_STATUS: Record<PayHoldErrorCode, number> = {
   not_found: 404,
+  // The same status as `not_found` on purpose: it is still "there is nothing
+  // here". Only the code separates them, which is exactly what a client needs
+  // to stop guessing from prose.
+  unknown_route: 404,
   invalid_state: 409,
   policy_violation: 422,
   insufficient_balance: 409,

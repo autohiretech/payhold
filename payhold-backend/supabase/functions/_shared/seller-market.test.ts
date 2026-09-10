@@ -94,19 +94,22 @@ Deno.test('no country anywhere is null, for the caller to phrase', () => {
 
 Deno.test('a defaulted country says which country we hold, and what to do about it', () => {
   const market = resolveSellerMarket({}, MOVED)!
+  // `assertRailOnRoute`'s sentence as it now reads. It was
+  // `paypal cannot pay a destination in RW.` on the day a host was shown it,
+  // and both halves of that were fixed in the same change: the rail's own name
+  // and the country's, here, and where the country came from, below.
   const refused = withCountryProvenance(
     new PayHoldError(
       'policy_violation',
-      'paypal cannot pay a destination in RW. Paid in RWF via Flutterwave, to a ' +
-        'mobile money wallet or bank account in Rwanda.',
+      'PayPal payouts are not available in Rwanda. Paid in RWF via Flutterwave, ' +
+        'to a mobile money wallet or bank account in Rwanda. Choose one of the ' +
+        'other payout methods offered for Rwanda.',
     ),
     market,
   ) as PayHoldError
 
-  // The original sentence is kept verbatim — it is `route_payout`'s own, shared
-  // with the Earnings screen, and one fact should read as one sentence
-  // wherever it appears.
-  assertStringIncludes(refused.message, 'paypal cannot pay a destination in RW.')
+  // Whatever the refusal said is kept verbatim — this only adds to it.
+  assertStringIncludes(refused.message, 'PayPal payouts are not available in Rwanda.')
 
   // This message is shown to a car owner, unedited, by the tenant's own app.
   // So: the country by name, ours rather than theirs, and the one thing they
@@ -116,7 +119,7 @@ Deno.test('a defaulted country says which country we hold, and what to do about 
   assertStringIncludes(refused.message, 'We still have Rwanda as your payout country.')
   assertStringIncludes(
     refused.message,
-    'If you have moved, update your payout country on your payout screen and try again.',
+    'If you have moved, update your payout country and try again.',
   )
   for (const jargon of ['record', 'field', 'request', 'seller', 'country"', 'RW,']) {
     assertEquals(
@@ -174,4 +177,15 @@ Deno.test('the note survives a country the registry does not carry', () => {
   const note = defaultedCountryNote({ country: 'ZZ', currency: 'USD', country_source: 'seller' })
   assertStringIncludes(note, 'ZZ')
   assertStringIncludes(note, 'update your payout country')
+})
+
+Deno.test('no refusal sends a host to the screen they are already on', () => {
+  // Every one of these renders as a toast **on** the payout screen, so "update
+  // your payout country on your payout screen" tells somebody to go where they
+  // are standing. Same class of uselessness as naming an API path: true, and
+  // not an instruction. PayHold owns the fact and the action; where to do it
+  // belongs to whoever drew the screen, who can put the control a tap away.
+  const note = defaultedCountryNote({ country: 'RW', currency: 'RWF', country_source: 'seller' })
+  assertEquals(note.includes('payout screen'), false, note)
+  assertEquals(note.includes('update your payout country'), true, note)
 })

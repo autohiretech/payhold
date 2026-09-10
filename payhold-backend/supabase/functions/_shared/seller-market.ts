@@ -147,7 +147,7 @@ function blankRefused(
  */
 export function defaultedCountryNote(market: SellerMarket): string {
   return `We still have ${countryLabel(market.country)} as your payout country. ` +
-    `If you have moved, update your payout country on your payout screen and try again.`
+    `If you have moved, update your payout country and try again.`
 }
 
 /**

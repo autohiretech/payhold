@@ -1060,7 +1060,7 @@ async function connectAccountFor(
     throw new PayHoldError(
       'policy_violation',
       'We do not have a payout country for you yet. ' +
-        'Choose your payout country on your payout screen and try again.',
+        'Choose your payout country and try again.',
     )
   }
   const { country, currency } = market
@@ -1085,7 +1085,7 @@ async function connectAccountFor(
         // Stripe that does not reach them — and the action is the other
         // methods their own screen already offers.
         `We cannot pay out to ${countryLabel(country)} through Stripe. ` +
-          'Choose one of the other payout methods on your payout screen.',
+          'Choose one of the other payout methods.',
       ),
       market,
     )
@@ -1278,7 +1278,7 @@ async function connectStatus(
       `Your Stripe account is ready${
         accountCountry ? `, and Stripe opened it in ${countryLabel(accountCountry.toUpperCase())}` : ''
       }, but we do not have a payout country for you yet. ` +
-        `Choose your payout country on your payout screen and try again.`,
+        `Choose your payout country and try again.`,
     )
   }
 
@@ -1308,8 +1308,7 @@ async function connectStatus(
       `Stripe opened your account in ${countryLabel(accountCountry.toUpperCase())}, and we still have ` +
         `${countryLabel(seller.country)} as your payout country. Stripe fixes that ` +
         `country when the account is created and it cannot be changed afterwards, so ` +
-        `update your payout country to ${countryLabel(accountCountry.toUpperCase())} on your payout ` +
-        `screen and try again.`,
+        `update your payout country to ${countryLabel(accountCountry.toUpperCase())} and try again.`,
     )
   }
 

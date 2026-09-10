@@ -112,7 +112,7 @@ describe('§5.1 — a destination may only claim a rail its corridor is paid on'
     expect(err.code).toBe('policy_violation')
     // The opening words are `route_payout`'s, so the sentence a seller saw on
     // their Earnings page is the one the client now sees at registration.
-    expect(err.message).toMatch(/^stripe_connect cannot pay a destination in RW\./)
+    expect(err.message).toMatch(/^Stripe payouts are not available in Rwanda\./)
     expect(err.message).toMatch(/via Flutterwave/)
     expect(err.message).toMatch(/other payout methods offered for Rwanda/)
     expect(err.message).not.toMatch(/payment-options|GET \//)
@@ -145,21 +145,21 @@ describe('§5.1 — a destination may only claim a rail its corridor is paid on'
     const rows = await rails('US', 'USD')
     const err = refusal(() => assertRailOnRoute('flutterwave_momo', 'US', payoutRoute('US', 'USD'), rows))
     expect(err.code).toBe('policy_violation')
-    expect(err.message).toMatch(/^flutterwave_momo cannot pay a destination in US\./)
+    expect(err.message).toMatch(/^Mobile money payouts are not available in the United States\./)
   })
 
   test('a rail nobody declared is refused before anything is tokenized', async () => {
     const rows = await rails('RW', 'RWF')
     const err = refusal(() => assertRailOnRoute('card', 'RW', payoutRoute('RW', 'RWF'), rows))
     expect(err.code).toBe('policy_violation')
-    expect(err.message).toMatch(/is not a payout method PayHold knows/)
+    expect(err.message).toMatch(/^That is not a payout method we offer\./)
   })
 
   test('no rows at all fails closed', () => {
     // `route_evaluation` judges every declared rail, so an empty answer is a
     // corridor nothing carries rather than a question nobody asked.
     const err = refusal(() => assertRailOnRoute('flutterwave_momo', 'RW', payoutRoute('RW', 'RWF'), []))
-    expect(err.message).toMatch(/^flutterwave_momo cannot pay a destination in RW\./)
+    expect(err.message).toMatch(/^Mobile money payouts are not available in Rwanda\./)
   })
 
   test('a table row naming a different adapter from the map is refused as a fault', () => {
@@ -168,6 +168,46 @@ describe('§5.1 — a destination may only claim a rail its corridor is paid on'
     // refused rather than resolved in favour of either.
     const rows = [{ payout_provider: 'paypal', provider: 'stripe', reason_code: 'eligible' }]
     const err = refusal(() => assertRailOnRoute('paypal', 'US', payoutRoute('US', 'USD'), rows))
-    expect(err.message).toMatch(/carried by stripe in the routing table but PayHold mints/)
+    expect(err.code).toBe('policy_violation')
+    // The two adapter names went to the log, where the person who can fix the
+    // row is. What a host is told is that it is ours to fix and what to pick
+    // meanwhile — `stripe`, `paypal` and "routing table" name nothing they can
+    // do anything about, and reading them on a phone is how a payout screen
+    // convinces somebody the money is lost.
+    expect(err.message).toBe(
+      'PayPal payouts are not working right now, and it is a problem on our side ' +
+        'rather than anything you did. ' +
+        'Choose one of the other payout methods offered for the United States.',
+    )
+  })
+
+  test('no refusal here speaks in identifiers, paths or codes', () => {
+    // The guard that has to outlive whatever the wording settles on. A car
+    // owner reads every one of these verbatim — AutoHire forwards PayHold's
+    // `message` into a toast on their payout screen — and the three ways the
+    // original sentence failed them were an API path they cannot open, a rail
+    // id (`paypal`, `stripe_connect`) that is our column value rather than the
+    // name of anything they picked, and a two-letter country code they have to
+    // decode before they can act. Positive wording is a judgement; these three
+    // are not, so they are asserted over every refusal this file can raise.
+    const messages = [
+      refusal(() => assertRailOnRoute('stripe_connect', 'RW', payoutRoute('RW', 'RWF'), [])),
+      refusal(() => assertRailOnRoute('flutterwave_momo', 'US', payoutRoute('US', 'USD'), [])),
+      refusal(() => assertRailOnRoute('card', 'RW', payoutRoute('RW', 'RWF'), [])),
+      refusal(() =>
+        assertRailOnRoute('paypal', 'US', payoutRoute('US', 'USD'), [
+          { payout_provider: 'paypal', provider: 'stripe', reason_code: 'eligible' },
+        ])
+      ),
+    ].map((e) => e.message)
+
+    for (const message of messages) {
+      expect(message).not.toMatch(/payment-options|GET \/|POST \//)
+      // Any `snake_case` token: rail ids, column names, reason codes.
+      expect(message).not.toMatch(/[a-z]+_[a-z]+/)
+      // A bare country code, as distinct from a currency (`RWF` survives, and
+      // should — it is what the money will arrive as).
+      expect(message).not.toMatch(/\b(RW|US|KE|ZA|TZ|AE|GB)\b/)
+    }
   })
 })

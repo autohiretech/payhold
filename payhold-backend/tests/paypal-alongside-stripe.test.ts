@@ -33,6 +33,7 @@ import {
   assertRailOnRoute,
   assertRailSwitchedOnRows,
   evaluateRails,
+  railLabel,
   railRoute,
   type RouteEvaluator,
 } from '../supabase/functions/sellers/rail-adapter'
@@ -164,7 +165,7 @@ describe('the Rwanda incident is refused by exactly the same sentence as before'
     // check is the whole of the defence.
     const err = await refusal(() => register('stripe_connect', 'RW', 'RWF'))
     expect(err.code).toBe('policy_violation')
-    expect(err.message).toMatch(/^stripe_connect cannot pay a destination in RW\./)
+    expect(err.message).toMatch(/^Stripe payouts are not available in Rwanda\./)
     expect(err.message).toMatch(/via Flutterwave/)
     expect(err.message).toMatch(/other payout methods offered for Rwanda/)
     expect(err.message).not.toMatch(/payment-options|GET \//)
@@ -180,13 +181,13 @@ describe('the Rwanda incident is refused by exactly the same sentence as before'
     // and RWF is not a currency the FX table can price for the row either. A
     // rail the table does not carry is refused exactly as Stripe is.
     const err = await refusal(() => register('paypal', 'RW', 'RWF'))
-    expect(err.message).toMatch(/^paypal cannot pay a destination in RW\./)
+    expect(err.message).toMatch(/^PayPal payouts are not available in Rwanda\./)
     expect(await methodsFor('RW', 'RWF')).not.toContain('paypal')
   })
 
   test('a rail nobody declared is still refused before anything is tokenized', async () => {
     const err = await refusal(() => register('card', 'US', 'USD'))
-    expect(err.message).toMatch(/is not a payout method PayHold knows/)
+    expect(err.message).toMatch(/^That is not a payout method we offer\./)
   })
 })
 
@@ -222,7 +223,9 @@ describe('a rail whose route row is disabled is still refused', () => {
     for (const rail of ['venmo', 'cash_app_pay']) {
       const err = await refusal(() => register(rail, 'US', 'USD'))
       expect(err.code).toBe('policy_violation')
-      expect(err.message).toMatch(new RegExp(`^${rail} cannot pay a destination in US\\.`))
+      expect(err.message).toMatch(
+        new RegExp(`^${railLabel(rail)} payouts are not available in the United States\\.`),
+      )
     }
     const methods = await methodsFor('US', 'USD')
     expect(methods).toEqual(['connect', 'paypal'])
@@ -244,7 +247,7 @@ describe('a rail whose route row is disabled is still refused', () => {
     )
     try {
       const err = await refusal(() => register('paypal', 'US', 'USD'))
-      expect(err.message).toMatch(/^paypal cannot pay a destination in US\./)
+      expect(err.message).toMatch(/^PayPal payouts are not available in the United States\./)
       expect(await methodsFor('US', 'USD')).toEqual(['connect'])
       // And the rail the market is actually preferred on is untouched by it.
       await expect(register('stripe_connect', 'US', 'USD')).resolves.toBeUndefined()

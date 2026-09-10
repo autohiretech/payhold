@@ -177,7 +177,7 @@ export function routeNotFound(
   from: number,
 ): PayHoldError {
   return new PayHoldError(
-    'not_found',
+    'unknown_route',
     `${method} /${segments.slice(from).join('/')} is not a route`,
   )
 }

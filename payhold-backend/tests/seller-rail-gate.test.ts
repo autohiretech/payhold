@@ -98,7 +98,7 @@ describe('assertRailSwitchedOn — the table, not the registry, says whether a r
     const err = await refusal(() => assertRailSwitchedOn(db, tenant, 'flutterwave_bank', 'KE', 'KES'))
     expect(err.code).toBe('policy_violation')
     expect(err.message).toBe(
-      'flutterwave_bank is not switched on for KE — ' +
+      'Bank transfer payouts are switched off for Kenya at the moment. ' +
         'Choose one of the other payout methods offered for Kenya.',
     )
   })
@@ -128,18 +128,18 @@ describe('assertRailSwitchedOn — the table, not the registry, says whether a r
 
   test('a rail the tenant switched off is refused even where the platform may carry it', async () => {
     const err = await refusal(() => assertRailSwitchedOn(db, tenant, 'stripe_connect', 'US', 'USD'))
-    expect(err.message).toMatch(/^stripe_connect is not switched on for US/)
+    expect(err.message).toMatch(/^Stripe payouts are switched off for the United States/)
   })
 
   test('a currency the row does not carry is refused', async () => {
     const err = await refusal(() => assertRailSwitchedOn(db, tenant, 'flutterwave_bank', 'RW', 'USD'))
-    expect(err.message).toMatch(/^flutterwave_bank is not switched on for RW/)
+    expect(err.message).toMatch(/^Bank transfer payouts are switched off for Rwanda/)
   })
 
-  test('country is compared case-insensitively and the sentence uses the upper-case code', async () => {
+  test('country is compared case-insensitively and the sentence names the country', async () => {
     await expect(assertRailSwitchedOn(db, tenant, 'flutterwave_momo', 'rw', 'rwf')).resolves.toBeUndefined()
     const err = await refusal(() => assertRailSwitchedOn(db, tenant, 'flutterwave_bank', 'ke', 'kes'))
-    expect(err.message).toMatch(/^flutterwave_bank is not switched on for KE/)
+    expect(err.message).toMatch(/^Bank transfer payouts are switched off for Kenya/)
   })
 
   test('a database error is a fault, not a refusal', async () => {
@@ -188,24 +188,24 @@ describe('assertRailRequirementsMet — corridors the adapter cannot send on', (
     expect(err).toBeInstanceOf(PayHoldError)
     expect(err.code).toBe('policy_violation')
     expect(err.message).toBe(
-      'flutterwave_bank cannot pay a bank account in ZA yet. ' +
-        "Flutterwave requires the recipient's first name, last name, email, mobile number " +
-        'and address on every South African bank transfer, and PayHold does not collect ' +
-        'an email or address yet. ' +
+      'We cannot pay a bank account in South Africa yet. ' +
+        'Bank payouts to South Africa need contact details for the account holder ' +
+        'that we do not collect yet. ' +
         'Choose one of the other payout methods offered for South Africa.',
     )
   })
 
   test('flutterwave_bank for TZ is refused, quoting the registration restriction', () => {
     expect(() => assertRailRequirementsMet('flutterwave_bank', 'TZ')).toThrow(
-      'flutterwave_bank cannot pay a bank account in TZ yet. ' +
-        'Flutterwave pays Tanzanian bank accounts only for businesses registered in Tanzania. ' +
+      'We cannot pay a bank account in Tanzania yet. ' +
+        'Bank payouts to Tanzania are only possible for businesses registered in ' +
+        'Tanzania. ' +
         'Choose one of the other payout methods offered for Tanzania.',
     )
   })
 
   test('lower-case codes are the same refusal', () => {
-    expect(() => assertRailRequirementsMet('flutterwave_bank', 'za')).toThrow(/in ZA yet/)
+    expect(() => assertRailRequirementsMet('flutterwave_bank', 'za')).toThrow(/in South Africa yet/)
   })
 
   test('mobile money in those countries is untouched', () => {

@@ -20,6 +20,10 @@
 
 import { countryInfo, type PayoutRoute, RAILS_VERIFIED } from '../_shared/rails.ts'
 import { RAIL_KIND } from '../_shared/payout-methods.ts'
+// A country's name, with the article a sentence needs — `the United States`,
+// not `US` and not `United States`. It lives beside the other thing written for
+// a host to read rather than being copied here.
+import { countryLabel } from '../_shared/seller-market.ts'
 import {
   type Country,
   type Currency,
@@ -44,7 +48,37 @@ import {
  * is not going to learn it from a sentence in an error it forwards verbatim.
  */
 function listMethods(country: Country): string {
-  return `Choose one of the other payout methods offered for ${countryInfo(country).name}.`
+  return `Choose one of the other payout methods offered for ${countryLabel(country)}.`
+}
+
+/**
+ * What to call a rail in front of the person who picked it.
+ *
+ * `paypal cannot pay a destination in RW` is the sentence a host was shown, and
+ * the rail id is half of what is wrong with it: `flutterwave_momo` and
+ * `stripe_connect` are our column values, they are not what any picker calls
+ * them, and a lowercase identifier in the middle of a sentence reads as a
+ * system talking to itself. These are the names a client's picker offers,
+ * because the refusal is about the thing the host just chose.
+ *
+ * Keyed off the same set as `RAIL_ADAPTER`, so a rail cannot be added without a
+ * name to say it by, and unknown strings get `null` rather than an invented
+ * label — the request body is untrusted JSON, and echoing whatever arrived back
+ * into a sentence is how a nonsense value gets read as a product we sell.
+ */
+const RAIL_LABEL: Record<PayoutProvider, string> = {
+  flutterwave_momo: 'Mobile money',
+  flutterwave_bank: 'Bank transfer',
+  stripe_connect: 'Stripe',
+  paypal: 'PayPal',
+  venmo: 'Venmo',
+  cash_app_pay: 'Cash App Pay',
+  alipay: 'Alipay',
+  wechat_pay: 'WeChat Pay',
+}
+
+export function railLabel(rail: string): string | null {
+  return Object.hasOwn(RAIL_LABEL, rail) ? RAIL_LABEL[rail as PayoutProvider] : null
 }
 
 export const RAIL_ADAPTER: Record<PayoutProvider, Provider> = {
@@ -142,10 +176,15 @@ export function assertRailOnRoute(
   const list = listMethods(country)
 
   const adapter = railAdapterFor(rail)
-  if (adapter === null) {
+  const label = railLabel(rail)
+  if (adapter === null || label === null) {
+    // The raw value goes to the log rather than into the sentence: it is
+    // untrusted JSON, the person reading the toast did not type it, and the
+    // integrator who did will not be reading their host's phone.
+    console.warn('unknown payout rail requested', { rail })
     throw new PayHoldError(
       'policy_violation',
-      `${rail} is not a payout method PayHold knows. ${list}`,
+      `That is not a payout method we offer. ${list}`,
     )
   }
 
@@ -158,22 +197,41 @@ export function assertRailOnRoute(
   // of either. `tests/seller-destination-rail.test.ts` pins the two against
   // each other so this cannot be the first place anybody notices.
   if (row !== null && row.provider !== null && row.provider !== adapter) {
+    // The detail is for whoever fixes the row, and that is nobody holding a
+    // phone: the two names, the rail and the market are what an operator needs
+    // to find the bad row, and none of it is actionable by a host. So it goes
+    // to the log and the sentence says the one true thing they can act on —
+    // that this is ours, not theirs, and what to pick meanwhile.
+    console.error('payout route names an adapter that does not mint this rail', {
+      rail,
+      country,
+      table_provider: row.provider,
+      mints_on: adapter,
+    })
     throw new PayHoldError(
       'policy_violation',
-      `${rail} is carried by ${row.provider} in the routing table but PayHold ` +
-        `mints its destinations on ${adapter}. This is a routing-table fault, ` +
-        `not something the request can fix. ${list}`,
+      `${label} payouts are not working right now, and it is a problem on our ` +
+        `side rather than anything you did. ${list}`,
     )
   }
 
   if (row === null || !RAIL_ON.has(row.reason_code ?? '')) {
-    // The same opening words `route_payout` uses when it meets one of these
-    // rows, so a reader who has seen the sentence on an Earnings page
-    // recognises it here — one fact, one sentence.
+    // **This is the sentence a host was shown**: `paypal cannot pay a
+    // destination in RW. Paid in RWF via Flutterwave, to a mobile money wallet
+    // or bank account in Rwanda. Use that corridor's own method instead — GET
+    // /v1/payment-options?payout_country=RW lists the methods that can.` Every
+    // clause of that was written for somebody else — a rail id they have never
+    // seen, a country code they have to decode, `destination` and `corridor`
+    // for their own account and their own country, and a URL they cannot open.
+    //
+    // What survives is the middle: `route.reason` is `payoutRoute`'s own
+    // sentence, it is plain English, and it says how money *does* reach that
+    // market — which is the one useful thing in the original and is worth the
+    // repetition of the country's name that keeping it costs.
     throw new PayHoldError(
       'policy_violation',
-      `${rail} cannot pay a destination in ${country}. ${route.reason} ` +
-        `Use that corridor's own method instead — ${list}`,
+      `${label} payouts are not available in ${countryLabel(country)}. ` +
+        `${route.reason} ${list}`,
     )
   }
 }
@@ -310,10 +368,14 @@ export function railRoute(rail: string, country: Country, route: PayoutRoute): P
  */
 const UNSATISFIABLE: Partial<Record<PayoutProvider, Record<string, string>>> = {
   flutterwave_bank: {
-    ZA: "Flutterwave requires the recipient's first name, last name, email, mobile " +
-      'number and address on every South African bank transfer, and PayHold does ' +
-      'not collect an email or address yet.',
-    TZ: 'Flutterwave pays Tanzanian bank accounts only for businesses registered in ' +
+    // Said in the seller's terms, not the rail's: the citation above is what an
+    // operator needs and it is already here in the header, while the person
+    // reading this on their payout screen needs to know only that the fact is
+    // about their market rather than their account, and that nothing they type
+    // will change it today.
+    ZA: 'Bank payouts to South Africa need contact details for the account holder ' +
+      'that we do not collect yet.',
+    TZ: 'Bank payouts to Tanzania are only possible for businesses registered in ' +
       'Tanzania.',
   },
 }
@@ -329,7 +391,7 @@ export function assertRailRequirementsMet(rail: string, country: Country): void 
   if (!why) return
   throw new PayHoldError(
     'policy_violation',
-    `${rail} cannot pay a bank account in ${cc} yet. ${why} ${listMethods(cc)}`,
+    `We cannot pay a bank account in ${countryLabel(cc)} yet. ${why} ${listMethods(cc)}`,
   )
 }
 
@@ -463,9 +525,14 @@ export function assertRailSwitchedOnRows(
 ): void {
   const cc = country.toUpperCase()
   if (!railVerdict(rails, rail).on) {
+    // Kept distinguishable from `assertRailOnRoute`'s refusal, which is the
+    // same fact for a host and a different one for us: this rail reaches this
+    // market and is off today, so `at the moment` is the honest difference and
+    // the only one worth spending words on.
     throw new PayHoldError(
       'policy_violation',
-      `${rail} is not switched on for ${cc} — ${listMethods(cc)}`,
+      `${railLabel(rail) ?? 'That'} payouts are switched off for ` +
+        `${countryLabel(cc)} at the moment. ${listMethods(cc)}`,
     )
   }
 }
