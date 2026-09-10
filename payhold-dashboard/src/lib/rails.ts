@@ -138,7 +138,12 @@ function buildRails(): Rail[] {
     // holds and each flag sets its own side. `collectionRails`, `currenciesFor`
     // and `marketSummary` all filter on `collect`, so a payout-only row never
     // reaches a checkout.
-    if (info.flutterwaveLocal || info.flutterwavePayout) {
+    // `bankPayout`, not `flutterwavePayout` — the second is "payable by some
+    // destination", which for Malawi and Kenya means the wallet while their
+    // bank corridor sits behind a Flutterwave request. Reading the wider flag
+    // here had the registry claiming a Kenyan bank payout the routing table
+    // has excluded since 20260909000006.
+    if (info.flutterwaveLocal || info.bankPayout) {
       rails.push({
         method: 'bank_transfer',
         country: code,
@@ -146,7 +151,7 @@ function buildRails(): Rail[] {
         provider: 'flutterwave',
         networks: [],
         collect: info.flutterwaveLocal,
-        payout: info.flutterwavePayout,
+        payout: info.bankPayout,
       })
     }
 

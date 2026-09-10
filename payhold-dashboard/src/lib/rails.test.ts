@@ -108,10 +108,14 @@ describe('local rails appear only where they really exist', () => {
     // collection channel and a "submit a request" gate on transfers; Ethiopia
     // has a transfer guide and no collection channel; Zambia's wallets collect
     // but no collection page names a local card rail there.
-    for (const code of ['EG', 'MW'] as const) {
-      expect(countryInfo(code).flutterwaveLocal, code).toBe(true)
-      expect(countryInfo(code).flutterwavePayout, code).toBe(false)
-    }
+    expect(countryInfo('EG').flutterwaveLocal).toBe(true)
+    expect(countryInfo('EG').flutterwavePayout).toBe(false)
+    // Malawi collects, and is payable by wallet only — its bank sits behind
+    // the same "submit a request" gate as Egypt's while AIRTELMW does not.
+    expect(countryInfo('MW').flutterwaveLocal).toBe(true)
+    expect(countryInfo('MW').flutterwavePayout).toBe(true)
+    expect(countryInfo('MW').momoPayout).toBe(true)
+    expect(countryInfo('MW').bankPayout).toBe(false)
     expect(countryInfo('ET').flutterwaveLocal).toBe(false)
     expect(countryInfo('ET').flutterwavePayout).toBe(true)
     expect(countryInfo('ZM').flutterwaveLocal).toBe(false)
@@ -448,7 +452,12 @@ describe('rail provenance — what has been checked against provider documentati
     // absent there is the two halves agreeing.
     const ke = RAILS.find((r) => r.provider === 'flutterwave' && r.country === 'KE' && r.method === 'bank_transfer')
     expect(ke).toBeDefined()
-    expect(provenanceFor(ke!, 'payout').state).toBe('unsupported')
+    // The row exists to collect and does not carry a payout direction, which
+    // is the gate expressed in the registry rather than only in a note. The
+    // reading itself is asserted in railProvenance.test.ts against the
+    // unpruned claims.
+    expect(ke!.collect).toBe(true)
+    expect(ke!.payout).toBe(false)
   })
 })
 

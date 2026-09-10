@@ -59,10 +59,17 @@ describe('rail provenance — spot checks against what was read on 2026-09-09', 
   })
 
   it('Kenya bank payout is not supported: on request, per Flutterwave', () => {
-    const rec = provenanceFor(row('flutterwave', 'KE', 'bank_transfer'), 'payout')
+    // Read off the unpruned claims. Since `bankPayout` split from
+    // `flutterwavePayout` (2026-09-10) Kenya's bank rail no longer carries a
+    // payout direction at all — it is gated, which is what this note says — so
+    // the row is not rendered and the claim prunes out of `PROVENANCE`. The
+    // reading still has to be on file and still has to say why.
+    const rec = PROVENANCE_CLAIMS['payout:flutterwave:KE:bank_transfer']!
     expect(rec.state).toBe('unsupported')
     expect(rec.note).toMatch(/submit a request/)
     expect(rec.source).toContain('kenya-1')
+    expect(provenanceFor(row('flutterwave', 'KE', 'bank_transfer'), 'payout').state)
+      .toBe('unchecked')
   })
 
   it('Ethiopia bank payout is documented', () => {

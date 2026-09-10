@@ -257,6 +257,7 @@ const FW_MOMO_PAYOUT_NOTE: Partial<Record<Country, string>> = {
   ET: 'Code AMOLEMONEY (Amole Money) is listed verbatim in Flutterwave’s supported-networks table.',
   GH: 'Codes AIRTELTIGO and MTN are listed; Telecel is named as an operator but its code is not shown in the table.',
   KE: 'M-Pesa code MPS is listed; requires sender, sender_country and mobile_number (plus first_name and last_name) in meta, and Flutterwave asks that the feature be requested on the account.',
+  MW: 'Code AIRTELMW (Airtel Malawi) appears in an un-gated MWK payout sample in both doc trees, with no extra meta fields — while Flutterwave’s own supported-networks table omits Malawi. The table is stale, not the corridor. The bank destination stays gated.',
   RW: 'Codes MPS and MTN are listed; Flutterwave does not name the operator behind MPS — Airtel Money is PayHold’s inference.',
   SN: 'Codes ORANGEMONEY and WAVE are listed verbatim in Flutterwave’s supported-networks table.',
   TZ: 'Codes AIRTEL, HALOPESA, TIGO and VODACOM are listed; Flutterwave asks that the feature be requested via support, with sender_id_type and sender_id_number in meta.',
@@ -295,7 +296,7 @@ const FW_MOMO_COLLECT_RECORD: Partial<Record<Country, ProvenanceRecord>> = {
   CI: doc(FW_FRANCO, 'MTN, Orange Money, Moov and Wave are named on the francophone page.'),
   SN: doc(FW_FRANCO, 'Orange Money and Wave are named on the francophone page.'),
   CM: doc(FW_FRANCO, 'MTN and Orange Money are named on the francophone page.'),
-  MW: no(FW_MOMO_COLLECT, 'No collection page for Malawi; the entry is commented out in Flutterwave’s own mobile-money index.'),
+  MW: doc(FW_MOMO_COLLECT, 'A Malawi collection page exists (charge type mobile_money_malawi, Airtel only) but is unlisted — its card is commented out of Flutterwave’s own mobile-money index. Note the collection code is AIRTEL, not the payout code AIRTELMW.'),
   ET: no(FW_MOMO_COLLECT, 'Flutterwave documents no Ethiopian mobile-money collection channel; Amole Money appears on the transfers side only.'),
 }
 

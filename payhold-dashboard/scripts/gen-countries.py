@@ -276,15 +276,19 @@ FLUTTERWAVE_LOCAL = {
 #                    TZ (bank "only available to businesses registered in Tanzania").
 # Not here: EG and MW (bank and wallet both "submit a request"), SL (documented
 # in SLL, which this registry does not price).
-# Burkina Faso is deliberately absent, against its own documentation. The
-# transfer guide exists, but Flutterwave's `/banks/BF` errors — no bank codes,
-# and `tokenize` cannot mint a bank beneficiary without one — while the momo
-# transfer table names no Burkinabe network either. Checked live 2026-09-10:
-# every neighbour answered (CI 30 banks, SN 25, RW 34, ET 21) and BF alone did
-# not. A corridor nobody can register a destination on is not a corridor.
-FLUTTERWAVE_PAYOUT = {
+# Bank transfers Flutterwave documents *and* does not gate. Kenya, Tanzania,
+# Egypt and Malawi each have a real transfer guide sitting behind a gate:
+# Kenya, Egypt and Malawi are "not available by default — submit a request",
+# Tanzania is "only available to businesses registered in Tanzania". Burkina
+# Faso is absent for a harder reason — its guide is real, but `/banks/BF`
+# errors, so there are no bank codes and `tokenize` cannot mint a beneficiary.
+# Checked live 2026-09-10: CI answered with 30 banks, SN 25, RW 34, ET 21, and
+# BF alone returned nothing. A corridor nobody can register a destination on is
+# not a corridor.
+#
+# This list is the `flutterwave_bank` route row, country for country.
+BANK_PAYOUT = {
     "RW", "UG", "GH", "NG", "ZA", "ZM", "CI", "SN", "CM", "ET",
-    "KE", "TZ",
 }
 
 # PayPal PAYOUT — a third source of truth, read from PayPal's own Payouts
@@ -336,7 +340,7 @@ MOMO = {
     "CM": ["MTN", "Orange Money"],
     "GH": ["MTN", "Telecel", "AirtelTigo"],
     "KE": ["M-Pesa"],
-    "MW": [],  # documented as a channel; networks not named by Flutterwave
+    "MW": ["Airtel Money"],
     "RW": ["MTN", "Airtel Money"],
     "SN": ["Orange Money", "Free Money", "Wave"],
     "TZ": ["Airtel Money", "Tigo Pesa", "HaloPesa"],
@@ -351,8 +355,20 @@ MOMO = {
 # Money is on the transfer table with no v3 collection page behind it. So the
 # registry carries both facts, and `momoNetworks` above stays the answer to
 # "which wallets exist here" rather than to either question.
+# Malawi is the case that forced `BANK_PAYOUT` to exist. Its bank corridor is
+# gated and its wallet is not: Flutterwave documents an un-gated MWK mobile
+# money payout to `AIRTELMW` in both doc trees, while the v3 supported-networks
+# table omits Malawi entirely — which is where this file's old "documented as a
+# channel; networks not named" note came from. The note was stale, not the
+# coverage. Read 2026-09-10.
 MOMO_COLLECT = {"BF", "CI", "CM", "GH", "KE", "MW", "RW", "SN", "TZ", "UG", "ZM"}
-MOMO_PAYOUT = {"CI", "CM", "ET", "GH", "KE", "RW", "SN", "TZ", "UG", "ZM"}
+MOMO_PAYOUT = {"CI", "CM", "ET", "GH", "KE", "MW", "RW", "SN", "TZ", "UG", "ZM"}
+
+# Derived, never hand-listed: a country Flutterwave can pay by *some*
+# destination. `payoutRoute` asks this before it asks which kind, so a market
+# reachable by only one of the two — Malawi by wallet, Ethiopia by either,
+# Kenya by wallet since its bank is gated — is still reachable.
+FLUTTERWAVE_PAYOUT = MOMO_PAYOUT | BANK_PAYOUT
 
 # Comprehensively sanctioned or embargoed. No acquirer will process a card
 # here, so claiming universal coverage would be a lie. Needs legal review.
@@ -461,6 +477,12 @@ def render(backend: bool) -> str:
     w("   * market can collect and not pay out (EG, MW) or pay out and not collect (ET).")
     w("   */")
     w("  flutterwavePayout: boolean")
+    w("  /**")
+    w("   * Flutterwave documents an un-gated *bank* transfer to here. Narrower than")
+    w("   * `flutterwavePayout`: Malawi and Kenya are payable by wallet while their")
+    w("   * bank corridor sits behind a request, so the bank rail must not claim them.")
+    w("   */")
+    w("  bankPayout: boolean")
     w("  /** Stripe supports a business account with payouts here. */")
     w("  stripePayout: boolean")
     w("  /** Stripe lists this market as preview / contact-sales only. */")
@@ -536,6 +558,7 @@ def render(backend: bool) -> str:
             + ", ".join(ts_string(n) for n in networks)
             + "]",
             f"flutterwavePayout: {'true' if code in FLUTTERWAVE_PAYOUT else 'false'}",
+            f"bankPayout: {'true' if code in BANK_PAYOUT else 'false'}",
             f"stripePayout: {'true' if code in STRIPE_PAYOUT else 'false'}",
             f"stripePreview: {'true' if code in STRIPE_PREVIEW else 'false'}",
             f"paypalPayout: {'true' if code in PAYPAL_PAYOUT else 'false'}",

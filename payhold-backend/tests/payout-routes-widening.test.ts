@@ -78,8 +78,8 @@ describe('payout_routes: widened to the registry, pruned, then matched to what t
 
   test('flutterwave_momo carries exactly the markets the transfer table names a wallet code for', async () => {
     const r = await row('flutterwave_momo')
-    expect(sorted(r.countries)).toEqual(sorted(['RW', 'KE', 'UG', 'TZ', 'GH', 'ZM', 'CI', 'SN', 'CM', 'ET']))
-    expect(sorted(r.currencies)).toEqual(sorted(['RWF', 'KES', 'UGX', 'TZS', 'GHS', 'ZMW', 'XOF', 'XAF', 'ETB']))
+    expect(sorted(r.countries)).toEqual(sorted(['RW', 'KE', 'UG', 'TZ', 'GH', 'ZM', 'CI', 'SN', 'CM', 'ET', 'MW']))
+    expect(sorted(r.currencies)).toEqual(sorted(['RWF', 'KES', 'UGX', 'TZS', 'GHS', 'ZMW', 'XOF', 'XAF', 'ETB', 'MWK']))
   })
 
   test('stripe_connect carries the seeded rows plus every supported country inside the self-serve region', async () => {
@@ -114,15 +114,17 @@ describe('payout_routes: widened to the registry, pruned, then matched to what t
     expect(await inRoute('stripe_connect', country, currency)).toBe(false)
   })
 
-  test('the Flutterwave bank row carries BF in XOF — a transfer guide exists', async () => {
+  test('the Flutterwave bank row no longer carries BF in XOF', async () => {
     // Removed again by 20260910000002: the guide exists, the bank list does
     // not, so nothing can be registered there. See that migration.
     expect(await inRoute('flutterwave_bank', 'BF', 'XOF')).toBe(false)
   })
 
   test.each([
+    // MW was here until 20260910000004 — its bank corridor is still pruned,
+    // but the wallet reaches it now, so it is no longer unreachable.
     ['BJ', 'XOF'], ['ML', 'XOF'], ['TG', 'XOF'], ['CF', 'XAF'], ['GA', 'XAF'],
-    ['MW', 'MWK'], ['SL', 'SLE'],
+    ['SL', 'SLE'],
   ])('%s in %s was widened and then pruned — no transfer guide, request-only, or an undocumented currency code', async (country, currency) => {
     expect(await inRoute('flutterwave_bank', country, currency)).toBe(false)
     expect(await covered(country, currency)).toBe(false)
@@ -136,9 +138,17 @@ describe('payout_routes: widened to the registry, pruned, then matched to what t
     },
   )
 
-  test('the momo row still has no BF or MW — no transfer code exists for either', async () => {
+  test('the momo row still has no BF — no transfer code exists for it', async () => {
     expect(await inRoute('flutterwave_momo', 'BF', 'XOF')).toBe(false)
-    expect(await inRoute('flutterwave_momo', 'MW', 'MWK')).toBe(false)
+  })
+
+  test('Malawi is paid by wallet and not by bank — the gate is on the bank only', async () => {
+    // 20260910000004. The bank page's "not available by default — submit a
+    // request" is current and applies to the bank destination; the MWK wallet
+    // payout to AIRTELMW carries no such caveat in either doc tree.
+    expect(await inRoute('flutterwave_momo', 'MW', 'MWK')).toBe(true)
+    expect(await inRoute('flutterwave_bank', 'MW', 'MWK')).toBe(false)
+    expect(await covered('MW', 'MWK')).toBe(true)
   })
 
   // -------------------------------------------------------------------------

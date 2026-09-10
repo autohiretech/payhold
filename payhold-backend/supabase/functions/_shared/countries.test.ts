@@ -14,12 +14,24 @@ const codes = (pick: (c: CountryInfo) => boolean) =>
   COUNTRIES.filter(pick).map((c) => c.code).sort()
 
 Deno.test('Flutterwave collection and Flutterwave payout are independent flags', () => {
-  // Egypt and Malawi: a collection channel, and transfers documented as "not
-  // available by default — submit a request".
-  for (const code of ['EG', 'MW']) {
-    assertEquals(countryInfo(code).flutterwaveLocal, true, `${code} collects`)
-    assertEquals(countryInfo(code).flutterwavePayout, false, `${code} does not pay out`)
-  }
+  // Egypt: a collection channel, and transfers documented as "not available by
+  // default — submit a request" on both destinations.
+  assertEquals(countryInfo('EG').flutterwaveLocal, true)
+  assertEquals(countryInfo('EG').flutterwavePayout, false)
+
+  // Malawi is the three-way case: it collects, its *bank* transfer is behind
+  // the same request gate as Egypt's, and its wallet is not gated at all. One
+  // payout flag could not say that, which is why `bankPayout` exists.
+  assertEquals(countryInfo('MW').flutterwaveLocal, true)
+  assertEquals(countryInfo('MW').flutterwavePayout, true)
+  assertEquals(countryInfo('MW').momoPayout, true)
+  assertEquals(countryInfo('MW').bankPayout, false)
+
+  // Kenya is the same shape and was mis-stated until 2026-09-10: its bank
+  // corridor left the routing table in 20260909000006 while the registry went
+  // on claiming it.
+  assertEquals(countryInfo('KE').momoPayout, true)
+  assertEquals(countryInfo('KE').bankPayout, false)
 
   // Ethiopia: a bank-transfer guide and a momo transfer code, no collection page.
   assertEquals(countryInfo('ET').flutterwaveLocal, false)
@@ -37,11 +49,25 @@ Deno.test('Flutterwave collects locally in exactly the thirteen markets its coll
   )
 })
 
-Deno.test('Flutterwave pays out to exactly the thirteen markets with an ungated transfer guide or a momo transfer code', () => {
+Deno.test('Flutterwave pays out to exactly the thirteen markets reachable by some destination', () => {
   assertEquals(
     codes((c) => c.flutterwavePayout),
-    ['CI', 'CM', 'ET', 'GH', 'KE', 'NG', 'RW', 'SN', 'TZ', 'UG', 'ZA', 'ZM'],
+    ['CI', 'CM', 'ET', 'GH', 'KE', 'MW', 'NG', 'RW', 'SN', 'TZ', 'UG', 'ZA', 'ZM'],
   )
+})
+
+Deno.test('the bank row is narrower than the country flag, and matches the routing table', () => {
+  // Kenya, Tanzania and Malawi are payable by wallet and gated by bank; Egypt
+  // and Burkina Faso are not payable at all. This list is `flutterwave_bank`'s
+  // countries after 20260910000002, country for country.
+  assertEquals(
+    codes((c) => c.bankPayout),
+    ['CI', 'CM', 'ET', 'GH', 'NG', 'RW', 'SN', 'UG', 'ZA', 'ZM'],
+  )
+  for (const code of ['KE', 'TZ', 'MW']) {
+    assertEquals(countryInfo(code).bankPayout, false, `${code} bank is gated`)
+    assertEquals(countryInfo(code).flutterwavePayout, true, `${code} pays by wallet`)
+  }
 })
 
 Deno.test('the CFA members no Flutterwave page names are card-only, not local markets', () => {

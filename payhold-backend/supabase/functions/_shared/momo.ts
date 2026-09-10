@@ -98,6 +98,13 @@ export const MOMO_NETWORKS: Record<Country, MomoNetwork[]> = {
   // Ethiopia and there is no v3 collection page behind it, which is why the
   // registry marks ET `momoPayout` without `momo`.
   ET: [{ label: 'Amole Money', code: 'AMOLEMONEY' }],
+  // Flutterwave's own supported-networks table omits Malawi, and that omission
+  // is what kept the registry saying "networks not named" — but both doc trees
+  // carry an un-gated MWK mobile money payout sample naming `AIRTELMW`
+  // (bank_name "Airtel Malawi"). The table is stale, not the corridor. The
+  // *collection* code for the same wallet is plain `AIRTEL`; they are different
+  // strings for the same operator and only the payout one belongs here.
+  MW: [{ label: 'Airtel Money', code: 'AIRTELMW' }],
   CI: [
     { label: 'MTN', code: 'MTN' },
     { label: 'Orange Money', code: 'ORANGE' },
@@ -135,6 +142,7 @@ const DIAL_CODE: Record<Country, string> = {
   EG: '20',
   BF: '226',
   ET: '251',
+  MW: '265',
   ML: '223',
 }
 
