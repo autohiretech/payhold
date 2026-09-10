@@ -443,6 +443,21 @@ place registering and changing a destination are checked identically, and
 may pick (plus `banks`, opt-in with `&banks=1`, since bank codes are a list
 Flutterwave publishes rather than one we can transcribe).
 
+**`payout.methods` is the list a client offers from — not `payout.kind`.**
+`kind` names the preferred destination and is a single value; a market is not.
+Kenya, Tanzania and Malawi take a wallet while their bank corridor sits behind
+a Flutterwave request, and Ethiopia takes either, so a client reading
+`kind: 'momo'` and offering wallet-and-bank shows a Kenyan host a Bank option
+`assertRailOnRoute` then refuses — which is exactly what one client was doing.
+`methods` holds every destination the market can actually be paid into, `kind`
+sorts first in it, and a blocked market gets `[]`. It is built from
+`route_evaluation` rather than from the registry, so a rail switched off,
+risk-held or missing its adapter drops out of it without anyone remembering to
+remove it. **Note the nesting**: it is spread into the `payout` object, so it is
+`payout.methods` and not a sibling of `payout` — reading it at the top level
+gets `undefined` and silently falls back to whatever the client inferred from
+`kind`, which is the failure it exists to prevent.
+
 **A transfer is asked about, never re-sent.** Their API answers `NEW` on
 creation and never `SUCCESSFUL`, so `release` returned `pending`, the payout went
 to `processing`, and nothing moved it on — no webhook handled the event and
