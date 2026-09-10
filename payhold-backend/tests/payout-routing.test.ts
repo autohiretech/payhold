@@ -199,7 +199,7 @@ describe('§5.2 — payout routing acceptance tests', () => {
     // permanent §17 ground (`20260815000007`). Same sentence to the seller
     // either way, different next action for us.
     expect((await route(domestic)).reason_code).toBe('provider_disabled')
-    expect((await statusOf(domestic)).why).toBe('venmo is not available for payouts yet.')
+    expect((await statusOf(domestic)).why).toBe('Venmo payouts are not available yet.')
 
     // §5.2's case is about the border, so switch the rail on for one tenant to
     // reach it. (Hypothetical: `route_needs_an_adapter` will not let a
@@ -219,7 +219,10 @@ describe('§5.2 — payout routing acceptance tests', () => {
     const overseas = await payoutFor(abroad, { amount: 5_000, currency: 'AED' })
 
     expect((await route(overseas)).reason_code).toBe('country_not_supported')
-    expect((await statusOf(overseas)).why).toBe('venmo cannot pay a destination in AE.')
+    // The rail's name, and no country code — a host reads this on their
+    // Earnings page and `AE` is a column, not a place. The country is still on
+    // the row for anyone who needs it; see `20260910000009`.
+    expect((await statusOf(overseas)).why).toBe('Venmo payouts are not available in this market.')
   })
 
   test('3. a China seller on Alipay is routed only once the partner is approved', async () => {
@@ -483,7 +486,7 @@ describe('the choice is deterministic', () => {
 
     expect((await route(payout)).reason_code).toBe('above_route_maximum')
     expect((await statusOf(payout)).why)
-      .toBe('This amount is above the maximum flutterwave_momo will send.')
+      .toBe('This amount is above the maximum Mobile money will send.')
   })
 
   test('a suspended route is out of service and says which kind of out', async () => {
@@ -675,7 +678,7 @@ describe('seller_capabilities separates what a seller must do from what we canno
     )
 
     expect(c.reasons ?? []).toEqual([])
-    expect(c.route_reasons).toEqual(['venmo is not available for payouts yet.'])
+    expect(c.route_reasons).toEqual(['Venmo payouts are not available yet.'])
     expect(c.can).toBe(false)
   })
 

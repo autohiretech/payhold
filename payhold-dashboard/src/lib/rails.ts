@@ -340,37 +340,55 @@ export const PAYOUT_PROVIDER_LABEL: Record<PayoutProvider, string> = {
 export function routeReasonText(
   code: RouteReasonCode,
   rail: PayoutProvider,
-  country: string,
+  // Kept in the signature though no sentence uses it any more: every caller
+  // passes it positionally, and the country is still what a reader needs
+  // beside the sentence even when it is not inside it.
+  _country: string,
   currency: string,
 ): string {
+  // The rail goes through `PAYOUT_PROVIDER_LABEL` now, and `country` is unused
+  // — both because SQL changed underneath this in `20260910000009`. The raw
+  // enum value used to be interpolated here deliberately, so this matched what
+  // Postgres produced character for character; Postgres now emits the label,
+  // so matching it means doing the same. And the country is gone from the
+  // sentence entirely rather than translated: §29.11 keeps the country
+  // registry out of SQL, so the sentence a host reads on a held payout could
+  // never have named their market without giving that registry a second home
+  // to drift from. Dropping it is better copy anyway — somebody reading their
+  // own Earnings page knows which market they are in, and `AE` was never a
+  // place to them.
+  const name = PAYOUT_PROVIDER_LABEL[rail] ?? rail
   switch (code) {
     case 'routed':
-      return `Paid by ${rail}.`
+      return `Paid by ${name}.`
     case 'market_closed':
-      return `PayHold is not sending payouts to ${country} at the moment.`
+      return 'Payouts to this market are paused at the moment.'
     case 'provider_unavailable':
     case 'provider_disabled':
-      return `${rail} is not available for payouts yet.`
+      return `${name} payouts are not available yet.`
     case 'route_suspended':
-      return `${rail} payouts are suspended.`
+      return `${name} payouts are suspended.`
     case 'route_under_review':
-      return `${rail} payouts are under review and cannot be used right now.`
+      return `${name} payouts are under review and cannot be used right now.`
     case 'payouts_not_supported':
-      return `${rail} can collect payments but cannot send them.`
+      return `${name} can collect payments but cannot send them.`
     case 'country_not_supported':
-      return `${rail} cannot pay a destination in ${country}.`
+      return `${name} payouts are not available in this market.`
+    // The currency code stays: it is what the money arrives as, and a host owed
+    // RWF should see RWF. The rail id and the country code are ours; the
+    // currency is theirs.
     case 'currency_not_supported':
-      return `${rail} cannot pay out in ${currency}.`
+      return `${name} cannot pay out in ${currency}.`
     case 'below_route_minimum':
-      return `This amount is below the minimum ${rail} will send.`
+      return `This amount is below the minimum ${name} will send.`
     case 'above_route_maximum':
-      return `This amount is above the maximum ${rail} will send.`
+      return `This amount is above the maximum ${name} will send.`
     case 'destination_not_verified':
       return 'The payout destination has not been verified.'
     case 'no_eligible_verified_destination':
       return 'No verified payout destination has been registered.'
     default:
-      return `PayHold has no payout route for ${rail} in ${country}.`
+      return `${name} cannot be used for this payout.`
   }
 }
 
