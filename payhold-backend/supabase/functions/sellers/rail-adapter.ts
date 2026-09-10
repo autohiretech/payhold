@@ -18,7 +18,8 @@
  * load — and the map has to be pinned against the seeded routes somewhere.
  */
 
-import type { PayoutRoute } from '../_shared/rails.ts'
+import { countryInfo, type PayoutRoute, RAILS_VERIFIED } from '../_shared/rails.ts'
+import { RAIL_KIND } from '../_shared/payout-methods.ts'
 import {
   type Country,
   type Currency,
@@ -159,6 +160,106 @@ export function assertRailOnRoute(
       `${rail} cannot pay a destination in ${country}. ${route.reason} ` +
         `Use that corridor's own method instead — ${list}`,
     )
+  }
+}
+
+/**
+ * The sentence each rail's own route reads, keyed by rail rather than by
+ * `kind`, because `kind` does not name an adapter: `bank` is Flutterwave's
+ * today and would not have to be forever, and a sentence keyed on it would go
+ * quietly wrong the day it is not. The wording is `payoutRoute`'s own, so a
+ * client that has been reading `reason` on the corridor's route does not meet
+ * a second dialect on the destination's.
+ *
+ * Same key set as `RAIL_KIND`, deliberately — the two describe the same four
+ * live rails, and `tests/paypal-alongside-stripe.test.ts` pins that set against
+ * what registration accepts, so neither can grow a rail the other has not.
+ */
+const RAIL_SENTENCE: Record<string, (currency: string, market: string) => string> = {
+  flutterwave_momo: (c, m) => `Paid in ${c} via Flutterwave, to a mobile money wallet in ${m}.`,
+  flutterwave_bank: (c, m) => `Paid in ${c} via Flutterwave, to a bank account in ${m}.`,
+  stripe_connect: (c, m) => `Paid in ${c} via Stripe, to a bank account in ${m}.`,
+  paypal: (c, m) => `Paid in ${c} to a PayPal account in ${m}.`,
+}
+
+/**
+ * How the destination that was just registered will actually be paid — the
+ * `payout_route` both `POST /v1/sellers` and `POST /v1/sellers/:id/destinations`
+ * return.
+ *
+ * **Found 2026-09-10, alongside the refusal above and from the same root.**
+ * Both handlers returned `payoutRoute(country, currency)` — the corridor's one
+ * **preferred** rail — as the description of a destination the caller had just
+ * named a rail for. While a market had exactly one live payout rail those were
+ * the same fact wearing two names. The day PayPal's 88 markets were switched on
+ * they stopped being: a US seller registering a PayPal destination was handed
+ * `provider: 'stripe'`, `kind: 'connect'` and "Paid in USD via Stripe, to a bank
+ * account in United States." — a correct sentence about a route their money will
+ * not travel on. A client storing that field, or showing it to the host it just
+ * onboarded, is being told the wrong rail about a row it can read the right one
+ * off two fields away, which is the sort of disagreement that is only noticed
+ * once a payout has gone somewhere unexpected.
+ *
+ * So the rail the caller passed is what gets described. `payoutRoute` is
+ * untouched and still decides the *default* — this is only which of the
+ * corridor's rails the response is about, and when the seller picked the
+ * preferred one the corridor's own route is returned unchanged, so nothing
+ * about the common case moves.
+ *
+ * The currency comes off the corridor's route rather than being passed again:
+ * it is a property of the corridor, both `assertRailOnRoute` and
+ * `route_evaluation` have already judged this rail against it, and a second
+ * copy is a second thing that can disagree.
+ *
+ * `blocked` is false without asking. Every caller has already run
+ * `route.blocked`, `assertRailRequirementsMet`, `assertRailOnRoute` and
+ * `assertRailSwitchedOnRows` against this rail, and the last of those is
+ * `route_evaluation`'s own verdict — the same judgement `route_payout` will
+ * make when the money is due. A rail that reached here is one the table pays.
+ *
+ * `verified` is `RAILS_VERIFIED` less the one rail-specific downgrade
+ * `payoutRoute` itself makes: Flutterwave holding a currency that is not the
+ * market's own can settle it to your own account and still not pay a
+ * third-party beneficiary in it, which is a route to confirm rather than a
+ * promise. That caveat belongs to the rail and the currency, not to the
+ * corridor, so it survives being asked about a rail the corridor does not
+ * prefer — and the sentence that carries it is repeated verbatim for the same
+ * reason the others are.
+ */
+export function railRoute(rail: string, country: Country, route: PayoutRoute): PayoutRoute {
+  const adapter = railAdapterFor(rail)
+  const kind = RAIL_KIND[rail] ?? null
+  const sentence = RAIL_SENTENCE[rail]
+
+  // Unreachable through a handler: a rail with no adapter is refused by
+  // `assertRailOnRoute` and the four declared-and-disabled wallets (§29.3) can
+  // never be `eligible`, so nothing without a `RAIL_KIND` entry gets this far.
+  // It is a fallback rather than a throw because the caller has by then
+  // tokenized a beneficiary and written a row — failing the response would
+  // report a registration that happened as one that did not — and it can only
+  // be reached at all by `RAIL_KIND` drifting from the set of rails the table
+  // enables, which is what the pinning test above exists to stop.
+  if (adapter === null || kind === null || sentence === undefined) return route
+
+  // The seller picked the corridor's own preferred rail, which is still the
+  // overwhelmingly common case: hand back exactly what `payoutRoute` said, so
+  // this cannot restate that answer in slightly different words.
+  if (adapter === route.provider && kind === route.kind) return route
+
+  const info = countryInfo(country)
+  const foreignFlutterwave = adapter === 'flutterwave' && route.currency !== info.currency
+
+  return {
+    provider: adapter,
+    kind,
+    currency: route.currency,
+    blocked: false,
+    verified: RAILS_VERIFIED && !foreignFlutterwave,
+    reason: sentence(route.currency, info.name) +
+      (foreignFlutterwave
+        ? ` Confirm your account can send ${route.currency} to a third-party ` +
+          `beneficiary there — otherwise convert to ${info.currency}.`
+        : ''),
   }
 }
 

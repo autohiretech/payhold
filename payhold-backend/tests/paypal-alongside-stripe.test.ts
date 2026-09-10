@@ -33,6 +33,7 @@ import {
   assertRailOnRoute,
   assertRailSwitchedOnRows,
   evaluateRails,
+  railRoute,
   type RouteEvaluator,
 } from '../supabase/functions/sellers/rail-adapter'
 
@@ -88,6 +89,27 @@ async function methodsFor(country: Country, currency: Currency): Promise<string[
   return payoutMethods(await evaluateRails(db, tenant, country, currency), route.kind)
 }
 
+/**
+ * The rail behind each `payout.methods` entry — `RAIL_KIND` read backwards.
+ * `methods` is a list of kinds because that is the vocabulary a payout form
+ * speaks; registration takes the rail, so a test crossing the two needs this.
+ */
+const KIND_RAIL: Record<string, string> = {
+  momo: 'flutterwave_momo',
+  bank: 'flutterwave_bank',
+  connect: 'stripe_connect',
+  paypal: 'paypal',
+}
+
+/**
+ * What the two handlers now put in `payout_route` — the same three checks
+ * `register` makes, then the route built for the rail that passed them.
+ */
+async function describedRoute(rail: string, country: Country, currency: Currency) {
+  await register(rail, country, currency)
+  return railRoute(rail, country, payoutRoute(country, currency))
+}
+
 describe('the reported bug — a United States host choosing PayPal', () => {
   test('payoutRoute still prefers Stripe for the US, and that is correct', () => {
     // Unchanged on purpose. The fix is not to re-rank the rails: preferring a
@@ -118,12 +140,6 @@ describe('the reported bug — a United States host choosing PayPal', () => {
   test('what payment-options offers is exactly what registration accepts', async () => {
     // The two answers disagreeing is the bug, stated as a property rather than
     // as one market's expected list.
-    const KIND_RAIL: Record<string, string> = {
-      momo: 'flutterwave_momo',
-      bank: 'flutterwave_bank',
-      connect: 'stripe_connect',
-      paypal: 'paypal',
-    }
     for (const [country, currency] of [
       ['US', 'USD'],
       ['RW', 'RWF'],
@@ -251,5 +267,87 @@ describe('a market only PayPal reaches', () => {
     expect(await methodsFor('AD', 'EUR')).toEqual(['paypal'])
     await expect(register('paypal', 'AD', 'EUR')).resolves.toBeUndefined()
     await expect(refusal(() => register('stripe_connect', 'AD', 'EUR'))).resolves.toBeDefined()
+  })
+})
+
+/**
+ * The other half of the same widening, found on the response side.
+ *
+ * `POST /v1/sellers` and `POST /v1/sellers/:id/destinations` both answered with
+ * `payout_route: payoutRoute(country, currency)` — the corridor's single
+ * *preferred* rail — whatever rail the caller had just registered a destination
+ * on. That was one fact wearing two names while a market had one live payout
+ * rail, and stopped being one the day PayPal's row was enabled: a US host
+ * registering PayPal was handed `provider: 'stripe'`, `kind: 'connect'` and a
+ * sentence about a bank account, describing a route their money will not travel
+ * on. `railRoute` is the fix, and what it must not do is disturb the preferred
+ * case — so both halves are pinned here.
+ */
+describe('payout_route describes the destination that was registered', () => {
+  test('a US seller registering PayPal is described by PayPal, not by Stripe Connect', async () => {
+    const route = await describedRoute('paypal', 'US', 'USD')
+    expect(route.provider).toBe('paypal')
+    expect(route.kind).toBe('paypal')
+    expect(route.currency).toBe('USD')
+    expect(route.blocked).toBe(false)
+    expect(route.reason).toBe('Paid in USD to a PayPal account in United States.')
+    // The reported symptom, stated as the thing that must not come back.
+    expect(route.reason).not.toMatch(/Stripe/)
+    // And nothing about the ranking moved: Stripe is still what the corridor
+    // prefers and still what a seller who says nothing gets.
+    expect(payoutRoute('US', 'USD').provider).toBe('stripe')
+  })
+
+  test('the preferred rail still gets the corridor\'s own route, unchanged', async () => {
+    // The common case by a wide margin, and the one a rewrite could quietly
+    // reword. It is the same object, not merely the same shape.
+    expect(await describedRoute('stripe_connect', 'US', 'USD')).toEqual(payoutRoute('US', 'USD'))
+  })
+
+  test('a Rwandan seller on the bank rail is described as a bank account, not a wallet', async () => {
+    // Two rails, one adapter: `kind` is what separates them, and it is exactly
+    // what the corridor's route gets wrong for the second of them. RW prefers
+    // the wallet because it has one.
+    expect(payoutRoute('RW', 'RWF').kind).toBe('momo')
+
+    const route = await describedRoute('flutterwave_bank', 'RW', 'RWF')
+    expect(route.provider).toBe('flutterwave')
+    expect(route.kind).toBe('bank')
+    expect(route.reason).toBe('Paid in RWF via Flutterwave, to a bank account in Rwanda.')
+
+    expect(await describedRoute('flutterwave_momo', 'RW', 'RWF')).toEqual(payoutRoute('RW', 'RWF'))
+  })
+
+  test('a Kenyan seller paid in USD on PayPal is described in USD on PayPal', async () => {
+    // Eligibility is per (country, currency), and so is the description: the
+    // currency the destination was registered in is the one it is paid in.
+    const route = await describedRoute('paypal', 'KE', 'USD')
+    expect(route.provider).toBe('paypal')
+    expect(route.kind).toBe('paypal')
+    expect(route.currency).toBe('USD')
+    expect(route.reason).toBe('Paid in USD to a PayPal account in Kenya.')
+  })
+
+  test('every method payment-options offers is described by itself', async () => {
+    // The property the four cases above are instances of, and the one that
+    // catches a rail added later: nothing a client may register is described
+    // as something else. `methods` and `kind` are the two lists that have to
+    // agree, so this crosses them.
+    for (const [country, currency] of [
+      ['US', 'USD'],
+      ['RW', 'RWF'],
+      ['KE', 'KES'],
+      ['KE', 'USD'],
+      ['GB', 'GBP'],
+      ['AD', 'EUR'],
+    ] as [Country, Currency][]) {
+      for (const kind of await methodsFor(country, currency)) {
+        const route = await describedRoute(KIND_RAIL[kind], country, currency)
+        expect(route.kind, `${KIND_RAIL[kind]} in ${country}/${currency}`).toBe(kind)
+        expect(route.currency, `${KIND_RAIL[kind]} in ${country}/${currency}`).toBe(currency)
+        expect(route.blocked).toBe(false)
+        expect(route.provider).not.toBeNull()
+      }
+    }
   })
 })

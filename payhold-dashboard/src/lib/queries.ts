@@ -6,8 +6,10 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   api,
+  type Country,
   type CronJobName,
   type CronRun,
+  type Currency,
   type DealListFilter,
   type WebhookDeliveryFilter,
 } from '@/api'
@@ -29,6 +31,8 @@ export const keys = {
   disputeOffers: (disputeId: string) => ['dispute-offers', disputeId] as const,
   disputeTimeline: (disputeId: string) => ['dispute-timeline', disputeId] as const,
   sellers: ['sellers'] as const,
+  payoutOptions: (country: Country, currency?: Currency) =>
+    ['payout-options', country, currency ?? 'market-default'] as const,
   sellerDestinations: (sellerId?: string) =>
     ['seller-destinations', sellerId ?? 'all'] as const,
   sellerCapabilities: (sellerId: string) =>
@@ -101,6 +105,24 @@ export const useCheckoutSessions = (dealId?: string) =>
 
 export const useSellers = () =>
   useQuery({ queryKey: keys.sellers, queryFn: () => api.listSellers() })
+
+/**
+ * What the backend says a seller in this market can be paid, and into what.
+ *
+ * **The only source a payout picker may be rendered from.** The registry says
+ * which corridors are possible; this says which are on today (§29.11), and the
+ * pair is the unit — Kenya answers `['momo']` in KES and reaches PayPal in USD,
+ * so the currency is part of the key rather than a filter applied afterwards.
+ *
+ * Cached like any other read and deliberately not `staleTime: Infinity`, unlike
+ * `useProviderRequirements`: a corridor is a row an operator changes without a
+ * redeploy, which is the whole reason this is a call and not a table.
+ */
+export const usePayoutOptions = (country: Country, currency?: Currency) =>
+  useQuery({
+    queryKey: keys.payoutOptions(country, currency),
+    queryFn: () => api.getPayoutOptions(country, currency),
+  })
 
 export const useSellerDestinations = (sellerId?: string) =>
   useQuery({

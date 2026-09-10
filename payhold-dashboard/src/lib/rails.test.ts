@@ -8,10 +8,12 @@
  */
 
 import { describe, expect, it } from 'vitest'
-import type { Country } from '@/api/types'
+import type { Country, PayoutKind } from '@/api/types'
 import { COUNTRIES } from './countries'
 import { PROVENANCE, PROVENANCE_READING_DATES, provenanceFor } from './railProvenance'
 import {
+  PAYOUT_KIND_RAIL,
+  PAYOUT_PROVIDER_LABEL,
   RAILS,
   RAILS_VERIFIED,
   collectionRails,
@@ -26,6 +28,7 @@ import {
   payoutRails,
   payoutRoute,
   providerFor,
+  railsForPayoutKinds,
 } from './rails'
 
 const ALL: Country[] = COUNTRIES.map((c) => c.code)
@@ -303,6 +306,42 @@ describe('payout routing — where money can actually go', () => {
 
   it('never marks a card rail payable — a refund is not a payout', () => {
     expect(RAILS.filter((r) => r.method === 'card').every((r) => !r.payout)).toBe(true)
+  })
+})
+
+/**
+ * `payout.methods` arrives in kinds and a destination is tokenized against a
+ * rail, so the translation has to be total: a kind with no rail is a
+ * destination the backend offers and this side cannot register.
+ */
+describe('payout kinds, as the backend answers them', () => {
+  const KINDS: PayoutKind[] = ['momo', 'bank', 'connect', 'paypal']
+
+  it('gives every kind a rail, and every rail a word', () => {
+    for (const kind of KINDS) {
+      const rail = PAYOUT_KIND_RAIL[kind]
+      expect(rail).toBeDefined()
+      expect(PAYOUT_PROVIDER_LABEL[rail]).toBeTruthy()
+    }
+  })
+
+  it('keeps the backend’s order — the preferred destination stays first', () => {
+    // `payoutMethods` sorts `kind` to the head deliberately; re-ranking here
+    // would preselect a destination other than the one a payout would take.
+    expect(railsForPayoutKinds(['paypal', 'connect'])).toEqual([
+      'paypal',
+      'stripe_connect',
+    ])
+    expect(railsForPayoutKinds(['connect', 'paypal'])).toEqual([
+      'stripe_connect',
+      'paypal',
+    ])
+  })
+
+  it('offers nothing when the answer is nothing', () => {
+    // A closed market and an unroutable corridor both arrive as an empty list,
+    // and an empty picker is the only honest rendering of one.
+    expect(railsForPayoutKinds([])).toEqual([])
   })
 })
 

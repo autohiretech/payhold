@@ -270,6 +270,72 @@ export type PayoutProvider =
   | 'alipay'
   | 'wechat_pay'
 
+/**
+ * What a market can be paid *into*, in the vocabulary the backend answers in.
+ *
+ * Narrower than `PayoutProvider`: a kind names the destination a seller has to
+ * go and find — a wallet, a bank account, a Connect account, a PayPal
+ * account — and the rail it is tokenized against follows from it
+ * (`PAYOUT_KIND_RAIL` in `lib/rails.ts`). `/v1/payment-options` speaks in kinds
+ * because that is the choice somebody is actually making.
+ */
+export type PayoutKind = 'momo' | 'bank' | 'connect' | 'paypal'
+
+/**
+ * One currency a market can be paid in, and what it can be paid into there.
+ *
+ * **Eligibility is per (country, currency), not per country.** PayPal's route
+ * row carries Kenya and does not carry KES, so KE/KES answers `['momo']` and
+ * KE/USD reaches PayPal — which is why a form that can only ever ask in the
+ * local currency concludes a rail is absent when it is not.
+ */
+export interface PayableCurrency {
+  currency: Currency
+  methods: PayoutKind[]
+  /** The market's own currency, when it is payable at all. Sorted first. */
+  default: boolean
+}
+
+/**
+ * `GET /v1/payment-options?payout_country=XX[&payout_currency=YYY]` — whether a
+ * seller in that market can be paid, in what, and into what.
+ *
+ * **This is the only thing a payout-method picker may be rendered from.** The
+ * generated registry (`lib/countries.ts`, `lib/rails.ts`) says what is
+ * *possible*; `payout.methods` is derived from `route_evaluation` and says what
+ * is *on* — §29.11 — with the tenant's own overrides and closed markets
+ * already applied. A picker derived from the registry offers combinations
+ * registration then refuses: Kenya's bank corridor sits behind a Flutterwave
+ * request, and Kenya + KES + PayPal is `currency_not_supported`.
+ *
+ * **Note the nesting.** `methods` and `currencies` are *inside* `payout`, not
+ * beside it. Read a level up they are `undefined`, and an `undefined` a picker
+ * falls back from is the registry answering again with nobody noticing.
+ */
+export interface PayoutOptions {
+  country: { code: Country; name: string; flag: string }
+  payout: {
+    provider: Provider | null
+    /** The *preferred* destination. A single value; a market is not. */
+    kind: PayoutKind | null
+    currency: Currency
+    /** True when nothing reaches this corridor — the form must offer nothing. */
+    blocked: boolean
+    reason: string
+    /** §16's written confirmation for this market. "Probably", not "yes". */
+    verified: boolean
+    /** Every destination this pair can be paid into, the preferred one first. */
+    methods: PayoutKind[]
+    /** Every currency this market can be paid in, the default one first. */
+    currencies: PayableCurrency[]
+  }
+  /** The wallets a mobile money destination may name here. Empty means none. */
+  networks: string[]
+  /** Null is "not asked for" (or asked for and unreachable) — never "none". */
+  banks: { code: string; name: string }[] | null
+  rails_verified: boolean
+}
+
 export interface Seller {
   id: string
   tenant_id: string

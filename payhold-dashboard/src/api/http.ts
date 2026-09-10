@@ -59,6 +59,7 @@ import {
   type CheckoutSessionState,
   type ConfirmSide,
   type ConnectProviderInput,
+  type Country,
   type CreateDealInput,
   type CreateDealResult,
   type CreateSellerInput,
@@ -80,6 +81,7 @@ import {
   type Money,
   type PaymentMethod,
   type Payout,
+  type PayoutOptions,
   type PayoutRoute,
   type Provider,
   type ProviderAccount,
@@ -590,6 +592,42 @@ export class HttpClient implements PayHoldClient {
   async listSellers(): Promise<Seller[]> {
     const { sellers } = await this.#call<{ sellers: Seller[] }>('/sellers')
     return sellers
+  }
+
+  /**
+   * What this market can actually be paid, and into what.
+   *
+   * `methods` and `currencies` arrive **inside** `payout` rather than beside
+   * it, which is the one thing to get right here: read a level up they are
+   * `undefined`, a picker treats that as "no answer" and falls back to the
+   * registry, and the registry is exactly the thing this call exists to stop
+   * being asked.
+   *
+   * The one place the shapes differ, normalised once here rather than in every
+   * caller: a market closed in `payment_markets` answers with the closure and
+   * **no lists at all** — absent, not empty. Absent is read as "nothing is
+   * registerable", which is what a closure means, so the missing list fails
+   * closed instead of leaving a screen to conclude the endpoint said nothing.
+   */
+  async getPayoutOptions(
+    country: Country,
+    currency?: Currency,
+  ): Promise<PayoutOptions> {
+    const params = new URLSearchParams({ payout_country: country })
+    if (currency) params.set('payout_currency', currency)
+
+    const options = await this.#call<PayoutOptions>(
+      `/payment-options?${params.toString()}`,
+    )
+
+    return {
+      ...options,
+      payout: {
+        ...options.payout,
+        methods: options.payout?.methods ?? [],
+        currencies: options.payout?.currencies ?? [],
+      },
+    }
   }
 
   /**

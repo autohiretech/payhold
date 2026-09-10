@@ -837,15 +837,36 @@ documentation is a different artefact and should not be this file.
 `src/lib/rails.ts` is the routing table: which provider handles which payment
 method, in which market, for collection and for payout. Everything rail-related
 reads from it — the checkout method picker, the deal form's preview, the Rails
-screen, seller registration.
+screen.
 
 **Payouts no longer route through it.** §5.1 moved that to `payout_routes` rows,
-because §12 requires a corridor to be switchable without a deploy. This file
-keeps its other job — refusing a destination at registration, before it is
-stored — and `PAYOUT_PROVIDER_LABEL` lives here, where the "never inline a
-provider name in a screen" convention says rail vocabulary belongs. Three copies
-of that map used to sit in screens, which is exactly the failure the convention
-exists to prevent: §5.1 added five rails at once.
+because §12 requires a corridor to be switchable without a deploy. What it keeps
+is the vocabulary: `PAYOUT_PROVIDER_LABEL` and `PAYOUT_KIND_RAIL` live here,
+where the "never inline a provider name in a screen" convention says rail words
+belong. Three copies of the first used to sit in screens, which is exactly the
+failure the convention exists to prevent: §5.1 added five rails at once.
+
+**Seller registration is not on this list any more, and that is the point.**
+The payout-method picker on `Sellers.tsx` reads `payout.methods` from
+`GET /v1/payment-options?payout_country=&payout_currency=` — the registry says
+what is *possible*, the routing table says what is *on* (§29.11), and only the
+backend can read the second. Deriving the list here offered pairs registration
+then refuses: Kenya + KES + PayPal is `currency_not_supported`, because PayPal's
+route row carries KE without carrying KES, and Kenya's bank corridor sits behind
+a Flutterwave request while `flutterwavePayout` is true for the wallet. A
+destination registered against one of those is a tokenized beneficiary no payout
+can reach. **Eligibility is per (country, currency), not per country**, so the
+currency picker comes from `payout.currencies` of the same read rather than
+from `[local, USD, EUR]`, and the pair is what is asked.
+
+Two things about that response are load-bearing. `methods` and `currencies` are
+**inside** `payout`, not beside it — read a level up they are `undefined`, and
+an `undefined` a picker falls back from is the registry answering again with
+nobody noticing. And a market closed in `payment_markets` answers with the
+closure and no lists at all, so `getPayoutOptions` normalises absent to empty
+once, in `http.ts`: nothing offered is the honest rendering of a closure, of a
+read still in flight, and of a read that failed. `screens/sellers.test.ts`
+mounts the form and pins all of it.
 
 **Every row is `verified: false`.** The table encodes the *plan* from the build
 spec, not a checked capability list. What a client is told is

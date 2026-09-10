@@ -30,6 +30,7 @@ import {
   assertRailSwitchedOnRows,
   evaluateRails,
   railAdapterFor,
+  railRoute,
 } from './rail-adapter.ts'
 import { StripeProvider } from '../_shared/stripe.ts'
 import {
@@ -153,10 +154,13 @@ async function create(
     const info = countryInfo(country)
     payoutCurrency = body.payout_currency ?? info.currency
 
-    // Refuse a destination we could never send money to.
-    route = payoutRoute(country, payoutCurrency)
-    if (route.blocked) {
-      throw new PayHoldError('policy_violation', route.reason)
+    // Refuse a destination we could never send money to. `corridor` is the
+    // market's own preferred route and is what the three checks below are made
+    // against; what comes back in the response is the *rail's* route, built
+    // from it once the rail has been accepted — see `railRoute`.
+    const corridor = payoutRoute(country, payoutCurrency)
+    if (corridor.blocked) {
+      throw new PayHoldError('policy_violation', corridor.reason)
     }
     // A corridor the adapter cannot send on (it wants fields PayHold does not
     // collect) is refused first, because it is the only one of the three that
@@ -170,8 +174,13 @@ async function create(
     // rail is not the only one a seller may choose — `rail-adapter.ts` has the
     // account of what that got wrong.
     const rails = await evaluateRails(db, caller.tenant_id, country, payoutCurrency)
-    assertRailOnRoute(body.payout_provider!, country, route, rails)
+    assertRailOnRoute(body.payout_provider!, country, corridor, rails)
     assertRailSwitchedOnRows(rails, body.payout_provider!, country)
+
+    // The rail is accepted, so the response can describe it rather than the
+    // corridor's default — `addDestination` does the same, for the account in
+    // `railRoute`'s header.
+    route = railRoute(body.payout_provider!, country, corridor)
 
     // Which wallet or bank, checked before anything is sent anywhere. A
     // beneficiary registered without it is one the rail will not transfer to.
@@ -181,7 +190,7 @@ async function create(
     // payout, not on whichever rail happens to be connected: a Rwandan seller
     // is paid by Flutterwave even when the buyer's card was charged by Stripe.
     //
-    // It is the **rail's** adapter, not `route.provider`. Those are the same
+    // It is the **rail's** adapter, not `corridor.provider`. Those are the same
     // thing whenever the seller picked the corridor's preferred rail, and were
     // the same thing everywhere while a corridor had only one — but a US
     // seller choosing PayPal in a market `payoutRoute` prefers Stripe for would
@@ -745,19 +754,28 @@ async function addDestination(
   const payoutCurrency = body.payout_currency ??
     (body.country ? countryInfo(body.country).currency : seller.payout_currency!)
 
-  const route = payoutRoute(country, payoutCurrency)
-  if (route.blocked) throw new PayHoldError('policy_violation', route.reason)
+  // The market's own preferred route, which is what the checks below are made
+  // against and — until 2026-09-10 — was also what came back as
+  // `payout_route`. It is not the destination being registered whenever the
+  // caller named one of the corridor's other live rails; `railRoute` below is
+  // that, and its header is the account of what returning this instead said.
+  const corridor = payoutRoute(country, payoutCurrency)
+  if (corridor.blocked) throw new PayHoldError('policy_violation', corridor.reason)
 
-  // `route.blocked` used to be the only check here, and it is the wrong one
+  // `corridor.blocked` used to be the only check here, and it is the wrong one
   // for the rail the caller named: RW/RWF is not blocked, it is Flutterwave's,
-  // so a `stripe_connect` request sailed through, was tokenized on
-  // `route.provider` two calls below — Flutterwave — and was stored claiming
+  // so a `stripe_connect` request sailed through, was tokenized on the
+  // corridor's own provider below — Flutterwave — and was stored claiming
   // Stripe. `rail-adapter.ts` has the whole account; this is where it happened.
   // Same three checks as `create`, same order, same reasons.
   assertRailRequirementsMet(body.payout_provider, country)
   const rails = await evaluateRails(db, caller.tenant_id, country, payoutCurrency)
-  assertRailOnRoute(body.payout_provider, country, route, rails)
+  assertRailOnRoute(body.payout_provider, country, corridor, rails)
   assertRailSwitchedOnRows(rails, body.payout_provider, country)
+
+  // The rail is accepted, so `payout_route` can describe the destination this
+  // call is creating instead of the one PayHold would have picked for it.
+  const route = railRoute(body.payout_provider, country, corridor)
 
   const credentials = destinationCredentials(body.payout_provider, country, body)
 

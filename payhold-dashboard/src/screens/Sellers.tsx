@@ -3,13 +3,12 @@ import { Link } from 'react-router-dom'
 import { api, type Country, type Currency, type PayoutProvider } from '@/api'
 import { ProviderChip } from '@/components/rails'
 import {
-  COUNTRIES,
   countriesByRegion,
   countryFlag,
   countryName,
-  defaultCurrencyFor,
   PAYOUT_PROVIDER_LABEL,
   payoutRoute,
+  railsForPayoutKinds,
 } from '@/lib/rails'
 import {
   Badge,
@@ -30,7 +29,12 @@ import {
   cx,
 } from '@/components/ui'
 import { formatDate, formatMoneyShort, KYC_STATUS_META } from '@/lib/format'
-import { useMoneyAction, useSellerWallets, useSellers } from '@/lib/queries'
+import {
+  useMoneyAction,
+  usePayoutOptions,
+  useSellerWallets,
+  useSellers,
+} from '@/lib/queries'
 
 /**
  * Who this account is holding money for, and how much of it is theirs to take.
@@ -129,30 +133,6 @@ function WalletsCard() {
       </p>
     </Card>
   )
-}
-
-/**
- * Payout destinations available in a market, derived from the registry rather
- * than hand-listed — a market with an empty list has no way to receive money,
- * and the form says so instead of offering something that would never pay.
- */
-function payoutOptionsFor(country: Country): PayoutProvider[] {
-  const info = COUNTRIES.find((c) => c.code === country)
-  if (!info) return []
-
-  const options: PayoutProvider[] = []
-  // `momoPayout`, not `momo` — the second says a buyer there can pay from a
-  // wallet, which is a different question from whether we can send to one.
-  if (info.momoPayout) options.push('flutterwave_momo')
-  if (info.flutterwavePayout) options.push('flutterwave_bank')
-  if (info.stripePayout) options.push('stripe_connect')
-  // PayPal last, mirroring `payoutRoute`'s own ranking — it is offered
-  // *alongside* whatever else reaches the market rather than instead of it,
-  // which is what the routing table has said since its row was switched on
-  // (2026-09-10). A US seller may be paid into a Connect account or a PayPal
-  // one; before this line the form could only offer the first.
-  if (info.paypalPayout) options.push('paypal')
-  return options
 }
 
 export function SellersPage() {
@@ -290,20 +270,38 @@ function AddSellerForm({ onClose }: { onClose: () => void }) {
   // always send one, or it cannot find this seller again.
   const [externalUserId, setExternalUserId] = useState('')
 
-  // The market decides which payout methods are even possible, so it drives
-  // the method list rather than sitting beside it.
-  const available = payoutOptionsFor(country)
-  const [provider, setProvider] = useState<PayoutProvider>('flutterwave_momo')
-  const effective = available.includes(provider) ? provider : available[0]
+  // **The backend decides what can be registered here, and nothing else does.**
+  //
+  // The generated registry says which corridors are *possible*; the routing
+  // table says which are *on* (§29.11), and only the backend can read the
+  // second. Deriving this list from `countries.ts` offered pairs that
+  // registration then refuses — Kenya's bank corridor sits behind a Flutterwave
+  // request, and Kenya + KES + PayPal is `currency_not_supported` because
+  // PayPal's route row carries KE without carrying KES.
+  //
+  // Eligibility is per **(country, currency)**, not per country, so the pair is
+  // what is asked: a market's answer in its own money is a different answer
+  // from its answer in dollars, and the same read fills both pickers.
+  const [payoutCurrency, setPayoutCurrency] = useState<Currency | null>(null)
+  const options = usePayoutOptions(country, payoutCurrency ?? undefined)
+  const payout = options.data?.payout
 
-  // What the seller wants to be paid in. Local keeps them on the local rail;
-  // asking for dollars changes the route entirely, and sometimes removes it.
-  const local = defaultCurrencyFor(country)
-  const [payoutCurrency, setPayoutCurrency] = useState<Currency>(local)
-  const currencyChoices: Currency[] = [...new Set<Currency>([local, 'USD', 'EUR'])]
-  const wanted = currencyChoices.includes(payoutCurrency) ? payoutCurrency : local
+  // Null until the answer lands, deliberately: the market's own currency is the
+  // backend's default and this form does not guess at it. Nothing is offered
+  // while the read is in flight and nothing is offered if it fails — an empty
+  // picker is the honest shape of "we have not been told", and the alternative
+  // is falling back to the registry, which is the bug.
+  const currencyChoices = payout?.currencies ?? []
+  const wanted =
+    currencyChoices.find((c) => c.currency === payoutCurrency)?.currency ??
+    // Sorted default-first by the backend, so the head is the currency a seller
+    // here gets today. Preselecting anything else would move them off it.
+    currencyChoices[0]?.currency ??
+    null
 
-  const route = payoutRoute(country, wanted)
+  const available = railsForPayoutKinds(payout?.methods ?? [])
+  const [provider, setProvider] = useState<PayoutProvider | null>(null)
+  const effective = provider && available.includes(provider) ? provider : available[0]
 
   const create = useMoneyAction(() => {
     if (!hasDestination) {
@@ -312,9 +310,12 @@ function AddSellerForm({ onClose }: { onClose: () => void }) {
         external_user_id: externalUserId.trim() || undefined,
       })
     }
-    if (!effective) {
+    if (!effective || !wanted) {
+      // The backend's own sentence where there is one — it is written for
+      // somebody to read, and a second wording here would be a second answer.
       throw new Error(
-        `PayHold cannot send money to ${countryName(country)} yet — a seller there cannot be paid.`,
+        payout?.reason ??
+          `PayHold cannot send money to ${countryName(country)} yet — a seller there cannot be paid.`,
       )
     }
     return api.createSeller({
@@ -353,9 +354,14 @@ function AddSellerForm({ onClose }: { onClose: () => void }) {
                 <Select
                   value={country}
                   onChange={(e) => {
-                    const next = e.target.value as Country
-                    setCountry(next)
-                    setPayoutCurrency(defaultCurrencyFor(next))
+                    setCountry(e.target.value as Country)
+                    // Both choices belong to the old market. Cleared rather
+                    // than carried, so the next answer is asked for in the
+                    // backend's default currency instead of one this form
+                    // assumed, and no rail is preselected before we are told
+                    // which rails exist.
+                    setPayoutCurrency(null)
+                    setProvider(null)
                   }}
                 >
                   {countriesByRegion().map((group) => (
@@ -372,15 +378,22 @@ function AddSellerForm({ onClose }: { onClose: () => void }) {
 
               <Field label="Wants to be paid in">
                 <Select
-                  value={wanted}
+                  value={wanted ?? ''}
+                  disabled={currencyChoices.length === 0}
                   onChange={(e) => setPayoutCurrency(e.target.value as Currency)}
                 >
-                  {currencyChoices.map((c) => (
-                    <option key={c} value={c}>
-                      {c}
-                      {c === local ? ' (local)' : ''}
+                  {currencyChoices.length === 0 ? (
+                    <option value="">
+                      {options.isPending ? 'Checking…' : 'Not payable here'}
                     </option>
-                  ))}
+                  ) : (
+                    currencyChoices.map((c) => (
+                      <option key={c.currency} value={c.currency}>
+                        {c.currency}
+                        {c.default ? ' (local)' : ''}
+                      </option>
+                    ))
+                  )}
                 </Select>
               </Field>
 
@@ -391,7 +404,9 @@ function AddSellerForm({ onClose }: { onClose: () => void }) {
                   onChange={(e) => setProvider(e.target.value as PayoutProvider)}
                 >
                   {available.length === 0 ? (
-                    <option value="">No rail available</option>
+                    <option value="">
+                      {options.isPending ? 'Checking…' : 'No rail available'}
+                    </option>
                   ) : (
                     available.map((p) => (
                       <option key={p} value={p}>
@@ -440,27 +455,37 @@ function AddSellerForm({ onClose }: { onClose: () => void }) {
         </label>
 
         {/* The resulting route, stated before you save rather than discovered
-            when the first payout is due. */}
-        {hasDestination && (
-          <div
-            className={cx(
-              'rounded-xl px-4 py-3 text-sm leading-relaxed',
-              route.blocked
-                ? 'bg-danger-soft text-danger'
-                : route.provider === 'stripe'
-                  ? 'bg-held-soft text-held'
-                  : 'bg-surface-2 text-fg-muted',
-            )}
-          >
-            <span className="flex flex-wrap items-center gap-2">
-              <strong className="font-semibold">
-                {route.blocked ? 'Cannot be paid' : 'Will be paid via'}
-              </strong>
-              {route.provider && <ProviderChip provider={route.provider} />}
-            </span>
-            <span className="mt-1.5 block">{route.reason}</span>
-          </div>
-        )}
+            when the first payout is due — and it is the routing engine's own
+            answer for this pair, not a second one derived here. A read that has
+            not landed says so; a read that failed says nothing about the route,
+            because the alternative is guessing. */}
+        {hasDestination &&
+          (options.isPending ? (
+            <div className="rounded-xl bg-surface-2 px-4 py-3 text-sm leading-relaxed text-fg-muted">
+              Checking which rails reach {countryName(country)}…
+            </div>
+          ) : options.isError ? (
+            <ErrorNote message={options.error.message} />
+          ) : payout ? (
+            <div
+              className={cx(
+                'rounded-xl px-4 py-3 text-sm leading-relaxed',
+                payout.blocked
+                  ? 'bg-danger-soft text-danger'
+                  : payout.provider === 'stripe'
+                    ? 'bg-held-soft text-held'
+                    : 'bg-surface-2 text-fg-muted',
+              )}
+            >
+              <span className="flex flex-wrap items-center gap-2">
+                <strong className="font-semibold">
+                  {payout.blocked ? 'Cannot be paid' : 'Will be paid via'}
+                </strong>
+                {payout.provider && <ProviderChip provider={payout.provider} />}
+              </span>
+              <span className="mt-1.5 block">{payout.reason}</span>
+            </div>
+          ) : null)}
 
         {create.isError && <ErrorNote message={create.error.message} />}
 
@@ -468,7 +493,12 @@ function AddSellerForm({ onClose }: { onClose: () => void }) {
           <Button
             type="submit"
             variant="primary"
-            disabled={create.isPending || (hasDestination && available.length === 0)}
+            disabled={
+              create.isPending ||
+              // Nothing to register against until the backend has answered, and
+              // nothing to register at all when it answers with no rail.
+              (hasDestination && (options.isPending || !effective || !wanted))
+            }
           >
             {create.isPending ? 'Registering…' : 'Register seller'}
           </Button>

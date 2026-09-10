@@ -28,6 +28,7 @@ import type {
   Country,
   Currency,
   PaymentMethod,
+  PayoutKind,
   PayoutProvider,
   Provider,
   RouteReasonCode,
@@ -473,7 +474,47 @@ export function payoutRails(country: Country): Rail[] {
   return RAILS.filter((r) => r.payout && r.country === country)
 }
 
-export type PayoutKind = 'momo' | 'bank' | 'connect' | 'paypal'
+/**
+ * Re-exported rather than declared: `PayoutKind` is a wire word now — it is
+ * what `payout.kind` and `payout.methods` are spelled in — so it lives with the
+ * other v1 types and this file keeps offering it where the rest of the rail
+ * vocabulary is.
+ */
+export type { PayoutKind }
+
+/**
+ * The rail a destination of each kind is tokenized against.
+ *
+ * `/v1/payment-options` answers in kinds, because a kind is the thing a seller
+ * has to go and find; registration takes a `PayoutProvider`, which is provider
+ * and method together, because a token minted for a wallet means nothing to a
+ * bank transfer. One map, here with the rest of the rail vocabulary rather than
+ * as a switch inside a form — §5.1 added five rails at once, and the three
+ * copies of `PAYOUT_PROVIDER_LABEL` that used to live in screens are why that
+ * convention exists.
+ */
+export const PAYOUT_KIND_RAIL: Record<PayoutKind, PayoutProvider> = {
+  momo: 'flutterwave_momo',
+  bank: 'flutterwave_bank',
+  connect: 'stripe_connect',
+  paypal: 'paypal',
+}
+
+/**
+ * The rails behind `payout.methods`, in the order the backend ranked them —
+ * its preferred destination first.
+ *
+ * Order is preserved rather than re-sorted: the backend put `kind` first
+ * deliberately, and a form that re-ranked the list would preselect a
+ * destination other than the one a payout would actually take. An unrecognised
+ * kind is dropped, because a rail this build has no word for is one it cannot
+ * register against either.
+ */
+export function railsForPayoutKinds(kinds: PayoutKind[]): PayoutProvider[] {
+  return kinds
+    .map((kind) => PAYOUT_KIND_RAIL[kind])
+    .filter((rail): rail is PayoutProvider => Boolean(rail))
+}
 
 export interface PayoutRoute {
   provider: Provider | null

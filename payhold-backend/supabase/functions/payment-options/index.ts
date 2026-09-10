@@ -277,6 +277,13 @@ Deno.serve(handler(async (req) => {
         currency,
         blocked: true,
         verified: false,
+        // `[]` rather than absent, so the field is always there to read. A
+        // closed market used to answer with no `methods` key at all, which
+        // made "nothing can be paid here" and "this response does not carry
+        // that fact" the same value at the client — and a client that treated
+        // `undefined` as "ask something else" would fall back to the registry,
+        // which is the one answer a closure is meant to overrule.
+        methods: [],
         reason: closure.reason,
       }
       : await routedOrBlocked(db, caller.tenant_id, payoutCountry, currency, verified)

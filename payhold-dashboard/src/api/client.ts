@@ -38,6 +38,7 @@ import type {
   ChargeNextAction,
   ConfirmSide,
   ConnectProviderInput,
+  Country,
   CreateDealInput,
   CreateDealResult,
   CreateSellerInput,
@@ -58,6 +59,7 @@ import type {
   Payout,
   PayoutDecision,
   PayoutDisplayStatus,
+  PayoutOptions,
   PayoutRoute,
   PaymentMethod,
   Provider,
@@ -230,6 +232,22 @@ export interface PayHoldClient {
   // -- Sellers -------------------------------------------------------------
   listSellers(): Promise<Seller[]>
   createSeller(input: CreateSellerInput): Promise<Seller>
+  /**
+   * Can a seller in this market be paid, in what, and into what — the answer a
+   * payout-setup form is rendered from.
+   *
+   * **Not the registry.** `lib/countries.ts` says which corridors are possible
+   * and `payout.methods` says which are on today (§29.11), derived from
+   * `route_evaluation` with this tenant's overrides and closed markets already
+   * applied. Only the backend can read the second, so a form that derives its
+   * own list offers pairs registration then refuses — Kenya + KES + PayPal is
+   * `currency_not_supported`, and Kenya's bank corridor sits behind a
+   * Flutterwave request.
+   *
+   * Omit the currency to be answered in the market's own; `payout.currencies`
+   * comes back either way, so one call fills both pickers.
+   */
+  getPayoutOptions(country: Country, currency?: Currency): Promise<PayoutOptions>
   /**
    * §5.1: a seller has a preferred destination and may have a verified backup,
    * which one pair of columns on the seller could not express. Omit the id for
