@@ -866,17 +866,29 @@ export class StripeProvider implements PaymentProvider {
     }
   }
 
-  /** Has this account finished enough of onboarding to receive a transfer? */
+  /**
+   * Has this account finished enough of onboarding to receive a transfer —
+   * and which country was it registered in?
+   *
+   * `country` comes back because the caller is about to write a destination row
+   * naming a market, and the account is the destination: Stripe fixes an
+   * account's country when it is created and there is no moving it afterwards,
+   * so the account itself is the only honest answer to which corridor this
+   * destination is in. It is `null` when Stripe does not say, which is not the
+   * same fact as a disagreement and must not be read as one.
+   */
   async connectAccountStatus(
     accountId: string,
-  ): Promise<{ payoutsEnabled: boolean; detailsSubmitted: boolean }> {
+  ): Promise<{ payoutsEnabled: boolean; detailsSubmitted: boolean; country: string | null }> {
     const account = await this.call<{
       payouts_enabled?: boolean
       details_submitted?: boolean
+      country?: string
     }>(`/accounts/${encodeURIComponent(accountId)}`)
     return {
       payoutsEnabled: !!account.payouts_enabled,
       detailsSubmitted: !!account.details_submitted,
+      country: account.country ?? null,
     }
   }
 

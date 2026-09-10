@@ -99,13 +99,16 @@ describe('assertRailSwitchedOn — the table, not the registry, says whether a r
     expect(err.code).toBe('policy_violation')
     expect(err.message).toBe(
       'flutterwave_bank is not switched on for KE — ' +
-        'GET /v1/payment-options?payout_country=KE lists the methods that can be paid.',
+        'Choose one of the other payout methods offered for Kenya.',
     )
   })
 
   test('the refusal names payment-options as the fix', async () => {
     const err = await refusal(() => assertRailSwitchedOn(db, tenant, 'flutterwave_bank', 'KE', 'KES'))
-    expect(err.message).toMatch(/payment-options\?payout_country=KE/)
+    // Points the host at their payout screen, never at an API path — this
+    // message reaches a car owner verbatim in a toast.
+    expect(err.message).toMatch(/other payout methods offered for Kenya/)
+    expect(err.message).not.toMatch(/payment-options|GET \//)
   })
 
   test('flutterwave_momo for RW is accepted', async () => {
@@ -189,7 +192,7 @@ describe('assertRailRequirementsMet — corridors the adapter cannot send on', (
         "Flutterwave requires the recipient's first name, last name, email, mobile number " +
         'and address on every South African bank transfer, and PayHold does not collect ' +
         'an email or address yet. ' +
-        'GET /v1/payment-options?payout_country=ZA lists the methods that can be paid.',
+        'Choose one of the other payout methods offered for South Africa.',
     )
   })
 
@@ -197,7 +200,7 @@ describe('assertRailRequirementsMet — corridors the adapter cannot send on', (
     expect(() => assertRailRequirementsMet('flutterwave_bank', 'TZ')).toThrow(
       'flutterwave_bank cannot pay a bank account in TZ yet. ' +
         'Flutterwave pays Tanzanian bank accounts only for businesses registered in Tanzania. ' +
-        'GET /v1/payment-options?payout_country=TZ lists the methods that can be paid.',
+        'Choose one of the other payout methods offered for Tanzania.',
     )
   })
 

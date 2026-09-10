@@ -443,6 +443,35 @@ place registering and changing a destination are checked identically, and
 may pick (plus `banks`, opt-in with `&banks=1`, since bank codes are a list
 Flutterwave publishes rather than one we can transcribe).
 
+**A refusal has to say whose country it is refusing — and a host is reading
+it.** `POST /sellers/:id/destinations` and both Connect onboarding routes let a
+client omit `country` and fall back to `sellers.country`, which is the country
+of that seller's *first* destination and is refreshed by nothing. The fallback
+stays — a seller moving from a wallet to a bank account has not moved country,
+and a client made to restate it could restate it wrongly — but a host who had
+since moved to the United States got
+`paypal cannot pay a destination in RW. Paid in RWF via Flutterwave…` on their
+own payout screen, unedited: AutoHire puts our `message` straight into a toast.
+`_shared/seller-market.ts` resolves the pair and records which way it went; a
+refusal raised against a defaulted country carries `defaultedCountryNote`, and
+the destination and onboarding responses carry `country_source`.
+
+**Every message on this path is written for the car owner, not the integrator.**
+Name the fact, then the action they can take: *"We still have Rwanda as your
+payout country. If you have moved, update your payout country on your payout
+screen and try again."* Never the mechanism — a host has not seen the call their
+app made, and `record`, `field`, `seller row` and `request` name nothing they
+can act on. Never blame either: a stored country that has gone stale is our
+state, not something they typed wrong. The cost is that endpoint names came out
+of two of these sentences; that half belongs in the API docs, where the person
+who can use it is.
+
+**Which country gets chosen is unchanged**: quietly resolving a different market
+would trade a confusing refusal for a payout to the wrong place. A blank
+`country` is now refused rather than read as absent — `??` kept `''` as the
+country while every `body.country ? …` test read it as missing, so it was the
+one input that paired a stated country with the stored currency.
+
 **PayHold's Stripe platform account is registered in the United States**, and
 the business operates from Rwanda. Confirmed 2026-09-10; recorded because every
 Stripe corridor depends on it and it was written down nowhere, so each time the
@@ -781,6 +810,20 @@ Three things about the embedded path are load-bearing:
 Neither path is evidence. `/connect/status` still does the promotion, because a
 mounted component reporting success to its own parent would be `embed.ts`'s
 postMessage mistake one rail over.
+
+**A Connect account's country is fixed at creation, and until 2026-09-10 the
+promotion did not check it.** `/connect/onboard` and `/connect/session` both
+take a `country` and mint the account in it; neither writes it anywhere,
+because a Connect account is not a destination until Stripe says it is payable.
+`/connect/status` — where it becomes one — read the *seller row*, which for a
+host who has moved still names the market their first destination was in. So a
+US account was promoted to a row saying RW/RWF, and the payout then routed on a
+corridor the account is not in. `connectAccountStatus` now returns Stripe's own
+`country` and the promotion refuses a disagreement rather than resolving it,
+the same as `assertRailOnRoute` does when the routing table and the adapter
+disagree: deciding for them means either overriding a seller's stored country
+from a provider's record or paying into a country nobody claimed. A country
+Stripe does not report is `null` and is not a disagreement.
 
 `verify` takes a Checkout Session id **or** a PaymentIntent id, because both are
 references this adapter hands out — `charge` returns the session and their

@@ -150,6 +150,38 @@ export async function readJson<T>(req: Request): Promise<T> {
   }
 }
 
+/**
+ * The 404 a router raises when nothing matched, quoting the path that actually
+ * arrived.
+ *
+ * **Every remaining segment, not the ones the router happened to name.**
+ * `functions/sellers` parses `:id`, `:action`, `:sub` and `:subAction` into
+ * variables and its final 404 printed only the first two, so a `POST
+ * /sellers/:id/connect/session` that matched no route reported itself as
+ * `POST /sellers/:id/connect is not a route` — naming a path the client had not
+ * called, about a prefix that does exist one segment further on. Somebody then
+ * goes looking for a `/connect` handler, finds none, and concludes the deploy
+ * is broken. A 404 that misquotes the request is worse than a bare one.
+ *
+ * Taking the segments and slicing is what makes that unrepeatable: a route one
+ * level deeper than whatever the parse names is still quoted whole, without
+ * anyone remembering to add a variable to the message.
+ *
+ * `from` is the index of the function's own name (`sellers`), so the path reads
+ * as the client wrote it rather than as the gateway rewrote it — the `/v1`
+ * and function prefixes ahead of it are ours, not theirs.
+ */
+export function routeNotFound(
+  method: string,
+  segments: string[],
+  from: number,
+): PayHoldError {
+  return new PayHoldError(
+    'not_found',
+    `${method} /${segments.slice(from).join('/')} is not a route`,
+  )
+}
+
 /** Require a field to be present and non-empty. */
 export function required<T extends Record<string, unknown>>(
   body: T,

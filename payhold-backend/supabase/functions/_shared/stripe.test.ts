@@ -767,6 +767,35 @@ Deno.test('Connect status reads both flags Stripe reports, not just one', async 
   }
 })
 
+Deno.test('Connect status reports the country Stripe registered the account in', async () => {
+  const { restore } = intercept({ payouts_enabled: true, country: 'US' })
+
+  try {
+    const status = await new StripeProvider(CREDS, '').connectAccountStatus('acct_1')
+    // The caller is about to write a destination row naming a market, and the
+    // account *is* the destination: Stripe fixes its country at creation and
+    // there is no moving it. Without this, a US account onboarded by a seller
+    // whose PayHold row still said RW was promoted to a Rwandan destination.
+    assertEquals(status.country, 'US')
+  } finally {
+    restore()
+  }
+})
+
+Deno.test('an account with no country reported is null, which is not a disagreement', async () => {
+  const { restore } = intercept({ payouts_enabled: true })
+
+  try {
+    const status = await new StripeProvider(CREDS, '').connectAccountStatus('acct_1')
+    // `null` has to stay distinguishable from a country that differs from the
+    // seller's: the first is Stripe not saying, and refusing a promotion on it
+    // would strand every onboarded seller the day their response shape changes.
+    assertEquals(status.country, null)
+  } finally {
+    restore()
+  }
+})
+
 Deno.test('the account session enables onboarding for exactly that account', async () => {
   const { seen, restore } = intercept({ client_secret: 'accs_secret_abc' })
 

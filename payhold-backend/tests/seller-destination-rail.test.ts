@@ -114,7 +114,8 @@ describe('§5.1 — a destination may only claim a rail its corridor is paid on'
     // their Earnings page is the one the client now sees at registration.
     expect(err.message).toMatch(/^stripe_connect cannot pay a destination in RW\./)
     expect(err.message).toMatch(/via Flutterwave/)
-    expect(err.message).toMatch(/payment-options\?payout_country=RW/)
+    expect(err.message).toMatch(/other payout methods offered for Rwanda/)
+    expect(err.message).not.toMatch(/payment-options|GET \//)
   })
 
   test('flutterwave_momo for RW is still accepted', async () => {

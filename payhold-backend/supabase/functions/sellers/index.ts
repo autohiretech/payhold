@@ -19,11 +19,17 @@
 import type { SupabaseClient } from 'npm:@supabase/supabase-js@2'
 import { resolveCaller, serviceClient, type Caller } from '../_shared/auth.ts'
 import { dispatchPayout } from '../_shared/dispatch.ts'
-import { handler, json, readJson, required } from '../_shared/http.ts'
+import { handler, json, readJson, required, routeNotFound } from '../_shared/http.ts'
 import { loadProvider } from '../_shared/load-provider.ts'
 import { momoBankCode, momoNetworksFor } from '../_shared/momo.ts'
 import { countryInfo, payoutRoute } from '../_shared/rails.ts'
 import { withCallerLabel } from '../_shared/seller-mask.ts'
+import {
+  countryLabel,
+  resolveSellerMarket,
+  withCountryProvenance,
+  type SellerMarket,
+} from '../_shared/seller-market.ts'
 import {
   assertRailOnRoute,
   assertRailRequirementsMet,
@@ -744,40 +750,62 @@ async function addDestination(
   // to — `POST /v1/sellers` no longer requires one — so this, their first
   // destination, is the first point anybody has to say which market they are
   // in.
-  if (!body.country && !seller.country) {
+  //
+  // `resolveSellerMarket` is that same rule, plus the record of which way it
+  // went. The stored country is the first destination's and can be years stale,
+  // so every refusal below has to be able to say the country was ours — see
+  // `withCountryProvenance`.
+  //
+  // The sentence is written for the person who reads it. A tenant's app shows
+  // our `message` to the host on their own payout screen, so `this seller has
+  // no country on file` — which is our column, our word for them, and a fact
+  // about a record they have never seen — becomes a dead end on somebody's
+  // phone. What they can act on is the question nobody has answered yet.
+  const market = resolveSellerMarket(body, seller)
+  if (!market) {
     throw new PayHoldError(
       'policy_violation',
-      'This seller has no country on file yet; country is required with their first destination',
+      'We do not have a payout country for you yet. ' +
+        'Choose the country your payout account is in and try again.',
     )
   }
-  const country = body.country ?? seller.country!
-  const payoutCurrency = body.payout_currency ??
-    (body.country ? countryInfo(body.country).currency : seller.payout_currency!)
+  const { country, currency: payoutCurrency } = market
 
   // The market's own preferred route, which is what the checks below are made
   // against and — until 2026-09-10 — was also what came back as
   // `payout_route`. It is not the destination being registered whenever the
   // caller named one of the corridor's other live rails; `railRoute` below is
   // that, and its header is the account of what returning this instead said.
-  const corridor = payoutRoute(country, payoutCurrency)
-  if (corridor.blocked) throw new PayHoldError('policy_violation', corridor.reason)
+  //
+  // Everything from here to the tokenize call is refused in terms of a country
+  // the caller may never have named, so it is wrapped: a refusal that quotes a
+  // market back at a host who did not ask for it has to say where it came from,
+  // or the only fix left to them is guessing.
+  let route: ReturnType<typeof railRoute>
+  let credentials: { network?: string; bank_code?: string }
+  try {
+    const corridor = payoutRoute(country, payoutCurrency)
+    if (corridor.blocked) throw new PayHoldError('policy_violation', corridor.reason)
 
-  // `corridor.blocked` used to be the only check here, and it is the wrong one
-  // for the rail the caller named: RW/RWF is not blocked, it is Flutterwave's,
-  // so a `stripe_connect` request sailed through, was tokenized on the
-  // corridor's own provider below — Flutterwave — and was stored claiming
-  // Stripe. `rail-adapter.ts` has the whole account; this is where it happened.
-  // Same three checks as `create`, same order, same reasons.
-  assertRailRequirementsMet(body.payout_provider, country)
-  const rails = await evaluateRails(db, caller.tenant_id, country, payoutCurrency)
-  assertRailOnRoute(body.payout_provider, country, corridor, rails)
-  assertRailSwitchedOnRows(rails, body.payout_provider, country)
+    // `corridor.blocked` used to be the only check here, and it is the wrong one
+    // for the rail the caller named: RW/RWF is not blocked, it is Flutterwave's,
+    // so a `stripe_connect` request sailed through, was tokenized on the
+    // corridor's own provider below — Flutterwave — and was stored claiming
+    // Stripe. `rail-adapter.ts` has the whole account; this is where it happened.
+    // Same three checks as `create`, same order, same reasons.
+    assertRailRequirementsMet(body.payout_provider, country)
+    const rails = await evaluateRails(db, caller.tenant_id, country, payoutCurrency)
+    assertRailOnRoute(body.payout_provider, country, corridor, rails)
+    assertRailSwitchedOnRows(rails, body.payout_provider, country)
 
-  // The rail is accepted, so `payout_route` can describe the destination this
-  // call is creating instead of the one PayHold would have picked for it.
-  const route = railRoute(body.payout_provider, country, corridor)
+    // The rail is accepted, so `payout_route` can describe the destination this
+    // call is creating instead of the one PayHold would have picked for it.
+    route = railRoute(body.payout_provider, country, corridor)
 
-  const credentials = destinationCredentials(body.payout_provider, country, body)
+    credentials = destinationCredentials(body.payout_provider, country, body)
+  } catch (err) {
+    throw withCountryProvenance(err, market)
+  }
 
   // The rail's own adapter, for `create`'s reason.
   const { provider } = await loadProvider(
@@ -820,7 +848,16 @@ async function addDestination(
   // a mask is that this never leaves.
   const { beneficiary_token: _token, ...destination } = added as Record<string, unknown>
 
-  return json(req, { destination, payout_route: route }, 201)
+  // `country_source` on the way out for the reason the refusals carry it on the
+  // way back: the row above says `RW` whether the caller asked for RW or PayHold
+  // filled it in, and a client reconciling what it sent against what was stored
+  // cannot tell those apart from the destination alone. Additive and cheap —
+  // one field, already known.
+  return json(
+    req,
+    { destination, payout_route: route, country_source: market.country_source },
+    201,
+  )
 }
 
 /**
@@ -1000,7 +1037,7 @@ async function connectAccountFor(
   caller: Caller,
   id: string,
   body: { country?: string; email?: string | null },
-): Promise<{ provider: StripeProvider; accountId: string }> {
+): Promise<{ provider: StripeProvider; accountId: string; market: SellerMarket }> {
   const { data } = await db
     .from('sellers')
     .select('id, country, payout_currency, stripe_connect_pending_account_id')
@@ -1015,28 +1052,42 @@ async function connectAccountFor(
   }
 
   // Same "this is their first destination" gate `addDestination` enforces —
-  // a seller registered with no destination has no country to default to.
-  if (!body.country && !seller.country) {
+  // a seller registered with no destination has no country to default to — and
+  // the same defaulting, through the same resolver, so the two cannot answer a
+  // market differently or disagree about who named it.
+  const market = resolveSellerMarket(body, seller)
+  if (!market) {
     throw new PayHoldError(
       'policy_violation',
-      'This seller has no country on file yet; country is required to start Stripe onboarding',
+      'We do not have a payout country for you yet. ' +
+        'Choose your payout country on your payout screen and try again.',
     )
   }
-  const country = body.country ?? seller.country!
-  const currency = body.country
-    ? countryInfo(body.country).currency
-    : (seller.payout_currency ?? countryInfo(country).currency)
+  const { country, currency } = market
 
   // Refuse before creating anything at Stripe: a market that pays out via
   // Flutterwave has no use for a Connect account, and one created anyway
   // would sit unused and unfindable by anything that reads
   // `stripe_connect_pending_account_id` for a market that never asks.
+  //
+  // This is the refusal a moved host meets first — `Rwanda is not paid out via
+  // Stripe Connect` to somebody whose profile has said the United States for a
+  // year — so it carries where Rwanda came from when Rwanda was ours.
   const route = payoutRoute(country, currency)
   if (route.provider !== 'stripe' || route.kind !== 'connect') {
-    throw new PayHoldError(
-      'policy_violation',
-      `${countryInfo(country).name} is not paid out via Stripe Connect — ` +
-        'use POST /sellers/:id/destinations instead',
+    throw withCountryProvenance(
+      new PayHoldError(
+        'policy_violation',
+        // Was `${name} is not paid out via Stripe Connect — use POST
+        // /sellers/:id/destinations instead`, which named an endpoint to a
+        // person with no way to call one. The rail's name is worth keeping —
+        // a host who was about to click a Stripe button should be told it is
+        // Stripe that does not reach them — and the action is the other
+        // methods their own screen already offers.
+        `We cannot pay out to ${countryLabel(country)} through Stripe. ` +
+          'Choose one of the other payout methods on your payout screen.',
+      ),
+      market,
     )
   }
 
@@ -1063,7 +1114,7 @@ async function connectAccountFor(
       .eq('id', id)
   }
 
-  return { provider, accountId }
+  return { provider, accountId, market }
 }
 
 /**
@@ -1094,7 +1145,7 @@ async function startConnectOnboarding(
   }>(req)
   required(body as unknown as Record<string, unknown>, 'return_url', 'refresh_url')
 
-  const { provider, accountId } = await connectAccountFor(db, caller, id, body)
+  const { provider, accountId, market } = await connectAccountFor(db, caller, id, body)
 
   const { url } = await provider.createAccountLink(
     accountId,
@@ -1102,7 +1153,17 @@ async function startConnectOnboarding(
     body.return_url,
   )
 
-  return json(req, { account_id: accountId, url })
+  // The market this account is being minted in, and whether the caller chose
+  // it. Stripe registers a Connect account in one country and it cannot be
+  // moved afterwards, so a client that meant the United States and got the
+  // seller's stale Rwanda has minted the wrong account — and until this field
+  // existed the only symptom was a refusal days later, at `/connect/status`.
+  return json(req, {
+    account_id: accountId,
+    url,
+    country: market.country,
+    country_source: market.country_source,
+  })
 }
 
 /**
@@ -1140,13 +1201,17 @@ async function startConnectSession(
   id: string,
 ): Promise<Response> {
   const body = await readJson<{ country?: string; email?: string | null }>(req)
-  const { provider, accountId } = await connectAccountFor(db, caller, id, body)
+  const { provider, accountId, market } = await connectAccountFor(db, caller, id, body)
   const { clientSecret, publishableKey } = await provider.createAccountSession(accountId)
 
   return json(req, {
     account_id: accountId,
     client_secret: clientSecret,
     publishable_key: publishableKey,
+    // Same pair `/connect/onboard` returns, for the same reason: one
+    // onboarding presented two ways cannot report its market two ways.
+    country: market.country,
+    country_source: market.country_source,
   })
 }
 
@@ -1194,12 +1259,59 @@ async function connectStatus(
   }
 
   const accountId = seller.stripe_connect_pending_account_id
-  const { payoutsEnabled } = await provider.connectAccountStatus(accountId)
+  const { payoutsEnabled, country: accountCountry } = await provider.connectAccountStatus(
+    accountId,
+  )
   if (!payoutsEnabled) {
     return json(req, { status: 'pending', account_id: accountId })
   }
 
-  const currency = seller.payout_currency ?? countryInfo(seller.country!).currency
+  // A seller who had no country at all when onboarding started still has none
+  // now: `/connect/onboard` takes a `country`, mints the account in it and
+  // writes it nowhere, so this call has nothing to promote the account into.
+  // Refused in those words rather than reaching `countryInfo(null)`, which
+  // reported `Unknown country code "null"` to a host whose real problem is that
+  // PayHold never recorded the market they typed.
+  if (!seller.country) {
+    throw new PayHoldError(
+      'policy_violation',
+      `Your Stripe account is ready${
+        accountCountry ? `, and Stripe opened it in ${countryLabel(accountCountry.toUpperCase())}` : ''
+      }, but we do not have a payout country for you yet. ` +
+        `Choose your payout country on your payout screen and try again.`,
+    )
+  }
+
+  const currency = seller.payout_currency ?? countryInfo(seller.country).currency
+
+  // The one place a stated country and a stored one can end up describing the
+  // same destination, and it is not visible from either call on its own.
+  // `/connect/onboard` and `/connect/session` both take a `country` and mint
+  // the Stripe account in it; neither writes it anywhere, because a Connect
+  // account is not a destination until Stripe says it is payable. This call is
+  // where it becomes one — and it reads the *seller row*, which for a host who
+  // has moved still says the market their first destination was in. So a US
+  // account was promoted to a row saying RW/RWF, and every later payout was
+  // routed on a corridor the account is not in: refused where the two markets
+  // route differently, and silently sent on the wrong one where they do not.
+  //
+  // Refused rather than resolved in favour of either, the same as
+  // `assertRailOnRoute` does when the routing table and the adapter disagree.
+  // Deciding for them would mean either overriding a seller's stored country
+  // from a provider's record or paying into a country nobody claimed, and both
+  // are §5.1's silent redirection wearing a different hat. The pending account
+  // id is left in place: the account is real at Stripe, and clearing it would
+  // lose the only handle anyone has to it.
+  if (accountCountry && accountCountry.toUpperCase() !== seller.country.toUpperCase()) {
+    throw new PayHoldError(
+      'policy_violation',
+      `Stripe opened your account in ${countryLabel(accountCountry.toUpperCase())}, and we still have ` +
+        `${countryLabel(seller.country)} as your payout country. Stripe fixes that ` +
+        `country when the account is created and it cannot be changed afterwards, so ` +
+        `update your payout country to ${countryLabel(accountCountry.toUpperCase())} on your payout ` +
+        `screen and try again.`,
+    )
+  }
 
   // `startConnectOnboarding` already refused a market Stripe does not pay
   // into, but that was at the start of a redirect-and-poll that can take days,
@@ -1371,11 +1483,13 @@ Deno.serve(handler(async (req) => {
   // is a typo that returns a data dump, and a silent success for calls to
   // routes that do not exist yet — a client polling an endpoint we have not
   // built would parse the list and conclude the feature works.
+  //
+  // Every remaining segment goes in the message, not just the two this parse
+  // names: printing `${id}/${action}` reported a `/connect/session` call as
+  // `POST /sellers/:id/connect is not a route`, which is a path the client
+  // never sent. `routeNotFound`'s header is the whole account.
   if (id) {
-    throw new PayHoldError(
-      'not_found',
-      `${req.method} /sellers/${id}${action ? `/${action}` : ''} is not a route`,
-    )
+    throw routeNotFound(req.method, segments, base)
   }
 
   switch (req.method) {

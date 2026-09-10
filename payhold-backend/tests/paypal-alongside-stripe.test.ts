@@ -166,7 +166,8 @@ describe('the Rwanda incident is refused by exactly the same sentence as before'
     expect(err.code).toBe('policy_violation')
     expect(err.message).toMatch(/^stripe_connect cannot pay a destination in RW\./)
     expect(err.message).toMatch(/via Flutterwave/)
-    expect(err.message).toMatch(/payment-options\?payout_country=RW/)
+    expect(err.message).toMatch(/other payout methods offered for Rwanda/)
+    expect(err.message).not.toMatch(/payment-options|GET \//)
   })
 
   test('a Rwandan seller may still register their own rails', async () => {

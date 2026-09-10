@@ -28,9 +28,23 @@ import {
   type Provider,
 } from '../_shared/types.ts'
 
-/** The one sentence every refusal in this file ends on. */
+/**
+ * The one sentence every refusal in this file ends on.
+ *
+ * **A car owner reads this.** AutoHire returns PayHold's `e.message` straight
+ * from its own handler and drops it into a toast on the host's payout screen,
+ * unedited — so this sentence used to end `GET /v1/payment-options?payout_country=RW
+ * lists the methods that can`, on a phone, to somebody trying to get paid for
+ * a car rental. It named a request they did not make, to an API they will
+ * never call, in a market they may not have chosen.
+ *
+ * So it names the market and the action instead. Integrators lose nothing that
+ * matters: a client's server already reads `payout.methods` off
+ * `/v1/payment-options` to render the picker at all, and a client that does not
+ * is not going to learn it from a sentence in an error it forwards verbatim.
+ */
 function listMethods(country: Country): string {
-  return `GET /v1/payment-options?payout_country=${country} lists the methods that can be paid.`
+  return `Choose one of the other payout methods offered for ${countryInfo(country).name}.`
 }
 
 export const RAIL_ADAPTER: Record<PayoutProvider, Provider> = {
@@ -123,8 +137,9 @@ export function assertRailOnRoute(
   route: PayoutRoute,
   rails: unknown,
 ): void {
-  const list =
-    `GET /v1/payment-options?payout_country=${country} lists the methods that can.`
+  // Same sentence, same reason — see `listMethods`. This was the second copy
+  // and the one our user actually saw.
+  const list = listMethods(country)
 
   const adapter = railAdapterFor(rail)
   if (adapter === null) {
