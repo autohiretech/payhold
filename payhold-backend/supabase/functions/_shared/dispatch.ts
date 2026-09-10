@@ -271,6 +271,35 @@ export async function dispatchPayout(
   // derive stops the payout instead of stranding one that has already gone.
   const leaving = await amountLeaving(db, deal)
 
+  // And asked again, under the payout's row lock, as late as we can ask it.
+  //
+  // `settle_payout` refuses a payout larger than the rail's available balance,
+  // but it runs *after* the transfer — that ordering is deliberate and is what
+  // makes a sent-but-unbooked payout safe to re-send. The cost of it is a
+  // window: a partial refund landing between the figure above and the transfer
+  // below shrinks the pool, the money goes anyway, and booking then fails on a
+  // transfer that cannot be recalled. A full refund never reaches here
+  // (`PAYABLE_DEAL_STATUSES` is checked early), which is precisely why the
+  // partial case is the one left — §29.8 leaves the deal's status untouched,
+  // so nothing upstream notices it happened.
+  //
+  // This narrows that window to the gap between two adjacent statements rather
+  // than closing it: the lock cannot be held across the provider's HTTP call
+  // without holding one across somebody else's outage. `assert_payout_funded`
+  // writes nothing and moves nothing — it asks `settle_payout`'s own question
+  // early enough for the answer to still be worth having.
+  const { error: fundedError } = await db.rpc('assert_payout_funded', {
+    p_payout_id: payout.id,
+    p_leaving: leaving,
+  })
+  if (fundedError) {
+    await db.rpc('fail_payout', {
+      p_payout_id: payout.id,
+      p_reason: `Not sent: ${fundedError.message}`,
+    })
+    return 'failed'
+  }
+
   // The rail comes from the decision, not from the seller's country: which
   // provider can pay where is `payout_routes` now, so a corridor can be
   // switched off without a deploy (§5.2 case 8). It still has to match the rail

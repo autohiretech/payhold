@@ -357,6 +357,37 @@ describe('payout dispatch', () => {
     )
   })
 
+  test('the balance is re-asked under the lock before the transfer, not only after', async () => {
+    // The race `assert_payout_funded` exists for: the figure is taken, the
+    // pool is then drained, and the transfer must not go. Draining it
+    // directly is the honest fixture — a partial refund is one way a pool
+    // shrinks mid-dispatch and the guard does not care which way it happened.
+    const s = await readyToPay()
+    const p = await payoutFor(s.deal)
+    const leaving = await clearing(s.deal)
+
+    await rejects(
+      () => h.db.query(`select assert_payout_funded($1, $2)`, [p.id, leaving + 1]),
+      /insufficient_balance/,
+    )
+  })
+
+  test('a fully funded payout passes the pre-send guard silently', async () => {
+    // The guard must not become a second opinion that disagrees with
+    // `settle_payout` — what one accepts the other has to accept too, or a
+    // payout stops for a reason the booking path does not recognise.
+    const s = await readyToPay()
+    const p = await payoutFor(s.deal)
+    const leaving = await clearing(s.deal)
+
+    await h.db.query(`select assert_payout_funded($1, $2)`, [p.id, leaving])
+    await h.db.query(
+      `select * from settle_payout($1, $2, 'FLW-TRF-GUARD', 'flutterwave')`,
+      [p.id, leaving],
+    )
+    expect((await payoutFor(s.deal)).status).toBe('paid')
+  })
+
   test('a failure records a reason and leaves it retryable', async () => {
     const s = await readyToPay()
     const p = await payoutFor(s.deal)
