@@ -1,13 +1,20 @@
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
-import { api, type Country, type Currency, type PayoutProvider } from '@/api'
+import { useQueries, type UseQueryResult } from '@tanstack/react-query'
+import {
+  api,
+  type Country,
+  type Currency,
+  type PayoutOptions,
+  type PayoutProvider,
+  type Seller,
+} from '@/api'
 import { ProviderChip } from '@/components/rails'
 import {
   countriesByRegion,
   countryFlag,
   countryName,
   PAYOUT_PROVIDER_LABEL,
-  payoutRoute,
   railsForPayoutKinds,
 } from '@/lib/rails'
 import {
@@ -30,6 +37,7 @@ import {
 } from '@/components/ui'
 import { formatDate, formatMoneyShort, KYC_STATUS_META } from '@/lib/format'
 import {
+  keys,
   useMoneyAction,
   usePayoutOptions,
   useSellerWallets,
@@ -135,8 +143,99 @@ function WalletsCard() {
   )
 }
 
+/** One cache entry per corridor, not per seller. */
+const pairKey = (country: Country, currency: Currency) => `${country}:${currency}`
+
+/**
+ * Which rail each registered seller's money would actually leave on.
+ *
+ * This used to be `payoutRoute()`, which reads the generated registry — what is
+ * *possible*. `payout_routes` / `route_evaluation` is what is *on* (§29.11) and
+ * only the backend can read it, so a seller already registered against a
+ * corridor the table does not carry was shown a rail the routing engine would
+ * never pick. The picker on this screen was moved to `GET /v1/payment-options`
+ * for that reason; this is the same read, for the rows.
+ *
+ * **One read per distinct (country, payout_currency), never one per row.** A
+ * table has many sellers and few corridors, and eligibility is per pair rather
+ * than per country — Kenya answers `momo` in KES and reaches PayPal in
+ * USD — so the pair is both the question and the cache key. `useQueries` is the
+ * shape the Routing Center already uses for the same reason.
+ *
+ * A seller with no country or no destination currency has no pair to ask about
+ * and gets no entry: there is nothing to look up, which is different from a
+ * corridor that answered.
+ */
+function usePayoutOptionsByPair(
+  sellers: Seller[],
+): Map<string, UseQueryResult<PayoutOptions, Error>> {
+  const pairs = [
+    ...new Map(
+      sellers.flatMap((s) =>
+        s.country && s.payout_currency
+          ? [[pairKey(s.country, s.payout_currency), [s.country, s.payout_currency] as const]]
+          : [],
+      ),
+    ).values(),
+  ]
+
+  const reads = useQueries({
+    queries: pairs.map(([country, currency]) => ({
+      queryKey: keys.payoutOptions(country, currency),
+      queryFn: () => api.getPayoutOptions(country, currency),
+    })),
+  })
+
+  return new Map(
+    pairs.flatMap(([country, currency], i) => {
+      const read = reads[i]
+      return read ? [[pairKey(country, currency), read] as const] : []
+    }),
+  )
+}
+
+/**
+ * The routing table's answer for one seller's corridor, and nothing else.
+ *
+ * In flight it says so; failed it says the rail is unknown. Neither falls back
+ * to the registry, because falling back is the bug this column had: a
+ * plausible rail rendered from a source that cannot see whether the corridor is
+ * switched on reads exactly like a checked one.
+ */
+function PaidViaCell({ read }: { read?: UseQueryResult<PayoutOptions, Error> }) {
+  if (!read) {
+    return (
+      <span className="text-fg-muted" title="No payout currency on file — there is no corridor to ask about.">
+        —
+      </span>
+    )
+  }
+
+  if (read.isPending) return <Skeleton className="h-4 w-24" />
+
+  if (read.isError) {
+    return (
+      <span className="text-xs font-semibold text-fg-muted" title={read.error.message}>
+        Unknown
+      </span>
+    )
+  }
+
+  const payout = read.data.payout
+  return payout?.provider && !payout.blocked ? (
+    <span title={payout.reason}>
+      <ProviderChip provider={payout.provider} />
+    </span>
+  ) : (
+    <span className="text-xs font-semibold text-danger" title={payout?.reason}>
+      No rail
+    </span>
+  )
+}
+
 export function SellersPage() {
   const sellers = useSellers()
+  const routes = usePayoutOptionsByPair(sellers.data ?? [])
   const [adding, setAdding] = useState(false)
 
   return (
@@ -187,12 +286,13 @@ export function SellersPage() {
             </thead>
             <tbody>
               {sellers.data.map((s) => {
-                // Null until a destination is registered — a seller can exist,
-                // and money can accrue against them, before there is a route
-                // to evaluate at all.
-                const route = s.country && s.payout_currency
-                  ? payoutRoute(s.country, s.payout_currency)
-                  : null
+                // Undefined until a destination is registered — a seller can
+                // exist, and money can accrue against them, before there is a
+                // corridor to ask the routing table about at all.
+                const route =
+                  s.country && s.payout_currency
+                    ? routes.get(pairKey(s.country, s.payout_currency))
+                    : undefined
                 return (
                   <tr key={s.id} className="hover:bg-surface-2">
                     <Td className="font-medium">
@@ -223,18 +323,7 @@ export function SellersPage() {
                         </Td>
                         <Td className="tabular text-fg-muted">{s.payout_currency}</Td>
                         <Td>
-                          {route?.provider ? (
-                            <span title={route.reason}>
-                              <ProviderChip provider={route.provider} />
-                            </span>
-                          ) : (
-                            <span
-                              className="text-xs font-semibold text-danger"
-                              title={route?.reason}
-                            >
-                              No rail
-                            </span>
-                          )}
+                          <PaidViaCell read={route} />
                         </Td>
                       </>
                     ) : (

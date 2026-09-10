@@ -868,6 +868,19 @@ once, in `http.ts`: nothing offered is the honest rendering of a closure, of a
 read still in flight, and of a read that failed. `screens/sellers.test.ts`
 mounts the form and pins all of it.
 
+**The sellers table's "Paid via" column reads the same endpoint**, and used to
+read `payoutRoute()`. The registry answers for a corridor the routing table may
+not carry at all — Kenya in USD is Flutterwave there and PayPal here, Tanzania
+is Flutterwave there and closed here — so an *already registered* seller was
+shown a rail no payout would ever take. **One read per distinct (country,
+`payout_currency`), never one per row**: the pair is the unit of eligibility and
+of the cache key, so a table of forty sellers in three corridors asks three
+questions, through `useQueries` exactly as the Routing Center does for stopped
+payouts. A read in flight shows a neutral placeholder and a failed one says
+`Unknown` — falling back to the registry is the bug being removed, and a
+plausible rail from a source that cannot see whether a corridor is switched on
+reads exactly like a checked one.
+
 **Every row is `verified: false`.** The table encodes the *plan* from the build
 spec, not a checked capability list. What a client is told is
 `rails_verified` on `/v1/payment-options`, derived from §16's checklist. Before any rail carries live money, confirm
