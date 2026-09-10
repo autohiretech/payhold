@@ -39,7 +39,12 @@ import {
   SUPPORTED_CURRENCIES,
   type CardScheme,
 } from '../_shared/rails.ts'
-import { type CoverageRow, payableCurrencies, payoutMethods } from '../_shared/payout-methods.ts'
+import {
+  type CoverageRow,
+  payableCurrencies,
+  payoutMethods,
+  unavailableCurrencies,
+} from '../_shared/payout-methods.ts'
 import { COUNTRIES } from '../_shared/countries.ts'
 import { loadProvider } from '../_shared/load-provider.ts'
 import { momoNetworksFor } from '../_shared/momo.ts'
@@ -117,6 +122,7 @@ async function loadPayoutCoverage(
 ): Promise<{
   covers: (country: string, currency: string) => boolean
   rows: CoverageRow[]
+  all: CoverageRow[]
 }> {
   const { data, error } = await db
     .from('payout_routes')
@@ -148,10 +154,15 @@ async function loadPayoutCoverage(
   // different question of the same read — which currencies reach this country,
   // rather than whether one pair is covered — and a second query would be a
   // second chance for the two answers to disagree.
+  // `all` is every deduped row regardless of whether it is live, and it exists
+  // for exactly one question: "would a rail have carried this currency, if it
+  // were switched on?" That is what separates a corridor nobody serves from
+  // one that is temporarily dark, and the two deserve different sentences.
   return {
     covers: (country, currency) =>
       rows.some((r) => r.countries.includes(country) && r.currencies.includes(currency)),
     rows,
+    all: [...byRail.values()],
   }
 }
 
@@ -303,10 +314,24 @@ Deno.serve(handler(async (req) => {
     // for KES, correctly, while KE/USD routes PayPal. Closed markets get an
     // empty list rather than a currency they cannot be paid in — the closure
     // outranks the table here exactly as it does for `route` above.
-    const { rows: coverageRows } = await loadPayoutCoverage(db, caller.tenant_id)
+    const { rows: coverageRows, all: allRows } = await loadPayoutCoverage(db, caller.tenant_id)
     const currencies = closure && !closure.payout
       ? []
       : payableCurrencies(coverageRows, payoutCountry, info.currency)
+
+    // Which absent currencies to explain is the **caller's** choice, and that
+    // is the whole bound on it. The complement of `currencies` would hand a
+    // Rwandan host seven rows about Ugandan shillings; USD and EUR are what
+    // somebody might expect; and the case that actually hurts — the currency
+    // this particular seller is already paid in quietly dropping out — is one
+    // only the client can name, because this endpoint is a catalogue keyed by
+    // country and currency rather than a seller-scoped read. Looking a seller
+    // up here would make a cacheable answer depend on whose it is.
+    const asked = (params.get('explain_currencies') ?? 'USD,EUR')
+      .split(',').map((c) => c.trim().toUpperCase()).filter(Boolean).slice(0, 10)
+    const currencies_unavailable = closure && !closure.payout
+      ? []
+      : unavailableCurrencies(coverageRows, allRows, payoutCountry, info.name, info.currency, asked)
 
     // Banks are a provider round trip and most callers only want the route, so
     // they are opt-in. Their failure is not fatal: a rail we cannot reach right
@@ -332,7 +357,7 @@ Deno.serve(handler(async (req) => {
       // and not a sibling of `payout` — the same trap `methods` set, where
       // reading it a level up returns `undefined` and the client silently
       // falls back to whatever it had guessed.
-      payout: { ...route, currencies },
+      payout: { ...route, currencies, currencies_unavailable },
       // The wallets a mobile money destination may name here, in the words a
       // seller would use for them. Empty means this market has none.
       networks,

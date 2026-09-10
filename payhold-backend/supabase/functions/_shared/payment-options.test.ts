@@ -19,7 +19,7 @@ import {
   SCHEME_LABEL,
 } from './rails.ts'
 import { presentmentCurrencyFor } from './fx.ts'
-import { type CoverageRow, payableCurrencies, payoutMethods } from './payout-methods.ts'
+import { type CoverageRow, payableCurrencies, payoutMethods, unavailableCurrencies } from './payout-methods.ts'
 import type { CardScheme } from './rails.ts'
 import { COUNTRIES } from './countries.ts'
 
@@ -243,4 +243,69 @@ Deno.test('one currency reached by two rails reports both destinations', () => {
 
 Deno.test('a country no row carries is payable in nothing', () => {
   assertEquals(payableCurrencies(COVERAGE, 'BF', 'XOF'), [])
+})
+
+// ---------------------------------------------------------------------------
+// unavailableCurrencies — why a currency a host expected is not on the list.
+// ---------------------------------------------------------------------------
+
+const DARK: CoverageRow[] = [
+  ...COVERAGE,
+  // Carried for Rwanda, in USD, and not live — the "temporarily dark" case.
+  { payout_provider: 'stripe_connect', countries: ['RW'], currencies: ['USD'], local_currency_only: false, cross_border_currencies: [] },
+]
+
+Deno.test('a market nobody pays in this currency says so permanently', () => {
+  const [usd] = unavailableCurrencies(COVERAGE, COVERAGE, 'RW', 'Rwanda', 'RWF', ['USD'])
+  assertEquals(usd.reason_code, 'no_rail_reaches_market')
+  assertEquals(usd.permanence, 'permanent')
+  // The market's NAME, never its code — a host reads this in a toast.
+  assertEquals(usd.message, 'Nobody can be paid in USD in Rwanda yet.')
+})
+
+Deno.test('a rail that would have carried it but is dark reads as temporary', () => {
+  // `live` does not carry RW/USD; `all` does. That difference is the whole
+  // distinction between "nobody serves this" and "this is off right now", and
+  // they are different sentences to the person waiting on the money.
+  const [usd] = unavailableCurrencies(COVERAGE, DARK, 'RW', 'Rwanda', 'RWF', ['USD'])
+  assertEquals(usd.reason_code, 'rail_unavailable')
+  assertEquals(usd.permanence, 'temporary')
+  assertEquals(usd.message.includes('on us'), true)
+})
+
+Deno.test('a currency blocked only by the account kind is method-dependent', () => {
+  // The wallet row carries KE and RWF, but pays local money only. Once
+  // `cross_border_currencies` is filled this is the live case for a bank.
+  const [rwf] = unavailableCurrencies(COVERAGE, COVERAGE, 'KE', 'Kenya', 'KES', ['RWF'])
+  assertEquals(rwf.reason_code, 'local_currency_only')
+  assertEquals(rwf.permanence, 'method_dependent')
+})
+
+Deno.test('a payable currency is never explained away', () => {
+  // KES and USD are both on offer in Kenya — KES by wallet, USD by PayPal —
+  // so asking about them returns nothing rather than a reason they are
+  // missing. The two lists can never contradict each other, which is the
+  // property worth pinning: whatever `payableCurrencies` offers, this refuses
+  // to explain away.
+  assertEquals(unavailableCurrencies(COVERAGE, COVERAGE, 'KE', 'Kenya', 'KES', ['KES', 'USD']), [])
+  assertEquals(unavailableCurrencies(COVERAGE, COVERAGE, 'KE', 'Kenya', 'KES', ['KES', 'GBP'])
+    .map((c) => c.currency), ['GBP'])
+})
+
+Deno.test('the caller bounds the list, so a market cannot flood it', () => {
+  // The complement would be seven rows about Ugandan shillings. Nothing is
+  // returned that was not asked for.
+  assertEquals(unavailableCurrencies(COVERAGE, COVERAGE, 'RW', 'Rwanda', 'RWF', []), [])
+})
+
+Deno.test('no message names a country code or blames the host', () => {
+  const all = unavailableCurrencies(DARK, DARK, 'RW', 'Rwanda', 'RWF', ['USD', 'EUR', 'GBP'])
+  for (const entry of all) {
+    // A stale corridor is our state, never something the host got wrong, and
+    // "yet" is the strongest promise we may make — §16 confirmation per market
+    // is a real gate and "coming soon" is a promise we cannot keep.
+    assertEquals(/\byou (did|entered|chose) /i.test(entry.message), false, entry.message)
+    assertEquals(/coming soon|shortly|we are working/i.test(entry.message), false, entry.message)
+    assertEquals(entry.message.includes(' RW '), false, entry.message)
+  }
 })

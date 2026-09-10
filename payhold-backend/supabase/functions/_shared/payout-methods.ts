@@ -157,3 +157,111 @@ export function payableCurrencies(
     Number(b.default) - Number(a.default) || a.currency.localeCompare(b.currency)
   )
 }
+
+/** Why a currency a host might have expected is not on the list. */
+export interface UnavailableCurrency {
+  currency: string
+  reason_code: 'no_rail_reaches_market' | 'local_currency_only' | 'rail_unavailable'
+  permanence: 'permanent' | 'method_dependent' | 'temporary'
+  message: string
+}
+
+/**
+ * The currencies a host asked about that this market cannot be paid in, and
+ * why — the companion to `payableCurrencies`, and deliberately not its
+ * complement.
+ *
+ * **The complement would be noise.** Rwanda's wallet row carries KES, UGX,
+ * TZS, GHS, ZMW, XOF and XAF, so "every currency we could have named here,
+ * minus the ones we did" hands a Rwandan host seven rows explaining why they
+ * cannot be paid in Ugandan shillings. Nobody asked that. The signal worth
+ * carrying is one or two currencies wide: the host expected dollars and did
+ * not get them.
+ *
+ * **So the caller says which currencies to explain, and that is the whole
+ * bound.** It is not a cap this function invents, because the interesting set
+ * is not knowable from here: USD and EUR are what a host might *expect*, but
+ * the case that actually hurts is the currency they are *already being paid
+ * in* quietly dropping out of the list — a corridor closing, a rail going
+ * risk-held. That host has a live arrangement that just stopped being offered,
+ * which matters more than an absent dollar and would otherwise vanish with no
+ * explanation at all. Only the caller knows that currency: this endpoint is a
+ * catalogue keyed by country and currency, not a seller-scoped read, and
+ * looking a seller up here would make a cacheable answer depend on whose it
+ * is. So the client passes it, alongside whatever else it wants explained.
+ *
+ * A currency that *is* payable never appears here, whether or not it was
+ * asked about.
+ *
+ * `permanence` is 1:1 with `reason_code` today and is kept anyway. When a
+ * fourth code is added, a client that has never heard of it can still render
+ * the entry correctly by switching on `permanence` alone — where switching on
+ * an unknown `reason_code` falls through to nothing and shows the host a blank
+ * where an explanation belongs. That silent-`undefined` shape has cost this
+ * project twice; redundancy that makes an unknown future value degrade into
+ * something rather than nothing is worth the column.
+ *
+ * **`message` states the fact about the market and stops.** What it means for
+ * this particular host — whether they already have a payout method, whether
+ * they are mid-setup, which one is selected — is the client's to add, because
+ * only the client knows it. An earlier draft ended "Your Rwandan francs payout
+ * is unaffected", which asserts a payout the host may not have; plenty of
+ * people reading this sentence are on that screen precisely because they have
+ * none yet.
+ */
+export function unavailableCurrencies(
+  live: CoverageRow[],
+  all: CoverageRow[],
+  country: string,
+  marketName: string,
+  localCurrency: string,
+  asked: string[],
+): UnavailableCurrency[] {
+  const payable = new Set(payableCurrencies(live, country, localCurrency).map((c) => c.currency))
+
+  const out: UnavailableCurrency[] = []
+  for (const currency of [...new Set(asked)]) {
+    if (payable.has(currency)) continue
+
+    // A live rail reaches this country and carries this currency, and the only
+    // thing standing between them is that the rail pays local money into this
+    // kind of account. That changes if the host picks a different method,
+    // which is why it is worth saying next to a method picker rather than
+    // being flattened into "not available".
+    const localOnly = live.some((r) =>
+      r.countries.includes(country) && r.currencies.includes(currency) && r.local_currency_only
+    )
+    // A rail would have carried it and is not live — switched off, risk-held,
+    // or without an adapter. Comes back without the host doing anything.
+    const wouldHave = all.some((r) =>
+      r.countries.includes(country) && r.currencies.includes(currency)
+    )
+
+    const entry: UnavailableCurrency = localOnly
+      ? {
+        currency,
+        reason_code: 'local_currency_only',
+        permanence: 'method_dependent',
+        message: `A ${currency} payout into this kind of account is not something ` +
+          `this market supports. Another payout method may take it.`,
+      }
+      : wouldHave
+      ? {
+        currency,
+        reason_code: 'rail_unavailable',
+        permanence: 'temporary',
+        message: `Payouts in ${currency} are not running right now. This is on us, ` +
+          `not something you can fix, and it is expected back.`,
+      }
+      : {
+        currency,
+        reason_code: 'no_rail_reaches_market',
+        permanence: 'permanent',
+        // The market's name, never its code. A host reads this sentence in a
+        // toast on their payout screen; "in RW" is a thing only we say.
+        message: `Nobody can be paid in ${currency} in ${marketName} yet.`,
+      }
+    out.push(entry)
+  }
+  return out
+}
