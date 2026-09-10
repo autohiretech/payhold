@@ -39,7 +39,7 @@ import {
   SUPPORTED_CURRENCIES,
   type CardScheme,
 } from '../_shared/rails.ts'
-import { payoutMethods } from '../_shared/payout-methods.ts'
+import { type CoverageRow, payableCurrencies, payoutMethods } from '../_shared/payout-methods.ts'
 import { COUNTRIES } from '../_shared/countries.ts'
 import { loadProvider } from '../_shared/load-provider.ts'
 import { momoNetworksFor } from '../_shared/momo.ts'
@@ -114,10 +114,13 @@ function methodsFor(
 async function loadPayoutCoverage(
   db: SupabaseClient,
   tenant: string,
-): Promise<(country: string, currency: string) => boolean> {
+): Promise<{
+  covers: (country: string, currency: string) => boolean
+  rows: CoverageRow[]
+}> {
   const { data, error } = await db
     .from('payout_routes')
-    .select('tenant_id, payout_provider, provider, enabled, supports_payouts, risk_status, countries, currencies')
+    .select('tenant_id, payout_provider, provider, enabled, supports_payouts, risk_status, countries, currencies, local_currency_only')
     .or(`tenant_id.is.null,tenant_id.eq.${tenant}`)
   if (error) throw new Error(`payout_routes read failed: ${error.message}`)
 
@@ -130,6 +133,7 @@ async function loadPayoutCoverage(
     risk_status: string
     countries: string[]
     currencies: string[]
+    local_currency_only: boolean
   }
   const byRail = new Map<string, Row>()
   for (const r of (data ?? []) as Row[]) {
@@ -139,8 +143,15 @@ async function loadPayoutCoverage(
   const rows = [...byRail.values()].filter((r) =>
     r.provider !== null && r.enabled && r.risk_status === 'approved' && r.supports_payouts
   )
-  return (country, currency) =>
-    rows.some((r) => r.countries.includes(country) && r.currencies.includes(currency))
+  // The rows come back beside the predicate because `payableCurrencies` asks a
+  // different question of the same read — which currencies reach this country,
+  // rather than whether one pair is covered — and a second query would be a
+  // second chance for the two answers to disagree.
+  return {
+    covers: (country, currency) =>
+      rows.some((r) => r.countries.includes(country) && r.currencies.includes(currency)),
+    rows,
+  }
 }
 
 /**
@@ -277,6 +288,18 @@ Deno.serve(handler(async (req) => {
     // registers a destination the rail will not transfer to.
     const networks = momoNetworksFor(payoutCountry).map((n) => n.label)
 
+    // Which currencies this market can be paid in at all — the other half of
+    // `methods`, and the half that decides whether PayPal is reachable here.
+    // A client that can only ever ask in the country's own currency gets the
+    // local answer and concludes the rail is absent: Kenya answers `['momo']`
+    // for KES, correctly, while KE/USD routes PayPal. Closed markets get an
+    // empty list rather than a currency they cannot be paid in — the closure
+    // outranks the table here exactly as it does for `route` above.
+    const { rows: coverageRows } = await loadPayoutCoverage(db, caller.tenant_id)
+    const currencies = closure && !closure.payout
+      ? []
+      : payableCurrencies(coverageRows, payoutCountry, info.currency)
+
     // Banks are a provider round trip and most callers only want the route, so
     // they are opt-in. Their failure is not fatal: a rail we cannot reach right
     // now should not make the corridor look shut.
@@ -295,7 +318,13 @@ Deno.serve(handler(async (req) => {
 
     return json(req, {
       country: { code: info.code, name: info.name, flag: flag(info.code) },
-      payout: route,
+      // `currencies` sits **inside** `payout`, beside `methods`, because both
+      // answer "what can this market be paid, and how" and a client reading
+      // one reaches for the other. Note the nesting: it is `payout.currencies`
+      // and not a sibling of `payout` — the same trap `methods` set, where
+      // reading it a level up returns `undefined` and the client silently
+      // falls back to whatever it had guessed.
+      payout: { ...route, currencies },
       // The wallets a mobile money destination may name here, in the words a
       // seller would use for them. Empty means this market has none.
       networks,
@@ -318,7 +347,7 @@ Deno.serve(handler(async (req) => {
 
   // --- The whole catalogue -------------------------------------------------
   if (!country) {
-    const coveredByTable = await loadPayoutCoverage(db, caller.tenant_id)
+    const { covers: coveredByTable } = await loadPayoutCoverage(db, caller.tenant_id)
     return json(req, {
       countries: COUNTRIES.map((info) => ({
         code: info.code,

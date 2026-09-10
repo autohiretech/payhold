@@ -19,7 +19,7 @@ import {
   SCHEME_LABEL,
 } from './rails.ts'
 import { presentmentCurrencyFor } from './fx.ts'
-import { payoutMethods } from './payout-methods.ts'
+import { type CoverageRow, payableCurrencies, payoutMethods } from './payout-methods.ts'
 import type { CardScheme } from './rails.ts'
 import { COUNTRIES } from './countries.ts'
 
@@ -183,4 +183,64 @@ Deno.test('a rail with no live adapter never appears, whatever its row says', ()
 Deno.test('nothing eligible is an empty list rather than a guess', () => {
   assertEquals(payoutMethods([], 'connect'), [])
   assertEquals(payoutMethods(null, 'connect'), [])
+})
+
+// ---------------------------------------------------------------------------
+// payableCurrencies — the half of the answer that decides whether PayPal is
+// reachable in a market whose own currency it does not carry.
+// ---------------------------------------------------------------------------
+
+const COVERAGE: CoverageRow[] = [
+  // Shaped like the real rows: a local rail carries many countries and many
+  // currencies, and taken as a cross product would offer a Kenyan wallet
+  // Rwandan francs. `local_currency_only` is what stops that.
+  { payout_provider: 'flutterwave_momo', countries: ['KE', 'RW'], currencies: ['KES', 'RWF'], local_currency_only: true },
+  { payout_provider: 'flutterwave_bank', countries: ['RW'], currencies: ['RWF'], local_currency_only: true },
+  { payout_provider: 'stripe_connect', countries: ['US'], currencies: ['USD'], local_currency_only: false },
+  { payout_provider: 'paypal', countries: ['KE', 'US'], currencies: ['USD', 'EUR'], local_currency_only: false },
+]
+
+Deno.test('a Kenyan seller can be paid in USD, which is where PayPal lives', () => {
+  const list = payableCurrencies(COVERAGE, 'KE', 'KES')
+
+  // The whole reason this function exists: asking about Kenya in Kenya's own
+  // currency answers `['momo']` — correctly — and a client that can ask
+  // nothing else concludes PayPal does not reach Kenya at all.
+  // KES from the wallet, EUR and USD from PayPal — and **no RWF**, which the
+  // raw cross product would have offered because the momo row carries both
+  // Kenya and Rwandan francs. That is the corridor a chooser would otherwise
+  // have let a host pick and the rail would have refused after collection.
+  assertEquals(list.map((c) => c.currency), ['KES', 'EUR', 'USD'])
+  assertEquals(list[0].methods, ['momo'])
+  assertEquals(list[2].methods, ['paypal'])
+  assertEquals(list.some((c) => c.currency === 'RWF'), false)
+})
+
+Deno.test('the local currency leads and is the only one flagged default', () => {
+  const list = payableCurrencies(COVERAGE, 'KE', 'KES')
+
+  // A chooser preselecting anything else would move an existing seller onto a
+  // different payout currency by dropdown default.
+  assertEquals(list[0].default, true)
+  assertEquals(list.filter((c) => c.default).length, 1)
+})
+
+Deno.test('a market whose own currency no rail carries flags no default', () => {
+  // Every market PayPal reaches and Flutterwave does not. Nothing may be
+  // preselected on a host's behalf when they were not already on it.
+  const list = payableCurrencies(COVERAGE, 'US', 'USD')
+  assertEquals(list.map((c) => c.currency), ['USD', 'EUR'])
+  assertEquals(list[0].default, true)
+
+  const noLocal = payableCurrencies(COVERAGE, 'KE', 'XOF')
+  assertEquals(noLocal.every((c) => !c.default), true)
+})
+
+Deno.test('one currency reached by two rails reports both destinations', () => {
+  const list = payableCurrencies(COVERAGE, 'US', 'USD')
+  assertEquals(list[0].methods, ['connect', 'paypal'])
+})
+
+Deno.test('a country no row carries is payable in nothing', () => {
+  assertEquals(payableCurrencies(COVERAGE, 'BF', 'XOF'), [])
 })
