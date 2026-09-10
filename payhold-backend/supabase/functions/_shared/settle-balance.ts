@@ -24,7 +24,7 @@
 import type { SupabaseClient } from 'npm:@supabase/supabase-js@2'
 import { balanceFigures, type ReleaseFigures } from './figures.ts'
 import { loadProvider } from './load-provider.ts'
-import { PayHoldError, type ConfirmSide, type Deal } from './types.ts'
+import { PayHoldError, type ConfirmSide, type Deal, type Money } from './types.ts'
 
 /**
  * Charge the balance (+ overage) via the saved payment method and book it.
@@ -58,7 +58,7 @@ async function collectBalance(
       ? `${deal.provider} has no saved payment method capability — this renter cannot be charged automatically`
       : 'This deal has no saved payment method on file — the renter paid by a method that cannot be charged again'
 
-    await recordBalanceChargeFailure(db, deal, reason)
+    await recordBalanceChargeFailure(db, deal, reason, figures.chargeAmount)
     return { ok: false, reason }
   }
 
@@ -73,7 +73,7 @@ async function collectBalance(
     providerRef = charged.provider_ref
   } catch (err) {
     const message = err instanceof PayHoldError ? err.message : 'The balance charge was refused'
-    await recordBalanceChargeFailure(db, deal, message)
+    await recordBalanceChargeFailure(db, deal, message, figures.chargeAmount)
     return { ok: false, reason: message }
   }
 
@@ -99,23 +99,38 @@ async function collectBalance(
   return { ok: true }
 }
 
+/**
+ * Say what could not be charged, not just that something could not be.
+ *
+ * The event carried a `reason` alone, which is enough to tell a client the
+ * automatic charge is not coming and useless for the thing they then have to
+ * do: ask the buyer for it. A seller was shown "we could not charge this" and
+ * left to work out how much themselves — and the one system that knew the
+ * figure exactly, having just tried to charge it, did not say.
+ *
+ * `amount` is minor units of `currency`, the same convention as every other
+ * figure crossing this boundary, and is what `chargeSaved` was called with —
+ * balance plus overage, whatever this deal owed at this moment.
+ */
 async function recordBalanceChargeFailure(
   db: SupabaseClient,
   deal: Deal,
   reason: string,
+  amount: Money,
 ): Promise<void> {
+  const details = { reason, amount, currency: deal.presentment_currency }
   await db.rpc('write_audit', {
     p_tenant: deal.tenant_id,
     p_deal: deal.id,
     p_actor: 'system',
     p_action: 'deal.balance_charge_failed',
-    p_details: { reason },
+    p_details: details,
   })
   await db.rpc('enqueue_webhooks', {
     p_tenant: deal.tenant_id,
     p_deal: deal.id,
     p_event: 'order.balance_charge_failed',
-    p_data: { reason },
+    p_data: details,
   })
 }
 

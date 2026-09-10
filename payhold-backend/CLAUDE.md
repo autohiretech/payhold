@@ -1818,6 +1818,15 @@ no automatic retry ladder for this charge, on purpose — a smaller, safer
 scope than duplicating the payout retry machinery for a charge a tenant can
 just prompt the renter to retry out of band.
 
+**That webhook carries `amount` and `currency` alongside `reason`.** It used
+to carry the reason alone, which is enough to say the charge is not coming and
+useless for the only thing a client can do about it — ask the buyer for the
+money. A seller was shown "this could not be charged" and left to work the
+figure out, while the one system that knew it exactly, having just attempted
+the charge, said nothing. `amount` is minor units of `currency` and is what
+`chargeSaved` was called with: balance plus overage, whatever the deal owed at
+that moment.
+
 **That ordering lived entirely in TypeScript until `20260815000005`, and
 that was a gap worth closing rather than trusting.** Nothing stopped a
 future caller of `confirm_deal` — a correction run by hand, a code path this
