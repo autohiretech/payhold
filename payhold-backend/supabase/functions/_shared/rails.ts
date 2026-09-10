@@ -424,9 +424,20 @@ export function payoutRoute(country: Country, currency: Currency): PayoutRoute {
       currency,
       blocked: false,
       verified: false,
-      reason: `Stripe cannot pay anyone in ${info.name}, so ${currency} would ` +
-        `have to go out on Flutterwave. Confirm your account can send it to a ` +
-        `third-party beneficiary there — otherwise convert to ${local}.`,
+      // Was: "Confirm your account can send it to a third-party beneficiary
+      // there — otherwise convert to <local>." That was written for whoever
+      // runs the PayHold account, and it reaches a **host** — AutoHire
+      // forwards this text into a toast — who cannot confirm anything with
+      // Flutterwave and has no idea what a third-party beneficiary is.
+      //
+      // The caution it carried was real and is now data rather than prose: the
+      // dollar corridor was confirmed with Flutterwave on 2026-09-10
+      // (`20260910000010`), and `cross_border_currencies` is what says which
+      // foreign currencies this rail may actually be offered in. A currency
+      // that has not been confirmed is not carried by the row, so it never
+      // reaches this sentence at all — which is a stronger guarantee than
+      // asking the reader to go and check.
+      reason: `Paid in ${currency} via Flutterwave, to a bank account in ${info.name}.`,
     }
   }
 

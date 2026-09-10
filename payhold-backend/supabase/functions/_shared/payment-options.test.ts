@@ -309,3 +309,47 @@ Deno.test('no message names a country code or blames the host', () => {
     assertEquals(entry.message.includes(' RW '), false, entry.message)
   }
 })
+
+Deno.test('a bank rail offers the settlement currency its row names', () => {
+  // The confirmed dollar corridor (`20260910000010`). A Rwandan host is
+  // offered RWF by wallet or bank, and USD by bank — and still not Kenyan
+  // shillings, which the raw cross product would have handed them.
+  const rows: CoverageRow[] = [
+    {
+      payout_provider: 'flutterwave_momo',
+      countries: ['RW', 'KE'],
+      currencies: ['RWF', 'KES'],
+      local_currency_only: true,
+      cross_border_currencies: [],
+    },
+    {
+      payout_provider: 'flutterwave_bank',
+      countries: ['RW', 'KE'],
+      currencies: ['RWF', 'KES', 'USD'],
+      local_currency_only: true,
+      cross_border_currencies: ['USD'],
+    },
+  ]
+
+  const rw = payableCurrencies(rows, 'RW', 'RWF')
+  assertEquals(rw.map((c) => c.currency), ['RWF', 'USD'])
+  assertEquals(rw[0].methods, ['bank', 'momo'])
+  assertEquals(rw[1].methods, ['bank'])
+  assertEquals(rw[0].default, true)
+  assertEquals(rw.some((c) => c.currency === 'KES'), false)
+})
+
+Deno.test('a wallet never gains a settlement currency, whatever the bank does', () => {
+  // There is no dollar mobile money wallet to pay into. This is what the
+  // instrument is, not a gate waiting on a provider, so the wallet's own row
+  // keeps an empty `cross_border_currencies` and USD reaches it through no
+  // other route.
+  const walletOnly: CoverageRow[] = [{
+    payout_provider: 'flutterwave_momo',
+    countries: ['RW'],
+    currencies: ['RWF', 'USD'],
+    local_currency_only: true,
+    cross_border_currencies: [],
+  }]
+  assertEquals(payableCurrencies(walletOnly, 'RW', 'RWF').map((c) => c.currency), ['RWF'])
+})

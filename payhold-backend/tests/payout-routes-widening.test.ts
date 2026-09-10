@@ -53,9 +53,19 @@ async function covered(country: string, currency: string): Promise<boolean> {
   return rows.some((r) => COVERED.has(r.reason_code))
 }
 
-async function row(rail: string): Promise<{ countries: string[]; currencies: string[]; note: string }> {
-  const { rows } = await h.db.query<{ countries: string[]; currencies: string[]; note: string }>(
-    `select countries::text[] as countries, currencies::text[] as currencies, note
+type Row = {
+  countries: string[]
+  currencies: string[]
+  cross_border_currencies: string[]
+  note: string
+}
+
+async function row(rail: string): Promise<Row> {
+  const { rows } = await h.db.query<Row>(
+    `select countries::text[] as countries,
+            currencies::text[] as currencies,
+            cross_border_currencies::text[] as cross_border_currencies,
+            note
        from payout_routes where tenant_id is null and payout_provider = $1`,
     [rail],
   )
@@ -73,7 +83,26 @@ describe('payout_routes: widened to the registry, pruned, then matched to what t
   test('flutterwave_bank carries exactly the corridors with an ungated transfer guide', async () => {
     const r = await row('flutterwave_bank')
     expect(sorted(r.countries)).toEqual(sorted(['RW', 'UG', 'GH', 'NG', 'ZA', 'ZM', 'CI', 'SN', 'CM', 'ET']))
-    expect(sorted(r.currencies)).toEqual(sorted(['RWF', 'UGX', 'GHS', 'NGN', 'ZAR', 'ZMW', 'XOF', 'XAF', 'ETB']))
+    // USD joined in `20260910000010`, when the account holder confirmed with
+    // Flutterwave that a bank account can be paid in dollars. It is the one
+    // currency here that is not somebody's local money, which is exactly why
+    // it also has to be in `cross_border_currencies` before it is ever
+    // offered — carried and offered are two different columns.
+    expect(sorted(r.currencies))
+      .toEqual(sorted(['RWF', 'UGX', 'GHS', 'NGN', 'ZAR', 'ZMW', 'XOF', 'XAF', 'ETB', 'USD']))
+    expect(r.cross_border_currencies).toEqual(['USD'])
+  })
+
+  test('the wallet gains no settlement currency when the bank does', async () => {
+    // `20260910000010` confirmed the dollar corridor for **bank accounts**. A
+    // mobile money wallet is denominated in its country's currency and there
+    // is no dollar wallet to open, so this is not a gate waiting on a provider
+    // — it is what the instrument is, and the wallet's array stays empty
+    // permanently. Without this, the next person widening the bank rail could
+    // reasonably widen the wallet beside it and strand every payout.
+    const wallet = await row('flutterwave_momo')
+    expect(wallet.cross_border_currencies).toEqual([])
+    expect(wallet.currencies).not.toContain('USD')
   })
 
   test('flutterwave_momo carries exactly the markets the transfer table names a wallet code for', async () => {
@@ -186,6 +215,10 @@ describe('payout_routes: widened to the registry, pruned, then matched to what t
     expect(r.note).toMatch(/submit a request/i)
     expect(r.note).toMatch(/registered in Tanzania/i)
     expect(r.note).toMatch(/mobile money/i)
+    // `20260910000010` appended rather than rewrote, so the corridor caveats
+    // above survive the dollar corridor being announced. A note that
+    // replaced them would have traded researched detail for news.
+    expect(r.note).toMatch(/Also pays in USD/)
   })
 
   // -------------------------------------------------------------------------

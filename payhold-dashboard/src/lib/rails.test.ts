@@ -238,13 +238,30 @@ describe('payout routing — where money can actually go', () => {
     }
   })
 
-  it('flags a foreign-currency payout for confirmation rather than promising it', () => {
+  it('routes a foreign-currency payout to the bank, and asks the host to confirm nothing', () => {
+    // This used to demand `/confirm with/i` — the sentence told the reader to
+    // check with Flutterwave that their account could pay a third-party
+    // beneficiary. Two things were wrong with that and only one has changed.
+    //
+    // The corridor is now confirmed: the account holder checked with
+    // Flutterwave on 2026-09-10 and USD bank payouts work (`20260910000010`),
+    // so the caution is answered rather than outstanding. And it was always
+    // addressed to the wrong person — this text reaches a **host** through
+    // AutoHire's toast, and a car owner can confirm nothing with Flutterwave.
+    //
+    // Which currencies are actually confirmed is data now, not prose:
+    // `payout_routes.cross_border_currencies` carries USD and nothing else, so
+    // an unconfirmed currency is never carried by the row and never reaches
+    // this sentence. That is a stronger guarantee than asking the reader to go
+    // and check, which is the point of the change.
     const route = payoutRoute('RW', 'USD')
 
     expect(route.provider).toBe('flutterwave')
     expect(route.kind).toBe('bank')
+    // §16's per-market confirmation is a separate gate and is untouched.
     expect(route.verified).toBe(false)
-    expect(route.reason).toMatch(/confirm with/i)
+    expect(route.reason).toBe('Paid in USD via Flutterwave, to a bank account in Rwanda.')
+    expect(route.reason).not.toMatch(/confirm|beneficiary/i)
   })
 
   it('blocks outright where neither provider can reach the seller — Egypt collects, and Flutterwave transfers there are request-only', () => {

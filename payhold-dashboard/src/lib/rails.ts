@@ -598,9 +598,12 @@ export function payoutRoute(country: Country, currency: Currency): PayoutRoute {
     }
   }
 
-  // Flutterwave can hold a foreign currency, but paying a third-party
-  // beneficiary in it is a different capability from settling it to your own
-  // account — offered as a route to confirm, not a promise.
+  // Flutterwave pays a bank account in a foreign currency, and which foreign
+  // currencies is data rather than prose: the dollar corridor was confirmed
+  // with Flutterwave on 2026-09-10 (`20260910000010`), and
+  // `payout_routes.cross_border_currencies` is what says which ones this rail
+  // may be offered in. A currency nobody has confirmed is not carried by the
+  // row, so it never reaches this sentence.
   if (!wantsLocal && info.flutterwavePayout) {
     return {
       provider: 'flutterwave',
@@ -608,11 +611,11 @@ export function payoutRoute(country: Country, currency: Currency): PayoutRoute {
       currency,
       blocked: false,
       verified: false,
-      reason:
-        `Stripe cannot pay anyone in ${info.name}, so ${currency} would have ` +
-        `to go out on Flutterwave to a ${currency} bank account. Confirm with ` +
-        'Flutterwave that your account can send it to a third-party ' +
-        `beneficiary there — otherwise convert to ${local} and pay locally.`,
+      // Was an instruction to go and confirm with Flutterwave. That was
+      // written for whoever runs the PayHold account and it reaches a **host**
+      // — AutoHire forwards this text into a toast — who can confirm nothing
+      // with Flutterwave and does not know what a third-party beneficiary is.
+      reason: `Paid in ${currency} via Flutterwave, to a bank account in ${info.name}.`,
     }
   }
 
