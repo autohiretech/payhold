@@ -76,24 +76,37 @@ jobs:
         with:
           version: latest
 
-      # Skipped, not failed, until the token exists — same reasoning as the
-      # dashboard workflow.
+      # **Fails, not skips.** This step used to write `ready=false` and emit a
+      # notice, and the deploy below was conditional on it — so with the secret
+      # unset the job did every test, deployed nothing, and reported success.
+      # On 2026-09-10 three consecutive green runs shipped nothing at all while
+      # a whole day's backend work sat undeployed and was reported as live off
+      # those green ticks; what caught it was a client noticing a field that
+      # should have been there was missing.
+      #
+      # That is precisely the failure `payhold-dashboard/CLAUDE.md` records for
+      # the old dashboard workflow — "built, tested and then skipped the publish
+      # because CLOUDFLARE_API_TOKEN was never set, so the tested pipeline was
+      # not the one shipping" — and it was serious enough there to delete the
+      # workflow over. A pipeline that is silent about not shipping is worse
+      # than one that does not exist, because a green tick is read as a deploy.
+      #
+      # So a missing token is now a red run that names the secret and the fix.
+      # A person seeing it can set it or run `supabase functions deploy` by
+      # hand; nobody can mistake it for a deployment that happened.
       - name: Check Supabase is configured
-        id: sb
         env:
           TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
         run: |
-          if [ -n "$TOKEN" ]; then
-            echo "ready=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "ready=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::SUPABASE_ACCESS_TOKEN is not set — tested, not deployed."
+          if [ -z "$TOKEN" ]; then
+            echo "::error::SUPABASE_ACCESS_TOKEN is not set, so the Edge Functions were NOT deployed."
+            echo "::error::Set it at Settings -> Secrets -> Actions, or deploy by hand with 'supabase functions deploy ... --project-ref <ref>'."
+            exit 1
           fi
 
       # Deployed together so a shared change in `_shared/` cannot land in one
       # function and not another.
       - name: Deploy Edge Functions
-        if: steps.sb.outputs.ready == 'true'
         env:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
         run: |

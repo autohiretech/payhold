@@ -65,6 +65,7 @@ export interface CoverageRow {
   countries: string[]
   currencies: string[]
   local_currency_only: boolean
+  cross_border_currencies: string[]
 }
 
 /** A currency a market can be paid in, and what it can be paid into there. */
@@ -122,8 +123,17 @@ export function payableCurrencies(
     // `local_currency_only` (`20260910000007`) is the fact that collapses it:
     // a wallet or a domestic bank account is denominated in the country's own
     // money and receives nothing else.
+    // A local rail reaches its country's own money, plus any settlement
+    // currency the row names — `20260910000008`. The second half is what
+    // separates a bank account from a wallet: a Rwandan bank account can be a
+    // dollar account, a Rwandan wallet cannot be. The intersection with
+    // `currencies` is not belt-and-braces: that array is what says the rail
+    // supports the currency at all, and a settlement currency listed here but
+    // absent there would be a corridor the rail was never told about.
     const reachable = row.local_currency_only
-      ? row.currencies.filter((c) => c === localCurrency)
+      ? row.currencies.filter((c) =>
+        c === localCurrency || row.cross_border_currencies.includes(c)
+      )
       : row.currencies
 
     for (const currency of reachable) {

@@ -194,10 +194,10 @@ const COVERAGE: CoverageRow[] = [
   // Shaped like the real rows: a local rail carries many countries and many
   // currencies, and taken as a cross product would offer a Kenyan wallet
   // Rwandan francs. `local_currency_only` is what stops that.
-  { payout_provider: 'flutterwave_momo', countries: ['KE', 'RW'], currencies: ['KES', 'RWF'], local_currency_only: true },
-  { payout_provider: 'flutterwave_bank', countries: ['RW'], currencies: ['RWF'], local_currency_only: true },
-  { payout_provider: 'stripe_connect', countries: ['US'], currencies: ['USD'], local_currency_only: false },
-  { payout_provider: 'paypal', countries: ['KE', 'US'], currencies: ['USD', 'EUR'], local_currency_only: false },
+  { payout_provider: 'flutterwave_momo', countries: ['KE', 'RW'], currencies: ['KES', 'RWF'], local_currency_only: true, cross_border_currencies: [] },
+  { payout_provider: 'flutterwave_bank', countries: ['RW'], currencies: ['RWF'], local_currency_only: true, cross_border_currencies: [] },
+  { payout_provider: 'stripe_connect', countries: ['US'], currencies: ['USD'], local_currency_only: false, cross_border_currencies: [] },
+  { payout_provider: 'paypal', countries: ['KE', 'US'], currencies: ['USD', 'EUR'], local_currency_only: false, cross_border_currencies: [] },
 ]
 
 Deno.test('a Kenyan seller can be paid in USD, which is where PayPal lives', () => {

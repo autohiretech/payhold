@@ -120,7 +120,7 @@ async function loadPayoutCoverage(
 }> {
   const { data, error } = await db
     .from('payout_routes')
-    .select('tenant_id, payout_provider, provider, enabled, supports_payouts, risk_status, countries, currencies, local_currency_only')
+    .select('tenant_id, payout_provider, provider, enabled, supports_payouts, risk_status, countries, currencies, local_currency_only, cross_border_currencies')
     .or(`tenant_id.is.null,tenant_id.eq.${tenant}`)
   if (error) throw new Error(`payout_routes read failed: ${error.message}`)
 
@@ -134,6 +134,7 @@ async function loadPayoutCoverage(
     countries: string[]
     currencies: string[]
     local_currency_only: boolean
+    cross_border_currencies: string[]
   }
   const byRail = new Map<string, Row>()
   for (const r of (data ?? []) as Row[]) {
