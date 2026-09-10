@@ -84,11 +84,43 @@ export function railAdapterFor(rail: string): Provider | null {
  * Callers still check `route.blocked` first, and this does not replace that: a
  * blocked corridor has no rail to compare against and a better sentence of its
  * own.
+ *
+ * ---
+ *
+ * **2026-09-10: it compared against the wrong thing, and PayPal is what showed
+ * it.** The check was `railAdapterFor(rail) !== route.provider`, and
+ * `route.provider` is the **one preferred** adapter `payoutRoute` ranks first
+ * for a corridor — Flutterwave local, then Stripe, then Flutterwave foreign,
+ * then PayPal. That was indistinguishable from "the only adapter this corridor
+ * has" for as long as every market had exactly one live rail. The day PayPal's
+ * 88 markets were switched on it stopped being true: a host in the United
+ * States, where `payoutRoute` answers `stripe`/`connect`, was refused PayPal —
+ * an enabled rail whose route row carries US and USD — for no reason except
+ * that it is not the rail PayHold would have picked for them. `payout.methods`
+ * on `/v1/payment-options` had already been widened to list every rail the
+ * table carries; this was the check that then refused what that list offered.
+ *
+ * So the comparison is now against the rail's **own row** in
+ * `route_evaluation` — the same rows `assertRailSwitchedOn` reads, the same
+ * judgement `route_payout` will make when the money is due, tenant override
+ * included. `payoutRoute` is untouched and PayPal stays last in it: it still
+ * decides the *default*, so nobody already being paid on a local rail moves.
+ * What changed is that the default stopped being the only permitted choice.
+ *
+ * **The Rwanda incident is refused by exactly the same sentence as before.**
+ * `stripe_connect`'s row is evaluated for RW as `country_not_supported`, so
+ * the rail is not on, so this still throws "stripe_connect cannot pay a
+ * destination in RW" before anything is tokenized. Three things are refused
+ * here and all three were refused before: a rail with no adapter, a rail the
+ * table does not carry for this country and currency, and a rail whose row
+ * names a different adapter from the one `RAIL_ADAPTER` says mints its tokens
+ * — because that token would be minted on the wrong provider.
  */
 export function assertRailOnRoute(
   rail: string,
   country: Country,
   route: PayoutRoute,
+  rails: unknown,
 ): void {
   const list =
     `GET /v1/payment-options?payout_country=${country} lists the methods that can.`
@@ -101,7 +133,24 @@ export function assertRailOnRoute(
     )
   }
 
-  if (adapter !== route.provider) {
+  const row = railRow(rails, rail)
+
+  // The table carries the rail but says a different adapter mints its tokens.
+  // Neither side is trustworthy on its own here — `loadProvider` is asked for
+  // `railAdapterFor(rail)` and `route_payout` will send on the row's
+  // `provider` — so a disagreement is refused rather than resolved in favour
+  // of either. `tests/seller-destination-rail.test.ts` pins the two against
+  // each other so this cannot be the first place anybody notices.
+  if (row !== null && row.provider !== null && row.provider !== adapter) {
+    throw new PayHoldError(
+      'policy_violation',
+      `${rail} is carried by ${row.provider} in the routing table but PayHold ` +
+        `mints its destinations on ${adapter}. This is a routing-table fault, ` +
+        `not something the request can fix. ${list}`,
+    )
+  }
+
+  if (row === null || !RAIL_ON.has(row.reason_code ?? '')) {
     // The same opening words `route_payout` uses when it meets one of these
     // rows, so a reader who has seen the sentence on an Earnings page
     // recognises it here — one fact, one sentence.
@@ -196,6 +245,29 @@ export interface RouteEvaluator {
  */
 const RAIL_ON = new Set(['eligible', 'below_route_minimum', 'above_route_maximum'])
 
+/** One rail's line in a `route_evaluation` result. */
+export interface RailRow {
+  provider: Provider | null
+  reason_code: string | null
+}
+
+/**
+ * One rail's own row out of a `route_evaluation` result, or null when the
+ * table returned none for it. Null is not "unknown": `route_evaluation`
+ * judges every declared rail, so a missing row means the rail is not one.
+ */
+export function railRow(rows: unknown, rail: string): RailRow | null {
+  const row = (Array.isArray(rows) ? rows : [])
+    .find((r) => (r as { payout_provider?: string })?.payout_provider === rail) as
+      | { provider?: string | null; reason_code?: string | null }
+      | undefined
+  if (row === undefined) return null
+  return {
+    provider: (row.provider ?? null) as Provider | null,
+    reason_code: row.reason_code ?? null,
+  }
+}
+
 /**
  * Whether one rail's row in a `route_evaluation` result says the rail is on.
  * The pure half of `assertRailSwitchedOn`, kept separate so the judgement can
@@ -205,11 +277,7 @@ export function railVerdict(
   rows: unknown,
   rail: string,
 ): { on: boolean; reason_code: string | null } {
-  const row = (Array.isArray(rows) ? rows : [])
-    .find((r) => (r as { payout_provider?: string })?.payout_provider === rail) as
-      | { reason_code?: string }
-      | undefined
-  const reason_code = row?.reason_code ?? null
+  const reason_code = railRow(rows, rail)?.reason_code ?? null
   return { on: reason_code !== null && RAIL_ON.has(reason_code), reason_code }
 }
 
@@ -241,17 +309,44 @@ export async function assertRailSwitchedOn(
   country: Country,
   currency: Currency,
 ): Promise<void> {
-  const cc = country.toUpperCase()
+  const rails = await evaluateRails(db, tenant, country, currency)
+  assertRailSwitchedOnRows(rails, rail, country)
+}
+
+/**
+ * Every rail's verdict for one corridor, asked once.
+ *
+ * `p_rail` is null on purpose. It only marks a row `preferred` and sorts it
+ * first — it changes no `reason_code` — so one call answers for every rail a
+ * registration has to check, and `assertRailOnRoute` and
+ * `assertRailSwitchedOnRows` judge the same rows rather than asking the same
+ * question twice and being able to get two answers.
+ */
+export async function evaluateRails(
+  db: RouteEvaluator,
+  tenant: string,
+  country: Country,
+  currency: Currency,
+): Promise<unknown> {
   const { data, error } = await db.rpc('route_evaluation', {
     p_tenant: tenant,
-    p_country: cc,
+    p_country: country.toUpperCase(),
     p_currency: currency.toUpperCase(),
     p_amount: 0,
-    p_rail: rail,
+    p_rail: null,
   })
   if (error) throw new Error(`route_evaluation failed: ${error.message}`)
+  return data
+}
 
-  if (!railVerdict(data, rail).on) {
+/** `assertRailSwitchedOn` against rows already read. Same sentence. */
+export function assertRailSwitchedOnRows(
+  rails: unknown,
+  rail: string,
+  country: Country,
+): void {
+  const cc = country.toUpperCase()
+  if (!railVerdict(rails, rail).on) {
     throw new PayHoldError(
       'policy_violation',
       `${rail} is not switched on for ${cc} — ${listMethods(cc)}`,

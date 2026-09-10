@@ -38,8 +38,8 @@ import {
   SCHEME_LABEL,
   SUPPORTED_CURRENCIES,
   type CardScheme,
-  type PayoutKind,
 } from '../_shared/rails.ts'
+import { payoutMethods } from '../_shared/payout-methods.ts'
 import { COUNTRIES } from '../_shared/countries.ts'
 import { loadProvider } from '../_shared/load-provider.ts'
 import { momoNetworksFor } from '../_shared/momo.ts'
@@ -169,18 +169,6 @@ async function loadPayoutCoverage(
  * client that read `rails_verified` as "this will work" would be wrong twice.
  * `blocked` is the field that answers "will a payout find a route".
  */
-/**
- * Which destination each rail is, in the vocabulary `kind` already uses. The
- * declared-and-disabled wallets (§29.3) map to nothing: they never appear in
- * `methods` because they can never be eligible.
- */
-const RAIL_KIND: Record<string, PayoutKind> = {
-  flutterwave_momo: 'momo',
-  flutterwave_bank: 'bank',
-  stripe_connect: 'connect',
-  paypal: 'paypal',
-}
-
 async function routedOrBlocked(
   db: SupabaseClient,
   tenant: string,
@@ -200,27 +188,19 @@ async function routedOrBlocked(
   })
   if (error) throw new Error(`route_evaluation failed: ${error.message}`)
 
-  const COVERED = new Set(['eligible', 'below_route_minimum', 'above_route_maximum'])
-  const rows = (data ?? []) as { payout_provider: string; reason_code: string }[]
-  const eligible = rows.filter((r) => COVERED.has(r.reason_code))
-
   // Every destination this market can actually be paid into, not just the
   // preferred one. `kind` is a single value and a market is not: Kenya and
   // Tanzania take a wallet while their bank corridor sits behind a Flutterwave
-  // request, Malawi is the same shape, Ethiopia takes either. A client reading
+  // request, Malawi is the same shape, Ethiopia takes either, and the United
+  // States takes a Stripe Connect account or a PayPal one. A client reading
   // `kind: 'momo'` and offering wallet-and-bank — which is the obvious reading,
   // and what one was doing — shows a Kenyan host a Bank option that
-  // `assertRailOnRoute` then refuses.
-  //
-  // Derived from `route_evaluation` rather than from the registry, so it is
-  // what the routing table will actually carry this second: a rail switched
-  // off, risk-held or missing its adapter drops out here without anything
-  // needing to remember to remove it.
-  const methods = [...new Set(
-    eligible.map((r) => RAIL_KIND[r.payout_provider]).filter(Boolean),
-  )].sort((a, b) => Number(b === route.kind) - Number(a === route.kind))
+  // `assertRailOnRoute` then refuses. `_shared/payout-methods.ts` is where the
+  // derivation lives, so what this offers and what registration accepts can be
+  // pinned against each other.
+  const methods = payoutMethods(data, route.kind)
 
-  if (eligible.length > 0) return { ...route, verified, methods }
+  if (methods.length > 0) return { ...route, verified, methods }
 
   // `reason` is shown to a seller verbatim by at least one client, so it says
   // only what a seller can act on — that payouts into this market are not open

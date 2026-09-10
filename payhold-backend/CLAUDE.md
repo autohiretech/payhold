@@ -74,7 +74,7 @@ environment or a build log.
 | `deals` | create (with §14's `completion_policy`), list, get, `/pay`, `/confirm`, `/refund`, `/deposit`, `/capture`, `/release-deposit`, `/cancel` (an unfunded deal only — `created`, `checkout_started`, `payment_failed`; a payment in flight is refused, anything funded is a refund) |
 | `checkout` | §10.1's sessions. `/sessions` for the client's server; `/public/:token` for the buyer, with no credential |
 | `payment-options` | what a buyer in a market can pay with; the catalogue a client renders its checkout from |
-| `sellers` | register (destination optional), list (`?external_user_id=` finds the client's own handle), `/wallets`, `/:id/capabilities`, `/:id/balance`, `/:id/withdraw`, `/:id/verify` (person-only), `/:id/active` (status only, no payout effect), `/:id/destinations` and `/:id/destinations/:id/end-hold` (person-only), `/:id/connect/onboard` and `/:id/connect/status` (Stripe Connect onboarding — see below) |
+| `sellers` | register (destination optional), list (`?external_user_id=` finds the client's own handle), `/wallets`, `/:id/capabilities`, `/:id/balance`, `/:id/withdraw`, `/:id/verify` (person-only), `/:id/active` (status only, no payout effect), `/:id/destinations` and `/:id/destinations/:id/end-hold` (person-only), `/:id/connect/onboard`, `/:id/connect/session` and `/:id/connect/status` (Stripe Connect onboarding, redirected or embedded — see below) |
 | `balance` | four buckets per currency, or `?by=rail` |
 | `ledger` | the entries behind those buckets, filterable by deal. No writer, on any method |
 | `audit-log` | who did what, including every act that moved no money |
@@ -753,6 +753,34 @@ payable, not §12's identity attestation. Polling from the client's return page
 is the primary completion path (the same "the return is not the evidence,
 re-check what's true" shape `settle-pending` and checkout's own poll use); an
 `account.updated` webhook handler is the natural next step and is not built.
+
+**Onboarding is presented two ways and there is only one of it.**
+`/connect/onboard` returns a hosted link to `connect.stripe.com`;
+`/connect/session` returns an Account Session client secret plus the tenant's
+publishable key, which `@stripe/connect-js` mounts the *same* Stripe form with
+inside the client's own app. `connectAccountFor` is the shared half — which
+market, whether Connect even pays it out, whether the tenant has Stripe
+connected, and the get-or-create of `stripe_connect_pending_account_id` — so
+the two cannot answer a corridor differently depending on which button a client
+rendered, and a seller who starts in one can finish in the other.
+
+Three things about the embedded path are load-bearing:
+
+- **A fresh session per call, never cached.** Connect.js calls its
+  `fetchClientSecret` again when a session expires mid-onboarding, and Stripe
+  documents that it must return a *new* secret each time. A cached one hands a
+  dead secret to the exact caller that only asks because the last one died — a
+  host stranded on the screen where they are typing bank details.
+- **The publishable key travels in the response.** It is the tenant's own, it
+  is not a secret, and the alternative is every client hardcoding provider
+  knowledge — the thing `/payment-options` exists to stop.
+- **The redirect is not deprecated by this.** Stripe does not support embedded
+  components inside a mobile or desktop webview, and AutoHire ships as a PWA,
+  so a client with no DOM to mount into still needs somewhere to send a seller.
+
+Neither path is evidence. `/connect/status` still does the promotion, because a
+mounted component reporting success to its own parent would be `embed.ts`'s
+postMessage mistake one rail over.
 
 `verify` takes a Checkout Session id **or** a PaymentIntent id, because both are
 references this adapter hands out — `charge` returns the session and their

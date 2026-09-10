@@ -767,6 +767,55 @@ Deno.test('Connect status reads both flags Stripe reports, not just one', async 
   }
 })
 
+Deno.test('the account session enables onboarding for exactly that account', async () => {
+  const { seen, restore } = intercept({ client_secret: 'accs_secret_abc' })
+
+  try {
+    const session = await new StripeProvider(CREDS, '').createAccountSession('acct_1')
+    const body = decodeURIComponent(seen.body ?? '')
+
+    assertEquals(session.clientSecret, 'accs_secret_abc')
+    assertEquals(seen.url?.includes('/account_sessions'), true, seen.url)
+    assertEquals(body.includes('account=acct_1'), true, body)
+    // Bracket notation, not a JSON blob. `form()` stringifying this object
+    // would send `components=[object Object]` and Stripe would enable no
+    // component at all — the same class of bug the line-items test pins.
+    assertEquals(body.includes('components[account_onboarding][enabled]=true'), true, body)
+  } finally {
+    restore()
+  }
+})
+
+Deno.test('the account session carries the publishable key the client mounts with', async () => {
+  const { restore } = intercept({ client_secret: 'accs_secret_abc' })
+
+  try {
+    const session = await new StripeProvider(CREDS, '').createAccountSession('acct_1')
+    // The client needs both and holds neither. A tenant hardcoding their own
+    // publishable key into their app is the hardcoded-provider-knowledge
+    // failure the catalogue endpoint exists to prevent.
+    assertEquals(session.publishableKey, 'pk_test_deadbeef')
+  } finally {
+    restore()
+  }
+})
+
+Deno.test('an account session with no client secret is refused rather than returned empty', async () => {
+  // Same refusal `charge` makes on a secretless PaymentIntent. Handing back an
+  // empty string puts the failure in the browser, where Connect.js reports an
+  // opaque load error instead of the API call that actually went wrong.
+  const { restore } = intercept({})
+
+  try {
+    await new StripeProvider(CREDS, '').createAccountSession('acct_1')
+    throw new Error('expected a refusal')
+  } catch (err) {
+    assertEquals((err as Error).message.includes('no account session secret'), true)
+  } finally {
+    restore()
+  }
+})
+
 Deno.test('Connect status defaults both flags false rather than guessing', async () => {
   // Same reasoning as the fee-we-cannot-read tests above: a field Stripe
   // omitted is not evidence of anything, and reporting a payable account here

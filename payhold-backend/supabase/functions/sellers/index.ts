@@ -27,7 +27,9 @@ import { withCallerLabel } from '../_shared/seller-mask.ts'
 import {
   assertRailOnRoute,
   assertRailRequirementsMet,
-  assertRailSwitchedOn,
+  assertRailSwitchedOnRows,
+  evaluateRails,
+  railAdapterFor,
 } from './rail-adapter.ts'
 import { StripeProvider } from '../_shared/stripe.ts'
 import {
@@ -102,8 +104,15 @@ function destinationCredentials(
     return { bank_code: body.bank_code.trim() }
   }
 
-  // Stripe Connect takes an `acct_…` and nothing else; the wallets are
-  // declared-and-refused rails that never reach a tokenize call.
+  // Stripe Connect takes an `acct_…` and nothing else, and PayPal takes an
+  // account email or a payer id — both are the whole destination, with no
+  // carrier or bank code to name beside them, so there is nothing to collect
+  // here for either. (This used to say the wallets never reach a tokenize
+  // call. PayPal does, as of 2026-09-10: its route row is enabled and
+  // `PayPalProvider.tokenize` validates the address it is given. The four
+  // still-refused rails — Venmo, Cash App Pay, Alipay, WeChat Pay — are
+  // refused by `assertRailOnRoute` before this is reached, not by returning
+  // nothing from here.)
   return {}
 }
 
@@ -149,26 +158,42 @@ async function create(
     if (route.blocked) {
       throw new PayHoldError('policy_violation', route.reason)
     }
-    // And refuse a rail that is not the corridor's. `blocked` only says the
-    // corridor is unreachable; it says nothing about whether the rail the
-    // caller named is the one that reaches it, and this is the registration
-    // half of the hole `addDestination` was found through.
-    assertRailOnRoute(body.payout_provider!, country, route)
     // A corridor the adapter cannot send on (it wants fields PayHold does not
-    // collect), then the table's own answer to "is this rail on for this
-    // country" — the question neither the registry nor the adapter map can
-    // answer, and the one `route_payout` will ask when the money is due.
+    // collect) is refused first, because it is the only one of the three that
+    // costs nothing to ask.
     assertRailRequirementsMet(body.payout_provider!, country)
-    await assertRailSwitchedOn(db, caller.tenant_id, body.payout_provider!, country, payoutCurrency)
+    // Then the table's own verdict for every rail on this corridor, read once.
+    // `blocked` only says the corridor is unreachable; it says nothing about
+    // whether the rail the caller named is one that reaches it, and this is
+    // the registration half of the hole `addDestination` was found through. A
+    // market can have more than one live rail, and the corridor's *preferred*
+    // rail is not the only one a seller may choose — `rail-adapter.ts` has the
+    // account of what that got wrong.
+    const rails = await evaluateRails(db, caller.tenant_id, country, payoutCurrency)
+    assertRailOnRoute(body.payout_provider!, country, route, rails)
+    assertRailSwitchedOnRows(rails, body.payout_provider!, country)
 
     // Which wallet or bank, checked before anything is sent anywhere. A
     // beneficiary registered without it is one the rail will not transfer to.
     const credentials = destinationCredentials(body.payout_provider!, country, body)
 
-    // Tokenize on the rail that will actually carry the payout, not on
-    // whichever rail happens to be connected: a Rwandan seller is paid by
-    // Flutterwave even when the buyer's card was charged by Stripe.
-    const { provider } = await loadProvider(db, caller.tenant_id, route.provider!)
+    // Tokenize on the adapter that will actually carry this destination's
+    // payout, not on whichever rail happens to be connected: a Rwandan seller
+    // is paid by Flutterwave even when the buyer's card was charged by Stripe.
+    //
+    // It is the **rail's** adapter, not `route.provider`. Those are the same
+    // thing whenever the seller picked the corridor's preferred rail, and were
+    // the same thing everywhere while a corridor had only one — but a US
+    // seller choosing PayPal in a market `payoutRoute` prefers Stripe for would
+    // otherwise have had a PayPal destination minted by Stripe, which is the
+    // Rwandan `Card •••• 4538` row again from the other direction.
+    // `assertRailOnRoute` has just checked this adapter against the routing
+    // table's own row for the rail, so the two cannot disagree here.
+    const { provider } = await loadProvider(
+      db,
+      caller.tenant_id,
+      railAdapterFor(body.payout_provider!)!,
+    )
     token = await provider.tokenize({
       destination,
       currency: payoutCurrency,
@@ -728,14 +753,20 @@ async function addDestination(
   // so a `stripe_connect` request sailed through, was tokenized on
   // `route.provider` two calls below — Flutterwave — and was stored claiming
   // Stripe. `rail-adapter.ts` has the whole account; this is where it happened.
-  assertRailOnRoute(body.payout_provider, country, route)
-  // Same two checks as `create`, same order, same reasons.
+  // Same three checks as `create`, same order, same reasons.
   assertRailRequirementsMet(body.payout_provider, country)
-  await assertRailSwitchedOn(db, caller.tenant_id, body.payout_provider, country, payoutCurrency)
+  const rails = await evaluateRails(db, caller.tenant_id, country, payoutCurrency)
+  assertRailOnRoute(body.payout_provider, country, route, rails)
+  assertRailSwitchedOnRows(rails, body.payout_provider, country)
 
   const credentials = destinationCredentials(body.payout_provider, country, body)
 
-  const { provider } = await loadProvider(db, caller.tenant_id, route.provider!)
+  // The rail's own adapter, for `create`'s reason.
+  const { provider } = await loadProvider(
+    db,
+    caller.tenant_id,
+    railAdapterFor(body.payout_provider)!,
+  )
   const token = await provider.tokenize({
     destination: body.destination,
     currency: payoutCurrency,
@@ -935,25 +966,23 @@ async function readAllWallets(
 }
 
 /**
- * `POST /v1/sellers/:id/connect/onboard` — start (or resume) Stripe Connect
- * onboarding for a seller whose market pays out via `stripe_connect` rather
- * than Flutterwave. `POST /sellers/:id/destinations` cannot do this on its
- * own: it takes a destination and tokenizes it, but nobody has minted an
- * `acct_…` for this seller yet, and `StripeProvider.tokenize` only confirms
- * one that already exists.
+ * Get the seller to the point of having an `acct_…` mid-onboarding, shared by
+ * both ways of presenting Stripe's form.
  *
- * Returns a one-time hosted onboarding URL. The client redirects the seller
- * there; nothing is written as a payable destination until
- * `GET /connect/status` (or the account webhook) confirms Stripe actually
- * finished onboarding them — a return URL by itself is not evidence of
- * anything, the same reasoning `checkout_session_state` applies to a payment.
+ * Extracted rather than duplicated because everything up to "and now show them
+ * the form" is a decision about money that must not be able to differ between
+ * the redirect and the embedded mount: which market this seller is in, whether
+ * that market is even paid out by Connect, whether this tenant has a Stripe
+ * account at all, and whether an account for this seller already exists. A
+ * second copy of that chain is a second place for a corridor to be answered
+ * differently depending on which button the client rendered.
  */
-async function startConnectOnboarding(
-  req: Request,
+async function connectAccountFor(
   db: SupabaseClient,
   caller: Caller,
   id: string,
-): Promise<Response> {
+  body: { country?: string; email?: string | null },
+): Promise<{ provider: StripeProvider; accountId: string }> {
   const { data } = await db
     .from('sellers')
     .select('id, country, payout_currency, stripe_connect_pending_account_id')
@@ -966,14 +995,6 @@ async function startConnectOnboarding(
     payout_currency: string | null
     stripe_connect_pending_account_id: string | null
   }
-
-  const body = await readJson<{
-    country?: string
-    email?: string | null
-    return_url: string
-    refresh_url: string
-  }>(req)
-  required(body as unknown as Record<string, unknown>, 'return_url', 'refresh_url')
 
   // Same "this is their first destination" gate `addDestination` enforces —
   // a seller registered with no destination has no country to default to.
@@ -1011,7 +1032,9 @@ async function startConnectOnboarding(
 
   // Reuse the account this seller already has mid-onboarding rather than
   // minting a second one every time they reopen the link — Stripe has no
-  // delete for these either.
+  // delete for these either. This is also what lets a seller who started in
+  // the embedded form finish in the redirect, or the other way round: one
+  // account, two ways of showing it.
   let accountId = seller.stripe_connect_pending_account_id
   if (!accountId) {
     const created = await provider.createConnectAccount(country, body.email ?? null, id)
@@ -1022,6 +1045,39 @@ async function startConnectOnboarding(
       .eq('id', id)
   }
 
+  return { provider, accountId }
+}
+
+/**
+ * `POST /v1/sellers/:id/connect/onboard` — start (or resume) Stripe Connect
+ * onboarding for a seller whose market pays out via `stripe_connect` rather
+ * than Flutterwave. `POST /sellers/:id/destinations` cannot do this on its
+ * own: it takes a destination and tokenizes it, but nobody has minted an
+ * `acct_…` for this seller yet, and `StripeProvider.tokenize` only confirms
+ * one that already exists.
+ *
+ * Returns a one-time hosted onboarding URL. The client redirects the seller
+ * there; nothing is written as a payable destination until
+ * `GET /connect/status` (or the account webhook) confirms Stripe actually
+ * finished onboarding them — a return URL by itself is not evidence of
+ * anything, the same reasoning `checkout_session_state` applies to a payment.
+ */
+async function startConnectOnboarding(
+  req: Request,
+  db: SupabaseClient,
+  caller: Caller,
+  id: string,
+): Promise<Response> {
+  const body = await readJson<{
+    country?: string
+    email?: string | null
+    return_url: string
+    refresh_url: string
+  }>(req)
+  required(body as unknown as Record<string, unknown>, 'return_url', 'refresh_url')
+
+  const { provider, accountId } = await connectAccountFor(db, caller, id, body)
+
   const { url } = await provider.createAccountLink(
     accountId,
     body.refresh_url,
@@ -1029,6 +1085,51 @@ async function startConnectOnboarding(
   )
 
   return json(req, { account_id: accountId, url })
+}
+
+/**
+ * `POST /v1/sellers/:id/connect/session` — the same Stripe onboarding as
+ * `/connect/onboard` above, mounted inside the client's own app instead of
+ * navigated to.
+ *
+ * **Both exist, and neither is the deprecated one.** A link sends the seller
+ * to `connect.stripe.com`; a session hands the client a short-lived client
+ * secret that `@stripe/connect-js` renders the identical form with, in their
+ * page. Stripe collects the KYC, the documents and the bank details either
+ * way and PayHold sees none of it either way — which is `tokenize`'s whole
+ * header, and embedding does not weaken it. What the client gains is that a
+ * host never leaves their app. What the redirect keeps is every context a DOM
+ * mount is not available in: Stripe does not support embedded components
+ * inside a mobile or desktop webview, and a client shipping as a PWA needs
+ * somewhere to send those sellers.
+ *
+ * **A fresh session per call, deliberately.** Connect.js calls its
+ * `fetchClientSecret` again whenever the session expires mid-onboarding, and
+ * Stripe documents that it must return a *new* secret each time. Returning a
+ * cached one would hand a dead secret to the exact caller that only asks
+ * because the last one died — a host stranded on the screen where they were
+ * typing their bank details.
+ *
+ * Nothing here is evidence of anything, the same as the redirect: the
+ * destination is written by `GET /connect/status`, which asks Stripe whether
+ * payouts are actually enabled. A mounted component that reported success to
+ * its own parent would be `embed.ts`'s postMessage mistake one rail over.
+ */
+async function startConnectSession(
+  req: Request,
+  db: SupabaseClient,
+  caller: Caller,
+  id: string,
+): Promise<Response> {
+  const body = await readJson<{ country?: string; email?: string | null }>(req)
+  const { provider, accountId } = await connectAccountFor(db, caller, id, body)
+  const { clientSecret, publishableKey } = await provider.createAccountSession(accountId)
+
+  return json(req, {
+    account_id: accountId,
+    client_secret: clientSecret,
+    publishable_key: publishableKey,
+  })
 }
 
 /**
@@ -1090,10 +1191,16 @@ async function connectStatus(
   // true now is. A refusal leaves `stripe_connect_pending_account_id` in
   // place — the account is real at Stripe, and clearing it would lose the only
   // handle anyone has to it.
-  assertRailOnRoute('stripe_connect', seller.country!, payoutRoute(seller.country!, currency))
+  const rails = await evaluateRails(db, caller.tenant_id, seller.country!, currency)
+  assertRailOnRoute(
+    'stripe_connect',
+    seller.country!,
+    payoutRoute(seller.country!, currency),
+    rails,
+  )
   // And the table's own answer, for the same reason: the row written below is
   // a `stripe_connect` destination whatever the routing says by now.
-  await assertRailSwitchedOn(db, caller.tenant_id, 'stripe_connect', seller.country!, currency)
+  assertRailSwitchedOnRows(rails, 'stripe_connect', seller.country!)
 
   const token = await provider.tokenize({
     destination: accountId,
@@ -1208,6 +1315,12 @@ Deno.serve(handler(async (req) => {
   // it has to be minted by Stripe's own onboarding first.
   if (req.method === 'POST' && id && action === 'connect' && sub === 'onboard') {
     return await startConnectOnboarding(req, db, caller, id)
+  }
+
+  // The embedded twin of `onboard`. Same account, same promotion path, and a
+  // fresh session on every call — Connect.js re-asks when one expires.
+  if (req.method === 'POST' && id && action === 'connect' && sub === 'session') {
+    return await startConnectSession(req, db, caller, id)
   }
 
   if (req.method === 'GET' && id && action === 'connect' && sub === 'status') {

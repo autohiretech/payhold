@@ -274,42 +274,71 @@ describe('payout_routes: widened to the registry, pruned, then matched to what t
     expect(r.currencies).not.toContain('RUB')
   })
 
-  test('the paypal row is still disabled, and cannot be enabled', async () => {
+  test('the paypal row is switched on, and its adapter is what let it be', async () => {
+    // `20260910000005`, at the account holder's instruction: §16's
+    // signed-agreement gate was a policy refusal written into
+    // `assert_route_has_live_provider`, and it is gone. What replaced it is
+    // nothing — the row is enabled or disabled by its own flag now, like every
+    // other rail — except the adapter check, which this row passes rather than
+    // being waved through: PayPal is `implemented` and `enabled` in
+    // `provider_capabilities`.
     const { rows: [r] } = await h.db.query<{ enabled: boolean; provider: string; note: string }>(
       `select enabled, provider, note from payout_routes
         where tenant_id is null and payout_provider = 'paypal'`,
     )
-    expect(r.enabled).toBe(false)
+    expect(r.enabled).toBe(true)
     expect(r.provider).toBe('paypal')
-    expect(r.note).toMatch(/signed/i)
-
-    // §16, enforced by assert_route_has_live_provider rather than remembered.
-    await expect(h.db.query(
-      `update payout_routes set enabled = true
-        where tenant_id is null and payout_provider = 'paypal'`,
-    )).rejects.toThrow(/signed agreement/i)
+    // The note says what the row is and what it does not promise: PayHold will
+    // attempt these payouts, and whether PayPal accepts them depends on the
+    // Payouts API being approved on the connected account.
+    expect(r.note).toMatch(/Payouts API/i)
   })
 
-  test('a PayPal corridor cannot be routed while the rail is off', async () => {
-    // The row describes the corridor; the engine still refuses it. Coverage
-    // here means "some rail could carry this", and no rail can.
+  test('§17 is untouched — venmo and cash_app_pay still cannot be enabled at all', async () => {
+    // The distinction the migration's header draws: §16 was a document waiting
+    // to be signed and could be lifted; §17 is a rule about the instruments —
+    // personal accounts may not receive marketplace payouts — and is not.
+    for (const rail of ['venmo', 'cash_app_pay']) {
+      await expect(h.db.query(
+        `update payout_routes set enabled = true
+          where tenant_id is null and payout_provider = $1`,
+        [rail],
+      )).rejects.toThrow(/personal accounts only/i)
+    }
+  })
+
+  test('a PayPal corridor routes now that the rail is on', async () => {
+    // The row describes the corridor and the engine now carries it. Note US:
+    // `route_evaluation` returns every rail with its verdict, so PayPal is
+    // picked out by name rather than by rank — Stripe Connect is also eligible
+    // there, and both being eligible at once is the point. A seller in a
+    // market with two live rails may register on either, which is what
+    // `sellers/rail-adapter.ts` was fixed to allow on 2026-09-10.
     for (const [country, currency] of [['IN', 'USD'], ['ID', 'USD'], ['US', 'USD']]) {
-      // `route_evaluation` returns every rail with its verdict, so the
-      // PayPal row is picked out by name rather than by rank — for US/USD
-      // the first row is Stripe Connect, which is eligible and irrelevant.
       const { rows } = await h.db.query<{ reason_code: string }>(
         `select reason_code from route_evaluation($1, $2, $3, 0, 'paypal')
           where payout_provider = 'paypal'`,
         [tenant, country, currency],
       )
       expect(rows, `${country}/${currency}`).toHaveLength(1)
-      expect(rows[0].reason_code, `${country}/${currency}`).toBe('provider_disabled')
+      expect(rows[0].reason_code, `${country}/${currency}`).toBe('eligible')
     }
 
-    // Indonesia is on PayPal's table and on no other rail, so nothing covers
-    // it — the registry says the corridor exists, the table says it is off.
+    // Indonesia is on PayPal's table and on no other rail. It went from
+    // uncovered to covered the moment the row was enabled, which is the whole
+    // of what switching the rail on bought.
     expect(await inRoute('paypal', 'ID', 'USD')).toBe(true)
-    expect(await covered('ID', 'USD')).toBe(false)
+    expect(await covered('ID', 'USD')).toBe(true)
+
+    // And the currency arrays still bind: KE is on PayPal's country list and
+    // KES is on nobody's priceable-currency list, so the corridor is refused
+    // on the currency rather than the country. Eligibility is per pair.
+    const { rows: ke } = await h.db.query<{ reason_code: string }>(
+      `select reason_code from route_evaluation($1, 'KE', 'KES', 0, 'paypal')
+        where payout_provider = 'paypal'`,
+      [tenant],
+    )
+    expect(ke[0].reason_code).toBe('currency_not_supported')
   })
 
   test('venmo and cash_app_pay remain unroutable, and permanently so', async () => {

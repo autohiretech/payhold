@@ -804,6 +804,68 @@ export class StripeProvider implements PaymentProvider {
     return { url: link.url }
   }
 
+  /**
+   * An Account Session — the embedded counterpart to `createAccountLink`
+   * above, and the reason both exist rather than one replacing the other.
+   *
+   * A link navigates the seller to `connect.stripe.com` and hands them back
+   * afterwards; a session hands the *client* a short-lived client secret that
+   * `@stripe/connect-js` mounts the same onboarding form with, inside the
+   * client's own page. The form, the validation, the document upload and the
+   * KYC are identical — Stripe collects them either way and we never see them,
+   * which is the property `tokenize`'s header describes and which embedding
+   * does not weaken.
+   *
+   * **Every call mints a new session, and that is the contract rather than
+   * waste.** Connect.js calls `fetchClientSecret` again whenever the session
+   * expires mid-onboarding, and Stripe's own documentation is explicit that it
+   * must return a *fresh* secret each time. Caching one here would hand back a
+   * dead secret to the one caller that only ever asks because the last one
+   * died — a seller stranded halfway through, on the screen where they were
+   * typing their bank details.
+   *
+   * The account id is not created here. `createConnectAccount` still mints it
+   * and `sellers.stripe_connect_pending_account_id` still holds it between
+   * "created" and "promoted to a destination", so the embedded path and the
+   * redirect path reach `/connect/status` with the same account and the same
+   * promotion — there is one onboarding, presented two ways.
+   *
+   * **The redirect stays.** Stripe does not support embedded components inside
+   * a mobile or desktop webview, and AutoHire ships as a PWA; a client with no
+   * DOM to mount into needs somewhere to send the seller. `/connect/onboard`
+   * is that somewhere and is not deprecated by this.
+   */
+  async createAccountSession(
+    accountId: string,
+  ): Promise<{ clientSecret: string; publishableKey: string }> {
+    const session = await this.call<{ client_secret?: string }>('/account_sessions', {
+      method: 'POST',
+      body: {
+        account: accountId,
+        components: { account_onboarding: { enabled: true } },
+      },
+    })
+
+    // Same refusal `charge` makes on a PaymentIntent with no client secret:
+    // returning an empty string would put the failure in the browser, where
+    // Connect.js reports it as an opaque load error rather than as the API
+    // call that actually went wrong.
+    if (!session.client_secret) {
+      throw new PayHoldError('policy_violation', 'Stripe returned no account session secret')
+    }
+
+    // The publishable key travels with it because the client needs both and
+    // holds neither. It is not a secret — it is printed in the JavaScript of
+    // every Stripe-powered checkout page in the world — and the alternative is
+    // every tenant hardcoding their own into their app, which is the same
+    // "a client site must never hardcode provider knowledge" failure the
+    // catalogue endpoint exists to prevent.
+    return {
+      clientSecret: session.client_secret,
+      publishableKey: this.creds.publishable_key,
+    }
+  }
+
   /** Has this account finished enough of onboarding to receive a transfer? */
   async connectAccountStatus(
     accountId: string,

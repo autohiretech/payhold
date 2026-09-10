@@ -19,6 +19,7 @@ import {
   SCHEME_LABEL,
 } from './rails.ts'
 import { presentmentCurrencyFor } from './fx.ts'
+import { payoutMethods } from './payout-methods.ts'
 import type { CardScheme } from './rails.ts'
 import { COUNTRIES } from './countries.ts'
 
@@ -135,4 +136,51 @@ Deno.test('a sanctioned market answers with a reason, not an empty list', () => 
   for (const info of restricted) {
     assertEquals(collectionRails(info.code, 'USD'), [])
   }
+})
+
+// ---------------------------------------------------------------------------
+// `payout.methods` — what a seller may pick, as against what leads
+// ---------------------------------------------------------------------------
+
+Deno.test('methods is every eligible rail, preferred first', () => {
+  // The United States as the routing table carries it since PayPal was
+  // switched on: a Connect account *or* a PayPal one. `kind` is `connect`, and
+  // its whole authority over this list is that it sorts first — a client that
+  // read `kind` as the only choice showed a US host one option and refused the
+  // other, which is the 2026-09-10 report.
+  const rows = [
+    { payout_provider: 'paypal', reason_code: 'eligible' },
+    { payout_provider: 'stripe_connect', reason_code: 'eligible' },
+    { payout_provider: 'flutterwave_momo', reason_code: 'country_not_supported' },
+    { payout_provider: 'venmo', reason_code: 'provider_disabled' },
+  ]
+  assertEquals(payoutMethods(rows, 'connect'), ['connect', 'paypal'])
+})
+
+Deno.test('the two amount verdicts count, because a seller registers against a corridor', () => {
+  // The same three `sellers/rail-adapter.ts` accepts. A route whose minimum
+  // this particular payout is under is still a corridor somebody can be set
+  // up in, and the two lists agreeing is what keeps this endpoint's answer and
+  // registration's answer the same answer.
+  const rows = [
+    { payout_provider: 'flutterwave_momo', reason_code: 'below_route_minimum' },
+    { payout_provider: 'flutterwave_bank', reason_code: 'above_route_maximum' },
+  ]
+  assertEquals(payoutMethods(rows, 'momo'), ['momo', 'bank'])
+})
+
+Deno.test('a rail with no live adapter never appears, whatever its row says', () => {
+  // §29.3's declared-and-disabled wallets map to no kind at all, so they
+  // cannot reach the list even by a route row being switched on by mistake.
+  const rows = [
+    { payout_provider: 'alipay', reason_code: 'eligible' },
+    { payout_provider: 'wechat_pay', reason_code: 'eligible' },
+    { payout_provider: 'cash_app_pay', reason_code: 'eligible' },
+  ]
+  assertEquals(payoutMethods(rows, null), [])
+})
+
+Deno.test('nothing eligible is an empty list rather than a guess', () => {
+  assertEquals(payoutMethods([], 'connect'), [])
+  assertEquals(payoutMethods(null, 'connect'), [])
 })

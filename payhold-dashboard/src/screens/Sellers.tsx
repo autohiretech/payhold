@@ -146,6 +146,12 @@ function payoutOptionsFor(country: Country): PayoutProvider[] {
   if (info.momoPayout) options.push('flutterwave_momo')
   if (info.flutterwavePayout) options.push('flutterwave_bank')
   if (info.stripePayout) options.push('stripe_connect')
+  // PayPal last, mirroring `payoutRoute`'s own ranking — it is offered
+  // *alongside* whatever else reaches the market rather than instead of it,
+  // which is what the routing table has said since its row was switched on
+  // (2026-09-10). A US seller may be paid into a Connect account or a PayPal
+  // one; before this line the form could only offer the first.
+  if (info.paypalPayout) options.push('paypal')
   return options
 }
 
