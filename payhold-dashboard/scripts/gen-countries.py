@@ -14,6 +14,10 @@ from them, not inferred from currency zones):
                                      .../docs/ethiopian-bank-account-transfers.md, .../docs/kenya-1.md
   Flutterwave momo transfers (out) : https://developer.flutterwave.com/v3.0.0/docs/mobile-money.md
 
+PayPal Payouts (read 2026-09-10):
+  PayPal Payouts country/feature   : https://developer.paypal.com/docs/payouts/standard/reference/country-feature/
+  PayPal currency codes            : https://developer.paypal.com/api/rest/reference/currency-codes/
+
 Collection and payout are separate flags because Flutterwave documents them
 separately and they disagree: Egypt and Malawi collect but payouts there are
 "not available by default — submit a request"; Ethiopia has a transfer guide
@@ -283,6 +287,47 @@ FLUTTERWAVE_PAYOUT = {
     "KE", "TZ",
 }
 
+# PayPal PAYOUT — a third source of truth, read from PayPal's own Payouts
+# country/feature table on 2026-09-10 and inferred from neither of the two
+# above. PayPal reaches markets no Flutterwave corridor and no Stripe Connect
+# country touches, and misses markets both cover, so deriving this from
+# `stripePayout` or `flutterwavePayout` would be wrong in both directions.
+#
+# The table tiers every listed market as one of four things — "Send, receive
+# and withdraw", "…in local currency", "Fully localized", and "Receive and
+# withdraw". **A country belongs here when a recipient there can receive and
+# withdraw**, which is what a payout needs and what all four tiers grant. The
+# tiers differ on what an account there may *send* and in which currency, and
+# a payout is money arriving rather than leaving.
+#
+#   India and Mexico are the "Receive and withdraw" tier: a recipient there
+#   can be paid and can take the money out, and an account there cannot
+#   initiate a payout. That is a fact about the sending side, which is
+#   PayHold's own PayPal account and never a seller's, so both are in.
+#
+#   Venmo is United States only — "you can use Venmo as a payout method only
+#   for recipients in the United States" — and rides this same adapter. It is
+#   not this set: `payout_routes` carries Venmo as its own rail, and §17 keeps
+#   it permanently refused (personal accounts only).
+#
+# Bermuda, the Cayman Islands, the Faroe Islands, Greenland and Réunion are on
+# PayPal's table and not in this registry, so they are absent here too.
+PAYPAL_PAYOUT = {
+    # Fully localized
+    "AU", "AT", "BE", "BR", "CA", "CN", "DK", "FR", "DE", "HK", "IL", "IT",
+    "JP", "NL", "NO", "PL", "PT", "SG", "ES", "SE", "CH", "TR", "GB", "US",
+    # Send, receive and withdraw in local currency
+    "CY", "CZ", "EC", "FI", "GR", "HU", "LI", "LU", "MY", "MT", "NZ", "PH",
+    "SM", "SI",
+    # Send, receive and withdraw
+    "AD", "AR", "BS", "BH", "BW", "BG", "CL", "CO", "CR", "HR", "DO", "SV",
+    "EE", "GE", "GI", "GT", "HN", "IS", "ID", "IE", "JM", "JO", "KZ", "KE",
+    "KW", "LV", "LS", "LT", "MU", "MD", "MC", "MA", "MZ", "NI", "OM", "PA",
+    "PE", "QA", "RO", "SA", "SN", "RS", "SK", "ZA", "AE", "UY", "VE", "VN",
+    # Receive and withdraw — see the note above
+    "IN", "MX",
+}
+
 # Mobile money, with the wallets Flutterwave names per market.
 MOMO = {
     "BF": ["Orange Money", "Mobicash"],
@@ -336,6 +381,12 @@ def render(backend: bool) -> str:
     for code in MOMO_COLLECT | MOMO_PAYOUT:
         assert code in MOMO, f"{code} is marked momo but names no wallets"
     assert len(codes) == len(set(codes)), "duplicate country code"
+    # A PayPal payout corridor into a market this registry does not know, or
+    # into a sanctioned one, is a row nothing downstream could ever honour.
+    for code in sorted(PAYPAL_PAYOUT - set(codes)):
+        raise AssertionError(f"{code} is on PAYPAL_PAYOUT and not in the registry")
+    for code in sorted(PAYPAL_PAYOUT & RESTRICTED):
+        raise AssertionError(f"{code} is both PayPal-payable and sanctioned")
 
     currencies = sorted({row[2] for row in COUNTRIES} | {"USD", "EUR", "GBP"})
     regions = []
@@ -376,6 +427,10 @@ def render(backend: bool) -> str:
  *   https://developer.flutterwave.com/v3.0.0/docs/mobile-money.md     (momo transfers out)
  *   https://flutterwave.com/mu/support/general/what-are-the-currencies-accepted-on-flutterwave
  *
+ * PayPal Payouts, read 2026-09-10:
+ *   https://developer.paypal.com/docs/payouts/standard/reference/country-feature/
+ *   https://developer.paypal.com/api/rest/reference/currency-codes/
+ *
  * `flutterwaveLocal` (collection) and `flutterwavePayout` (transfers) are
  * separate flags from separate pages, and they disagree: Egypt and Malawi
  * collect but payouts are "not available by default"; Ethiopia has a transfer
@@ -410,6 +465,16 @@ def render(backend: bool) -> str:
     w("  stripePayout: boolean")
     w("  /** Stripe lists this market as preview / contact-sales only. */")
     w("  stripePreview: boolean")
+    w("  /**")
+    w("   * PayPal's Payouts country table says a recipient here can **receive and")
+    w("   * withdraw** — all four of its tiers do, which is what a payout needs.")
+    w("   * A third source of truth: independent of `stripePayout` and")
+    w("   * `flutterwavePayout`, and never derived from either. India and Mexico are")
+    w("   * true here and are receive-only on the *sending* side, which is PayHold's")
+    w("   * account rather than a seller's. Venmo rides the same adapter and is US")
+    w("   * only; it is a rail of its own in `payout_routes`, not this flag.")
+    w("   */")
+    w("  paypalPayout: boolean")
     w("  /** Sanctioned or embargoed — no card acquirer will process. */")
     w("  restricted: boolean")
     w("}")
@@ -473,6 +538,7 @@ def render(backend: bool) -> str:
             f"flutterwavePayout: {'true' if code in FLUTTERWAVE_PAYOUT else 'false'}",
             f"stripePayout: {'true' if code in STRIPE_PAYOUT else 'false'}",
             f"stripePreview: {'true' if code in STRIPE_PREVIEW else 'false'}",
+            f"paypalPayout: {'true' if code in PAYPAL_PAYOUT else 'false'}",
             f"restricted: {'true' if code in RESTRICTED else 'false'}",
         ]
         w("  { " + ", ".join(fields) + " },")
@@ -533,6 +599,7 @@ def main() -> None:
     print(f"  stripe payout   : {len(STRIPE_PAYOUT)}")
     print(f"  flutterwave in  : {len(FLUTTERWAVE_LOCAL)}")
     print(f"  flutterwave out : {len(FLUTTERWAVE_PAYOUT)}")
+    print(f"  paypal payout   : {len(PAYPAL_PAYOUT)}")
     print(f"  mobile money    : {len(MOMO)}")
     print(f"  restricted      : {len(RESTRICTED)}")
 

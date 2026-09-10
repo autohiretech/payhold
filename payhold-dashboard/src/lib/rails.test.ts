@@ -10,7 +10,7 @@
 import { describe, expect, it } from 'vitest'
 import type { Country } from '@/api/types'
 import { COUNTRIES } from './countries'
-import { PROVENANCE, PROVENANCE_CHECKED_ON, provenanceFor } from './railProvenance'
+import { PROVENANCE, PROVENANCE_READING_DATES, provenanceFor } from './railProvenance'
 import {
   RAILS,
   RAILS_VERIFIED,
@@ -368,7 +368,10 @@ describe('rail table integrity', () => {
 
   it('lists a payout rail for exactly the markets marked payable', () => {
     for (const info of COUNTRIES) {
-      const reachable = info.flutterwavePayout || info.stripePayout
+      // Three independent flags, from three providers' own pages. PayPal
+      // joined on 2026-09-10 and is neither a subset nor a superset of the
+      // other two — it reaches Kenya and Indonesia, and misses Nigeria.
+      const reachable = info.flutterwavePayout || info.stripePayout || info.paypalPayout
       expect(payoutRails(info.code).length > 0, info.code).toBe(reachable)
     }
   })
@@ -412,7 +415,10 @@ describe('rail provenance — what has been checked against provider documentati
     for (const [key, rec] of Object.entries(PROVENANCE)) {
       expect(rec.state, key).not.toBe('unchecked')
       expect(rec.source, key).toMatch(/^https:\/\//)
-      expect(rec.checked, key).toBe(PROVENANCE_CHECKED_ON)
+      // Two reading dates now: the 2026-09-09 sweep, and PayPal's Payouts
+      // country table re-read on 2026-09-10 when the payout direction was
+      // added. A record has to carry the date it was actually read.
+      expect(PROVENANCE_READING_DATES, key).toContain(rec.checked)
     }
   })
 
@@ -443,5 +449,75 @@ describe('rail provenance — what has been checked against provider documentati
     const ke = RAILS.find((r) => r.provider === 'flutterwave' && r.country === 'KE' && r.method === 'bank_transfer')
     expect(ke).toBeDefined()
     expect(provenanceFor(ke!, 'payout').state).toBe('unsupported')
+  })
+})
+
+describe('PayPal payouts — the third source of truth', () => {
+  it('marks the wallet rail payable exactly where PayPal lists a recipient', () => {
+    for (const info of COUNTRIES) {
+      const wallet = RAILS.filter(
+        (r) => r.country === info.code && r.provider === 'paypal' && r.method === 'wallet',
+      )
+      if (info.restricted) {
+        expect(wallet, info.code).toHaveLength(0)
+        continue
+      }
+      expect(wallet, info.code).toHaveLength(1)
+      expect(wallet[0]!.collect, info.code).toBe(true)
+      expect(wallet[0]!.payout, info.code).toBe(info.paypalPayout)
+    }
+
+    expect(COUNTRIES.filter((c) => c.paypalPayout)).toHaveLength(88)
+  })
+
+  it('is not derived from Stripe or Flutterwave — it reaches markets neither does, and misses ones they carry', () => {
+    // Kenya and Indonesia: PayPal lists them, Stripe does not pay out there.
+    for (const code of ['KE', 'ID', 'IN', 'MX', 'ZA', 'SN'] as const) {
+      expect(countryInfo(code).paypalPayout, code).toBe(true)
+    }
+    expect(countryInfo('KE').stripePayout).toBe(false)
+    // Nigeria and Rwanda: Flutterwave pays them, PayPal's table does not
+    // list them at all.
+    for (const code of ['NG', 'RW', 'UG', 'TZ', 'ET'] as const) {
+      expect(countryInfo(code).paypalPayout, code).toBe(false)
+    }
+    expect(countryInfo('RW').flutterwavePayout).toBe(true)
+  })
+
+  it('never takes a corridor an existing rail already carries', () => {
+    // `payoutRoute` decides Flutterwave-vs-Stripe and knows nothing about
+    // PayPal, deliberately: it is a fallback for markets neither reaches, and
+    // preferring it silently would reroute sellers being paid today.
+    expect(payoutRoute('RW', 'RWF').provider).toBe('flutterwave')
+    expect(payoutRoute('KE', 'KES').provider).toBe('flutterwave')
+    expect(payoutRoute('US', 'USD').provider).toBe('stripe')
+    expect(payoutRoute('GB', 'GBP').provider).toBe('stripe')
+  })
+
+  it('leaves a PayPal-only market blocked — the registry is not the routing table', () => {
+    const only = COUNTRIES.find(
+      (c) => c.paypalPayout && !c.flutterwavePayout && !c.stripePayout && !c.restricted,
+    )
+    expect(only, 'expected a market only PayPal lists').toBeTruthy()
+    const route = payoutRoute(only!.code, only!.currency)
+    expect(route.blocked).toBe(true)
+    expect(route.provider).toBeNull()
+    // …and a buyer there can still pay, which is the whole shape of this table.
+    expect(collectionRails(only!.code, 'USD').length).toBeGreaterThan(0)
+  })
+
+  it('emits no venmo or cash_app_pay rail at all', () => {
+    // Venmo rides PayPal's adapter and is a `payout_provider` rail of its own,
+    // refused permanently by §17; Cash App Pay has an adapter name and no
+    // class. Neither may ever appear as a rail's provider here — Venmo is not
+    // even a `Provider`, which is why this compares over the widened list
+    // rather than against the union.
+    const providers: string[] = RAILS.map((r) => r.provider)
+    expect(providers).not.toContain('venmo')
+    expect(providers).not.toContain('cash_app_pay')
+    // …and no PayPal payout row advertises a Venmo wallet behind it.
+    expect(
+      RAILS.some((r) => r.payout && r.networks.some((n) => /venmo|cash ?app/i.test(n))),
+    ).toBe(false)
   })
 })

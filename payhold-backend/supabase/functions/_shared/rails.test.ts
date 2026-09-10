@@ -183,3 +183,88 @@ Deno.test('the default rail for a market is one that can actually take money', (
     )
   }
 })
+
+Deno.test('the PayPal wallet rail is payable exactly where the registry says it is', () => {
+  // A third source of truth, from PayPal's own Payouts country/feature table.
+  // Deriving it from either of the other two would be wrong in both
+  // directions: PayPal reaches Kenya and Indonesia, which Stripe does not, and
+  // misses Nigeria and Rwanda, which Flutterwave carries.
+  for (const info of COUNTRIES) {
+    const wallet = RAILS.filter(
+      (r) => r.country === info.code && r.provider === 'paypal' && r.method === 'wallet',
+    )
+
+    if (info.restricted) {
+      assertEquals(wallet.length, 0, `${info.code} is sanctioned and has a PayPal rail`)
+      continue
+    }
+
+    assertEquals(wallet.length, 1, info.code)
+    // Collection is the near-universal half and did not move.
+    assertEquals(wallet[0].collect, true, info.code)
+    assertEquals(wallet[0].payout, info.paypalPayout, info.code)
+  }
+
+  // The shape of the claim, spot-checked at both ends.
+  const payable = COUNTRIES.filter((c) => c.paypalPayout)
+  assertEquals(payable.length, 88)
+  for (const code of ['US', 'GB', 'DE', 'KE', 'ZA', 'IN', 'MX', 'SN']) {
+    assertEquals(countryInfo(code).paypalPayout, true, code)
+  }
+  // Absent from PayPal's recipient table. Nigeria and Rwanda are paid on
+  // Flutterwave; a PayPal wallet there would be a destination nothing reaches.
+  for (const code of ['NG', 'RW', 'UG', 'TZ', 'ET']) {
+    assertEquals(countryInfo(code).paypalPayout, false, code)
+  }
+})
+
+Deno.test('PayPal never hijacks a corridor an existing rail already carries', () => {
+  // `payoutRoute` decides Flutterwave-vs-Stripe and knows nothing about
+  // PayPal, deliberately: PayPal is a fallback for markets neither reaches,
+  // and silently preferring it would reroute sellers being paid perfectly well
+  // today. This is the pin on that.
+  const expected: [string, string, string][] = [
+    ['RW', 'RWF', 'flutterwave'],
+    ['KE', 'KES', 'flutterwave'],
+    ['US', 'USD', 'stripe'],
+    ['GB', 'GBP', 'stripe'],
+  ]
+
+  for (const [country, currency, provider] of expected) {
+    const route = payoutRoute(country, currency)
+    assertEquals(route.provider, provider, `${country}/${currency}`)
+    assertEquals(route.blocked, false, `${country}/${currency}`)
+  }
+
+  // KE, US and GB are all on PayPal's recipient table; none of them routes
+  // there.
+  for (const code of ['KE', 'US', 'GB']) {
+    assertEquals(countryInfo(code).paypalPayout, true, code)
+  }
+
+  // And a market only PayPal reaches stays blocked, because the registry is
+  // not the routing table: `payout_routes` decides, and PayPal's row is off.
+  const paypalOnly = COUNTRIES.find(
+    (c) => c.paypalPayout && !c.flutterwavePayout && !c.stripePayout && !c.restricted,
+  )
+  assert(paypalOnly, 'expected a market only PayPal lists as a recipient')
+  assertEquals(payoutRoute(paypalOnly.code, paypalOnly.currency).blocked, true)
+  assertThrows(
+    () => payoutProviderFor(paypalOnly.code, paypalOnly.currency),
+    PayHoldError,
+  )
+})
+
+Deno.test('venmo and cash_app_pay are not rails this table can pay', () => {
+  // Neither is a `Provider` the registry ever emits: Venmo rides PayPal's
+  // adapter and is a `payout_provider` rail of its own, refused permanently by
+  // §17, and Cash App Pay has no adapter at all. A row here claiming either
+  // would be a destination the routing table refuses at the first payout.
+  for (const rail of ['venmo', 'cash_app_pay']) {
+    assertEquals(RAILS.filter((r) => r.provider === rail).length, 0, rail)
+  }
+  assertEquals(
+    RAILS.some((r) => r.payout && r.networks.some((n) => /venmo|cash ?app/i.test(n))),
+    false,
+  )
+})

@@ -1,12 +1,13 @@
 import { describe, expect, it } from 'vitest'
 import {
   PROVENANCE,
-  PROVENANCE_CHECKED_ON,
+  PROVENANCE_READING_DATES,
   PROVENANCE_CLAIMS,
   provenanceFor,
   provenanceRows,
 } from './railProvenance'
 import { RAILS, type Rail } from './rails'
+import type { Country } from '@/api/types'
 
 const claim = (key: string) => {
   const rec = PROVENANCE_CLAIMS[key]
@@ -25,7 +26,9 @@ describe('rail provenance — every claim is a page and a date', () => {
     for (const [key, rec] of Object.entries(PROVENANCE_CLAIMS)) {
       expect(rec.state, key).not.toBe('unchecked')
       expect(rec.source, key).toMatch(/^https:\/\//)
-      expect(rec.checked, key).toBe(PROVENANCE_CHECKED_ON)
+      // Two reading dates: the 2026-09-09 sweep, and PayPal's Payouts
+      // country table re-read on 2026-09-10 for the payout direction.
+      expect(PROVENANCE_READING_DATES, key).toContain(rec.checked)
       expect(rec.note, `${key} needs a sentence a person can act on`).toBeTruthy()
     }
   })
@@ -113,6 +116,63 @@ describe('rail provenance — spot checks against what was read on 2026-09-09', 
   it('Flutterwave collection: Nigeria bank transfer documented, Rwanda bank transfer not', () => {
     expect(provenanceFor(row('flutterwave', 'NG', 'bank_transfer'), 'collect').state).toBe('documented')
     expect(provenanceFor(row('flutterwave', 'RW', 'bank_transfer'), 'collect').state).toBe('unsupported')
+  })
+})
+
+describe('rail provenance — PayPal payouts, read 2026-09-10', () => {
+  it('documents a payout row for every tier of PayPal’s recipient table', () => {
+    // All four tiers grant "receive and withdraw", which is the whole of what
+    // a payout needs, so all four are documented rather than only the top one.
+    const tiers: [Country, string][] = [
+      ['US', 'Fully localized'],
+      ['NZ', 'Send, receive, and withdraw in local currency'],
+      ['KE', 'Send, receive, and withdraw'],
+      ['IN', 'Receive and withdraw'],
+      ['MX', 'Receive and withdraw'],
+    ]
+    for (const [country, tier] of tiers) {
+      const rec = provenanceFor(row('paypal', country, 'wallet'), 'payout')
+      expect(rec.state, country).toBe('documented')
+      expect(rec.source, country).toContain('developer.paypal.com')
+      expect(rec.note, country).toContain(tier)
+      expect(rec.checked, country).toBe('2026-09-10')
+    }
+  })
+
+  it('says on every payout row that the rail is still switched off', () => {
+    // The provenance records what the page says. Whether the corridor is on is
+    // `payout_routes`, and it is not — §16 wants a signed agreement first.
+    const rec = provenanceFor(row('paypal', 'GB', 'wallet'), 'payout')
+    expect(rec.note).toMatch(/disabled until a payout agreement is signed/i)
+  })
+
+  it('marks a market absent from the recipient table unsupported for payout', () => {
+    // The mirror image of the collect rows: for *collection* the table's
+    // silence is not an answer, and those stay `unchecked`. For payout it is
+    // exactly the answer, because that table is the recipient list.
+    for (const country of ['NG', 'RW', 'UG', 'ET']) {
+      const rec = claim(`payout:paypal:${country}:wallet`)
+      expect(rec.state, country).toBe('unsupported')
+      expect(rec.note, country).toMatch(/Absent from PayPal’s Payouts country/)
+    }
+  })
+
+  it('builds no payout row where PayPal lists no recipient, so the claim is pruned', () => {
+    expect(row('paypal', 'NG', 'wallet').payout).toBe(false)
+    expect(PROVENANCE['payout:paypal:NG:wallet']).toBeUndefined()
+    // …and does build one where PayPal does.
+    expect(row('paypal', 'KE', 'wallet').payout).toBe(true)
+    expect(PROVENANCE['payout:paypal:KE:wallet']).toBeTruthy()
+  })
+
+  it('leaves the collect rows exactly as they were', () => {
+    // They were set deliberately: `unchecked` where PayPal's buyer-country
+    // list could not be read, and that finding is not this change's to undo.
+    const ng = provenanceFor(row('paypal', 'NG', 'wallet'), 'collect')
+    expect(ng.state).toBe('unchecked')
+    expect(ng.checked).toBe('2026-09-09')
+    expect(provenanceFor(row('paypal', 'RW', 'wallet'), 'collect').state).toBe('unchecked')
+    expect(provenanceFor(row('paypal', 'DE', 'wallet'), 'collect').checked).toBe('2026-09-09')
   })
 })
 

@@ -57,10 +57,20 @@
  *   - PayPal wallet rows were read against PayPal's Payouts country-feature
  *     table, which is the one PayPal country page a fetch can read (the
  *     consumer availability page is script-rendered). It lists the markets
- *     where a PayPal account can send, receive and withdraw. A market absent
- *     from it stays `unchecked`, with a note saying why: that table is the
- *     Payouts product's recipient list, and a buyer's ability to pay is a
- *     different question its absence does not answer.
+ *     where a PayPal account can send, receive and withdraw. A *collect* row
+ *     for a market absent from it stays `unchecked`, with a note saying why:
+ *     that table is the Payouts product's recipient list, and a buyer's
+ *     ability to pay is a different question its absence does not answer.
+ *     A *payout* row is the opposite case, and the table answers it directly —
+ *     re-read on 2026-09-10 when the registry gained `paypalPayout`, so those
+ *     records carry that date. Every one of its four tiers grants a recipient
+ *     "receive and withdraw", which is all a payout needs, so all four are
+ *     `documented` (India and Mexico included — their restriction is on
+ *     sending, and the sender here is never the seller). A market absent from
+ *     the table is `unsupported` for payout, because for that direction its
+ *     absence is the answer. None of this switches the rail on: `payout_routes`
+ *     keeps the PayPal row disabled and the database refuses to enable it
+ *     without §16's signed agreement.
  *   - Where Flutterwave documents a corridor but only "on request" or only
  *     with fields PayHold does not collect, the row is `unsupported`, and the
  *     note says which — that is the sentence a person can act on.
@@ -84,6 +94,22 @@ export interface ProvenanceRecord {
 
 /** What was read on 2026-09-09. */
 export const PROVENANCE_CHECKED_ON = '2026-09-09'
+
+/**
+ * PayPal's Payouts country/feature table was re-read on 2026-09-10, when the
+ * *payout* direction was added to the registry — the 2026-09-09 pass read it
+ * for the collection rows only and drew no conclusion about paying anyone.
+ * Recorded as its own date rather than folded into the one above, because a
+ * reading date that is not the date of the reading is the thing this field
+ * exists to stop.
+ */
+export const PROVENANCE_PAYPAL_PAYOUT_CHECKED_ON = '2026-09-10'
+
+/** Every date a page was read on. A record must carry one of them. */
+export const PROVENANCE_READING_DATES = [
+  PROVENANCE_CHECKED_ON,
+  PROVENANCE_PAYPAL_PAYOUT_CHECKED_ON,
+] as const
 
 // --- Pages -------------------------------------------------------------------
 
@@ -303,6 +329,33 @@ const PAYPAL_FOOTNOTE: Partial<Record<Country, string>> = {
 const paypalNote = (tier: string) => (c: Country) =>
   doc(PAYPAL_COUNTRIES, `Listed as “${tier}” on PayPal’s Payouts country table; USD and EUR are supported PayPal currencies.${PAYPAL_FOOTNOTE[c] ?? ''}`)
 
+// --- PayPal payouts ----------------------------------------------------------
+//
+// The table re-read on 2026-09-10, this time for the direction it is actually
+// about: it is the PAYOUTS product's own recipient list, so a market on it is
+// a market PayPal documents a recipient can be paid in. All four tiers grant
+// "receive and withdraw" — they differ on what an account there may *send*,
+// and the sender on this rail is always PayHold's tenant. India and Mexico are
+// the "Receive and withdraw" tier and are therefore payable, not excluded.
+//
+// The rows are documented and the rail is still off: `payout_routes.paypal` is
+// disabled and `assert_route_has_live_provider` refuses to let it be enabled
+// until §16's signed payout agreement exists. Provenance records what the page
+// says; it has never recorded whether a corridor is switched on.
+const DP = PROVENANCE_PAYPAL_PAYOUT_CHECKED_ON
+const paypalPayoutDoc = (tier: string) => (c: Country) => ({
+  state: 'documented' as const,
+  source: PAYPAL_COUNTRIES,
+  checked: DP,
+  note: `Listed as “${tier}” on PayPal’s Payouts country table, so a recipient here can receive and withdraw. The rail itself stays disabled until a payout agreement is signed — §16.${PAYPAL_FOOTNOTE[c] ?? ''}`,
+})
+const paypalPayoutUnsupported = {
+  state: 'unsupported' as const,
+  source: PAYPAL_COUNTRIES,
+  checked: DP,
+  note: 'Absent from PayPal’s Payouts country/feature table, which is the list of markets a recipient can be paid in — so nothing here can receive a payout, whatever a buyer here can pay.',
+}
+
 // --- The claims --------------------------------------------------------------
 
 export const PROVENANCE_CLAIMS: Record<string, ProvenanceRecord> = {
@@ -358,6 +411,18 @@ export const PROVENANCE_CLAIMS: Record<string, ProvenanceRecord> = {
   ...each('collect', 'paypal', PAYPAL_SEND_RECEIVE_WITHDRAW, paypalNote('Send, receive, and withdraw'), 'wallet'),
   ...many('collect', 'paypal', PAYPAL_RECEIVE_WITHDRAW,
     doc(PAYPAL_COUNTRIES, `Listed as “Receive and withdraw” only on PayPal’s Payouts country table — accounts here cannot initiate payouts; confirm a buyer here can pay a foreign merchant before launch (currencies: ${PAYPAL_CURRENCIES}).`), 'wallet'),
+
+  // --- PayPal wallet payouts ------------------------------------------------
+  ...each('payout', 'paypal', PAYPAL_FULLY_LOCALIZED, paypalPayoutDoc('Fully localized'), 'wallet'),
+  ...each('payout', 'paypal', PAYPAL_LOCAL_CURRENCY, paypalPayoutDoc('Send, receive, and withdraw in local currency'), 'wallet'),
+  ...each('payout', 'paypal', PAYPAL_SEND_RECEIVE_WITHDRAW, paypalPayoutDoc('Send, receive, and withdraw'), 'wallet'),
+  ...each('payout', 'paypal', PAYPAL_RECEIVE_WITHDRAW, paypalPayoutDoc('Receive and withdraw'), 'wallet'),
+  // Checked and not supported. These keys name no row today — `paypalPayout` is
+  // false there, so the registry builds a collect-only wallet rail and
+  // `PROVENANCE` prunes them — but the finding is the reason the row is
+  // collect-only, and it should outlive any regeneration of the registry.
+  ...many('payout', 'paypal', without(UNRESTRICTED, PAYPAL_LISTED),
+    paypalPayoutUnsupported, 'wallet'),
 }
 
 /**

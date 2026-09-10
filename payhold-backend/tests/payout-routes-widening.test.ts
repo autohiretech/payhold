@@ -231,6 +231,109 @@ describe('payout_routes: widened to the registry, pruned, then matched to what t
     expect(await n()).toBe(before)
   })
 
+  // -------------------------------------------------------------------------
+  // 20260910000003 — PayPal's own corridor, still switched off
+  // -------------------------------------------------------------------------
+
+  const PAYPAL_COUNTRIES = [
+    'AU', 'AT', 'BE', 'BR', 'CA', 'CN', 'DK', 'FR', 'DE', 'HK', 'IL', 'IT',
+    'JP', 'NL', 'NO', 'PL', 'PT', 'SG', 'ES', 'SE', 'CH', 'TR', 'GB', 'US',
+    'CY', 'CZ', 'EC', 'FI', 'GR', 'HU', 'LI', 'LU', 'MY', 'MT', 'NZ', 'PH', 'SM', 'SI',
+    'AD', 'AR', 'BS', 'BH', 'BW', 'BG', 'CL', 'CO', 'CR', 'HR', 'DO', 'SV',
+    'EE', 'GE', 'GI', 'GT', 'HN', 'IS', 'ID', 'IE', 'JM', 'JO', 'KZ', 'KE',
+    'KW', 'LV', 'LS', 'LT', 'MU', 'MD', 'MC', 'MA', 'MZ', 'NI', 'OM', 'PA',
+    'PE', 'QA', 'RO', 'SA', 'SN', 'RS', 'SK', 'ZA', 'AE', 'UY', 'VE', 'VN',
+    'IN', 'MX',
+  ]
+  const PAYPAL_CURRENCIES = [
+    'AUD', 'BRL', 'CAD', 'CHF', 'CNY', 'CZK', 'DKK', 'EUR', 'GBP',
+    'HUF', 'JPY', 'MXN', 'NOK', 'PLN', 'SEK', 'SGD', 'USD',
+  ]
+
+  test('the paypal row carries PayPal\'s own receive-and-withdraw markets, not Stripe\'s copied list', async () => {
+    const r = await row('paypal')
+    expect(sorted(r.countries)).toEqual(sorted(PAYPAL_COUNTRIES))
+    expect(r.countries).toHaveLength(88)
+    expect(sorted(r.currencies)).toEqual(sorted(PAYPAL_CURRENCIES))
+    // The four tiers all grant a recipient receive-and-withdraw, so all four
+    // are here — India and Mexico included, whose restriction is on sending.
+    expect(r.countries).toContain('IN')
+    expect(r.countries).toContain('MX')
+    // Every currency has an FX rate behind it, the same rule 000006 applied.
+    expect(r.currencies).not.toContain('HKD')
+    expect(r.currencies).not.toContain('RUB')
+  })
+
+  test('the paypal row is still disabled, and cannot be enabled', async () => {
+    const { rows: [r] } = await h.db.query<{ enabled: boolean; provider: string; note: string }>(
+      `select enabled, provider, note from payout_routes
+        where tenant_id is null and payout_provider = 'paypal'`,
+    )
+    expect(r.enabled).toBe(false)
+    expect(r.provider).toBe('paypal')
+    expect(r.note).toMatch(/signed/i)
+
+    // §16, enforced by assert_route_has_live_provider rather than remembered.
+    await expect(h.db.query(
+      `update payout_routes set enabled = true
+        where tenant_id is null and payout_provider = 'paypal'`,
+    )).rejects.toThrow(/signed agreement/i)
+  })
+
+  test('a PayPal corridor cannot be routed while the rail is off', async () => {
+    // The row describes the corridor; the engine still refuses it. Coverage
+    // here means "some rail could carry this", and no rail can.
+    for (const [country, currency] of [['IN', 'USD'], ['ID', 'USD'], ['US', 'USD']]) {
+      // `route_evaluation` returns every rail with its verdict, so the
+      // PayPal row is picked out by name rather than by rank — for US/USD
+      // the first row is Stripe Connect, which is eligible and irrelevant.
+      const { rows } = await h.db.query<{ reason_code: string }>(
+        `select reason_code from route_evaluation($1, $2, $3, 0, 'paypal')
+          where payout_provider = 'paypal'`,
+        [tenant, country, currency],
+      )
+      expect(rows, `${country}/${currency}`).toHaveLength(1)
+      expect(rows[0].reason_code, `${country}/${currency}`).toBe('provider_disabled')
+    }
+
+    // Indonesia is on PayPal's table and on no other rail, so nothing covers
+    // it — the registry says the corridor exists, the table says it is off.
+    expect(await inRoute('paypal', 'ID', 'USD')).toBe(true)
+    expect(await covered('ID', 'USD')).toBe(false)
+  })
+
+  test('venmo and cash_app_pay remain unroutable, and permanently so', async () => {
+    // The two reason codes differ and are meant to: Venmo's adapter is live
+    // (it rides PayPal's) and its *route* is off, which is `provider_disabled`;
+    // Cash App Pay has no adapter at all, which is `provider_unavailable`.
+    // Same sentence to the seller, different next action for us.
+    for (const [rail, code] of [
+      ['venmo', 'provider_disabled'],
+      ['cash_app_pay', 'provider_unavailable'],
+    ]) {
+      const { rows: [r] } = await h.db.query<{ enabled: boolean }>(
+        `select enabled from payout_routes
+          where tenant_id is null and payout_provider = $1`,
+        [rail],
+      )
+      expect(r.enabled, rail).toBe(false)
+
+      await expect(h.db.query(
+        `update payout_routes set enabled = true
+          where tenant_id is null and payout_provider = $1`,
+        [rail],
+      )).rejects.toThrow(/personal accounts only/i)
+
+      const { rows } = await h.db.query<{ reason_code: string }>(
+        `select reason_code from route_evaluation($1, 'US', 'USD', 0, $2)
+          where payout_provider = $2`,
+        [tenant, rail],
+      )
+      expect(rows, rail).toHaveLength(1)
+      expect(rows[0].reason_code, rail).toBe(code)
+    }
+  })
+
   test('re-running the removal removes nothing twice', async () => {
     const n = async () => (await h.db.query<{ n: number }>(
       `select cardinality(countries) as n from payout_routes

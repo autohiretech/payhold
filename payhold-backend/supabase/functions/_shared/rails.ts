@@ -211,15 +211,30 @@ function buildRails(): Rail[] {
     }
 
     /**
-     * PayPal, everywhere it can collect — which is nearly everywhere.
+     * PayPal — collection nearly everywhere, payout where PayPal's own table
+     * says a recipient can receive and withdraw.
      *
      * `wallet` had a label, a blurb and an adapter and no rail, so
      * `collectionRails` never returned it and `startCharge` refused it for
      * every buyer on earth. The adapter was unreachable code.
      *
-     * Collection only. PayPal Payouts is a different agreement and a different
-     * set of corridors from the ones `payoutRoute` already models, so claiming
-     * `payout: true` here would offer sellers a destination nothing can send to.
+     * **The two flags differ, and that is the point.** Collection is the
+     * near-universal half: a buyer approves in their own PayPal account almost
+     * anywhere. Payout is `paypalPayout`, a third source of truth read from
+     * PayPal's Payouts country/feature table and inferred from neither
+     * Stripe's nor Flutterwave's coverage — 88 markets, which is neither a
+     * subset nor a superset of either. The same shape `momo`/`momoPayout`
+     * took: one rail carrying two facts beats two rails or one guess.
+     *
+     * **This does not switch anything on.** `payout_routes` is what decides
+     * which rail carries a scheduled payout, its `paypal` row is disabled, and
+     * `assert_route_has_live_provider` refuses to let it be enabled until §16's
+     * signed payout agreement exists. This flag says the corridor is real, not
+     * that it is open — the registry says what is possible and the table says
+     * what is on (§29.11). `payoutRoute` below is deliberately unchanged:
+     * PayPal is a fallback for markets neither existing rail reaches, and
+     * quietly preferring it over a local rail would reroute sellers who are
+     * being paid perfectly well today.
      *
      * The currencies are the international pair rather than the local one:
      * PayPal settles a long list, but these are the two every corridor here is
@@ -234,8 +249,13 @@ function buildRails(): Rail[] {
         provider: 'paypal',
         networks: ['PayPal'],
         collect: true,
-        payout: false,
-        note: 'The buyer approves in their own PayPal account. Collection only.',
+        payout: info.paypalPayout,
+        note: info.paypalPayout
+          ? 'The buyer approves in their own PayPal account. PayPal lists this ' +
+            'market as receive-and-withdraw for Payouts; the rail itself stays ' +
+            'off until a payout agreement is signed.'
+          : 'The buyer approves in their own PayPal account. Collection only — ' +
+            'PayPal does not list this market as a Payouts recipient.',
       })
     }
 
