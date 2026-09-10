@@ -215,12 +215,17 @@ describe('payout routing — where money can actually go', () => {
     }
   })
 
-  it('cannot pay most of the world, and says so', () => {
+  it('cannot pay much of the world, and says so', () => {
+    // PayPal counts now (20260910000005). It used to be excluded from this
+    // filter because the rail was switched off, so a PayPal-listed market was
+    // genuinely unreachable; with it on, leaving it out would have this test
+    // asserting that markets we can pay are blocked.
     const unreachable = COUNTRIES.filter(
-      (c) => !c.flutterwavePayout && !c.stripePayout && !c.restricted,
+      (c) => !c.flutterwavePayout && !c.stripePayout && !c.paypalPayout && !c.restricted,
     )
-    // The honest headline: collection is universal, payout is not.
-    expect(unreachable.length).toBeGreaterThan(80)
+    // The honest headline: collection is universal, payout is not — still true
+    // with a third rail on, just by a narrower margin.
+    expect(unreachable.length).toBeGreaterThan(40)
 
     for (const info of unreachable) {
       const route = payoutRoute(info.code, info.currency)
@@ -503,14 +508,19 @@ describe('PayPal payouts — the third source of truth', () => {
     expect(payoutRoute('GB', 'GBP').provider).toBe('stripe')
   })
 
-  it('leaves a PayPal-only market blocked — the registry is not the routing table', () => {
+  it('routes a PayPal-only market to PayPal, since nothing else reaches it', () => {
+    // This asserted `blocked` while the rail was off. Switching it on
+    // (20260910000005) is precisely a decision about these markets: they are
+    // the ones that had no payout at all, which is also why PayPal cannot
+    // hijack anything — there is no incumbent rail to displace.
     const only = COUNTRIES.find(
       (c) => c.paypalPayout && !c.flutterwavePayout && !c.stripePayout && !c.restricted,
     )
     expect(only, 'expected a market only PayPal lists').toBeTruthy()
     const route = payoutRoute(only!.code, only!.currency)
-    expect(route.blocked).toBe(true)
-    expect(route.provider).toBeNull()
+    expect(route.blocked).toBe(false)
+    expect(route.provider).toBe('paypal')
+    expect(route.kind).toBe('paypal')
     // …and a buyer there can still pay, which is the whole shape of this table.
     expect(collectionRails(only!.code, 'USD').length).toBeGreaterThan(0)
   })

@@ -178,6 +178,7 @@ const RAIL_KIND: Record<string, PayoutKind> = {
   flutterwave_momo: 'momo',
   flutterwave_bank: 'bank',
   stripe_connect: 'connect',
+  paypal: 'paypal',
 }
 
 async function routedOrBlocked(

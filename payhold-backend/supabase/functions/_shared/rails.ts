@@ -351,7 +351,7 @@ export function currenciesFor(country: Country): Currency[] {
 // Payout
 // ---------------------------------------------------------------------------
 
-export type PayoutKind = 'momo' | 'bank' | 'connect'
+export type PayoutKind = 'momo' | 'bank' | 'connect' | 'paypal'
 
 export interface PayoutRoute {
   provider: Provider | null
@@ -430,13 +430,32 @@ export function payoutRoute(country: Country, currency: Currency): PayoutRoute {
     }
   }
 
+  // PayPal is the last resort, deliberately, and only where neither local rail
+  // reaches. It is checked after both because preferring a wallet over a
+  // corridor that already works would reroute sellers who are being paid
+  // perfectly well today — the money would still arrive, somewhere else, for a
+  // reason nobody asked for. Where nothing else reaches, it is the difference
+  // between a payout and none.
+  if (info.paypalPayout) {
+    return {
+      provider: 'paypal',
+      kind: 'paypal',
+      currency,
+      blocked: false,
+      verified: RAILS_VERIFIED,
+      reason: `Paid in ${currency} to a PayPal account in ${info.name}. ` +
+        'Neither local rail reaches this market, so the seller is paid into ' +
+        'the PayPal account they register rather than to a bank.',
+    }
+  }
+
   return {
     provider: null,
     kind: null,
     currency,
     blocked: true,
     verified: false,
-    reason: `PayHold cannot send money to ${info.name} yet. Neither provider is ` +
+    reason: `PayHold cannot send money to ${info.name} yet. No rail is ` +
       'licensed for that corridor. Buyers there can still pay — collection ' +
       'works everywhere — but a seller needs an account somewhere we can reach.',
   }

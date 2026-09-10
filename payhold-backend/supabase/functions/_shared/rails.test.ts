@@ -58,12 +58,26 @@ Deno.test('a sanctioned market can neither collect nor be paid', () => {
   assertEquals(payoutRoute(restricted.code, 'USD').blocked, true)
 })
 
-Deno.test('most markets can collect but cannot be paid', () => {
-  const payable = COUNTRIES.filter((c) => !payoutRoute(c.code, c.currency).blocked)
+Deno.test('a market is payable exactly when some rail lists it', () => {
+  // This used to assert that fewer than half the world could be paid, which
+  // was true while Flutterwave and Stripe were the only rails. PayPal being
+  // switched on (20260910000005) put 88 more markets in reach and made the
+  // count meaningless as a claim — so this pins the rule instead of the
+  // number, which is what the count was standing in for.
+  for (const info of COUNTRIES) {
+    const listed = !info.restricted &&
+      (info.flutterwavePayout || info.stripePayout || info.paypalPayout)
+    assertEquals(
+      !payoutRoute(info.code, info.currency).blocked,
+      listed,
+      `${info.code} payable`,
+    )
+  }
 
-  // The asymmetry is the point: card acquiring is near-universal, sending
-  // money is licensed per corridor.
-  assert(payable.length < COUNTRIES.length / 2, 'payout coverage looks too broad')
+  // The asymmetry survives, narrower: card acquiring reaches everywhere that
+  // is not sanctioned, and sending money still does not.
+  const payable = COUNTRIES.filter((c) => !payoutRoute(c.code, c.currency).blocked)
+  assert(payable.length < COUNTRIES.length, 'some market must still be unreachable')
   assert(payable.length > 40, 'payout coverage looks too narrow')
 })
 
@@ -242,15 +256,25 @@ Deno.test('PayPal never hijacks a corridor an existing rail already carries', ()
     assertEquals(countryInfo(code).paypalPayout, true, code)
   }
 
-  // And a market only PayPal reaches stays blocked, because the registry is
-  // not the routing table: `payout_routes` decides, and PayPal's row is off.
+  // And a market only PayPal reaches is now routed there rather than blocked.
+  // That is the whole point of switching the rail on (20260910000005): the
+  // markets it picks up are exactly the ones that had nothing before, which is
+  // also why hijacking cannot happen — there was no incumbent to displace.
   const paypalOnly = COUNTRIES.find(
     (c) => c.paypalPayout && !c.flutterwavePayout && !c.stripePayout && !c.restricted,
   )
   assert(paypalOnly, 'expected a market only PayPal lists as a recipient')
-  assertEquals(payoutRoute(paypalOnly.code, paypalOnly.currency).blocked, true)
+  const only = payoutRoute(paypalOnly.code, paypalOnly.currency)
+  assertEquals(only.blocked, false, paypalOnly.code)
+  assertEquals(only.provider, 'paypal', paypalOnly.code)
+  assertEquals(only.kind, 'paypal', paypalOnly.code)
+  assertEquals(payoutProviderFor(paypalOnly.code, paypalOnly.currency), 'paypal')
+
+  // A sanctioned market is still refused outright, PayPal listing or not.
+  const restricted = COUNTRIES.find((c) => c.restricted)!
+  assertEquals(payoutRoute(restricted.code, restricted.currency).blocked, true)
   assertThrows(
-    () => payoutProviderFor(paypalOnly.code, paypalOnly.currency),
+    () => payoutProviderFor(restricted.code, restricted.currency),
     PayHoldError,
   )
 })
