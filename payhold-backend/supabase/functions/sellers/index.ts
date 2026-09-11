@@ -30,6 +30,7 @@ import {
   withCountryProvenance,
   type SellerMarket,
 } from '../_shared/seller-market.ts'
+import { readSettings } from '../_shared/settings.ts'
 import {
   assertRailOnRoute,
   assertRailRequirementsMet,
@@ -351,9 +352,30 @@ async function readCapabilities(
  * §12: record that the identity check, the sanctions screen and the ownership
  * check came back.
  *
- * **Refuses an API key.** The same reasoning as `approve_payout_review`: a
- * client that could verify its own sellers from its own server has turned KYC
- * into a field it sets, and the attestation is supposed to be somebody's.
+ * **Refuses an API key unless this tenant has turned on verification relay.**
+ * The refusal is the same one it has always been and rests on the same ground
+ * as `approve_payout_review`: a client that could verify its own sellers from
+ * its own server has turned KYC into a field it sets, and the attestation is
+ * supposed to be somebody's. `seller_verification_relay` is where it becomes
+ * somebody's — an owner stating once, from Settings (which refuses an API key
+ * in its turn), that their own onboarding reviews each seller and will report
+ * the result seller by seller. Where it is on, this call is that tenant
+ * relaying a decision a person there already made about this one host.
+ *
+ * **It is not `seller_auto_verify`**, which is a different claim entirely and
+ * is not read here: that one writes `verified` at INSERT, before anyone has
+ * looked at anything, so a client that registers a seller the moment somebody
+ * ticks "I want to host" would verify every unreviewed signup on arrival. This
+ * gate leaves the insert path alone — a seller still lands `pending` — which is
+ * the whole reason the two are separate switches.
+ *
+ * Both directions go through the same gate. Withdrawing is the safe direction
+ * and a key that could verify and never un-verify would be the worse door — but
+ * that symmetry is an argument about a relay, so with the flag off both are
+ * refused, in the words below and no others.
+ *
+ * `verify_seller` re-asks the flag under the seller's row lock; this check is
+ * what produces the sentence the caller reads, not what enforces the rule.
  */
 async function verify(
   req: Request,
@@ -361,11 +383,16 @@ async function verify(
   caller: Caller,
   id: string,
 ): Promise<Response> {
-  if (caller.kind === 'api_key') {
-    throw new PayHoldError(
-      'policy_violation',
-      'Verifying a seller is a person\'s decision and cannot be done with an API key',
-    )
+  const viaApiKey = caller.kind === 'api_key'
+
+  if (viaApiKey) {
+    const { seller_verification_relay: relaying } = await readSettings(db, caller.tenant_id)
+    if (!relaying) {
+      throw new PayHoldError(
+        'policy_violation',
+        'Verifying a seller is a person\'s decision and cannot be done with an API key',
+      )
+    }
   }
 
   const body = await readJson<{ verified?: boolean }>(req)
@@ -382,9 +409,14 @@ async function verify(
   const { error } = await db.rpc('verify_seller', {
     p_seller: id,
     // From the session, never the request body — a caller that can name its own
-    // verifier can forge one.
+    // verifier can forge one. On the API-key path it is `api_key:<label>`,
+    // which names the credential and nobody: an audit row must not carry a
+    // person who was not there.
     p_actor: caller.actor,
     p_verified: body.verified ?? true,
+    // Which of the two attestations is behind this, recorded on the audit row
+    // and re-checked against the setting inside the function.
+    p_via_api_key: viaApiKey,
   })
   if (error) throw new Error(`verify_seller failed: ${error.message}`)
 
@@ -486,10 +518,14 @@ async function setName(
  * The hold could only expire, so a seller who rang in, answered the questions
  * and had the change confirmed still waited out a timer.
  *
- * **Refuses an API key**, for the reason `/verify` does and more sharply. The
+ * **Refuses an API key, and unlike `/verify` no tenant setting opens it.** The
  * hold exists because "get in, move the destination, withdraw" is the shape of
  * an account takeover; a client that could end its own holds from its own
- * server would have deleted the defence rather than satisfied it.
+ * server would have deleted the defence rather than satisfied it. Verification
+ * relay does not reach this and must not be extended to: it is a tenant's word
+ * on who a seller *is*, while this is somebody's word that this one change was
+ * that seller's own act — a fact about the very event an account takeover
+ * causes, which no standing statement made before it can cover.
  *
  * **It does not verify the destination**, and the two must stay apart. Each
  * stops a payout on its own and §5.1 wants both — `verify_seller` is the other,
@@ -561,8 +597,13 @@ async function endHold(
  * `route_payout` requires `verified_at is not null` on a backup, so §5.1's
  * failover was unreachable for any backup that missed its turn as primary.
  *
- * **Refuses an API key**, the same ground `/verify` stands on: a client that
- * could verify its own destinations has turned the check into a field it sets.
+ * **Refuses an API key, and no tenant setting opens it** — which is the one
+ * place it now parts company with `/verify` next door. `seller_verification_relay`
+ * is a tenant's word on who a seller *is*; a payout account is a different
+ * question, asked at a different time, and often about a number added long
+ * after that identity was checked. That is why `verify_seller` stamps no
+ * destination on its relayed path either: an identity decision relayed from
+ * somebody else's review must not arrive here wearing two answers.
  *
  * **It does not end the security hold** — `end-hold` next door is the other
  * stop, and each attests to a different thing. Verifying says the account

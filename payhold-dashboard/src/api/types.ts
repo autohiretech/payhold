@@ -1370,6 +1370,17 @@ export interface TenantSettings {
    * payout.
    */
   seller_auto_verify?: boolean
+  /**
+   * The account owner's attestation that their own onboarding **reviews each
+   * seller** and will report the result seller by seller, so
+   * `POST /v1/sellers/:id/verify` accepts that company's API key.
+   *
+   * Deliberately not the same switch as the one above, which verifies at
+   * registration before anybody has looked. This one changes nothing about a
+   * new seller — they still land pending — only whose word PayHold takes when
+   * the decision is finally made. Off by default.
+   */
+  seller_verification_relay?: boolean
   /** After this, a sanctions screening is stale and the gate holds the payout. */
   sanctions_max_age_days?: number
   /** §10.1: how long a hosted payment link lives. */

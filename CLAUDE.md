@@ -360,6 +360,12 @@ Flutterwave.** Adding Paystack/DPO later = one new class + one webhook function
 who a seller is, sellers and destinations are written verified and out of hold
 rather than waiting for a person here; the gates that read those columns are
 unchanged, so `verify_seller(…, false)` still stops a payout),
+`seller_verification_relay` (default **false** — the tenant reviews each seller
+itself and reports the result, so `POST /v1/sellers/:id/verify` accepts that
+account's API key. A **separate** switch from the one before it and never a
+variation on it: that one verifies at registration, before anybody has looked,
+which is the opposite of what a tenant doing manual review is asking for. This
+one leaves the insert path alone — a seller still lands `pending`),
 `risk_rules_enabled` (default true),
 `risk_review_threshold_usd` (default $1,000, converted to the payout currency
 at compare time), `payout_backup_enabled` (default true),
@@ -395,7 +401,7 @@ Auth: `X-Api-Key`, hashed at rest, rate-limited per key.
 | `POST /v1/sellers` | Register payout destination → tokenized beneficiary. Takes the client's own `external_user_id`, unique per tenant, so their system can find this seller again |
 | `GET /v1/sellers` | This tenant's sellers, or `?external_user_id=` to find the one registered against the client's own handle. No match is an empty list, not a 404 — that is the question a get-or-create asks |
 | `GET /v1/sellers/:id/capabilities` | Can this seller be paid, and if not, every reason. Two lists, kept apart |
-| `POST /v1/sellers/:id/verify` | Record the attestation. **Refuses an API key** — it is a person's decision |
+| `POST /v1/sellers/:id/verify` | Record the attestation. **Refuses an API key** unless that tenant's `seller_verification_relay` is on — otherwise it is a person's decision |
 | `POST /v1/sellers/:id/active` | Whether this seller is currently one of the tenant's. Status only, no payout effect — takes an API key |
 | `GET /v1/sellers/:id/destinations` | §5.1's preferred destination and verified backup |
 | `POST /v1/sellers/:id/destinations` | Move where a seller is paid, or give them a backup. The new row is unverified and inside §5.1's security hold — payouts pause until it is checked, and no parameter skips that |
@@ -680,7 +686,12 @@ lists and they stay separate: `reasons` is what the seller has to go and do,
 seller to verify themselves again.
 `POST /v1/sellers/:id/verify` records the attestation and **refuses an API
 key** — a client that could verify its own sellers has turned KYC into a field
-it sets.
+it sets — unless that tenant's `seller_verification_relay` is on, which is the
+owner having already said, person-only and once for the account, that their own
+onboarding reviews each seller and will report the result. See
+`payhold-backend/CLAUDE.md`'s "`seller_verification_relay`" section for why that
+is a second setting rather than a wider `seller_auto_verify`, and for what the
+relayed path deliberately does not do.
 
 **A security hold ends by expiring or by somebody ending it**, and until
 `20260809000002` only the first was possible. §5.1 asks for two things — a new

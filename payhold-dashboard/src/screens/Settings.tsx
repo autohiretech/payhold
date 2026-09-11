@@ -35,6 +35,7 @@ export function SettingsPage() {
   const [riskEnabled, setRiskEnabled] = useState(true)
   const [riskThreshold, setRiskThreshold] = useState('')
   const [autoVerify, setAutoVerify] = useState(false)
+  const [relayVerify, setRelayVerify] = useState(false)
   const [holdHours, setHoldHours] = useState('')
   const [saved, setSaved] = useState(false)
 
@@ -53,6 +54,7 @@ export function SettingsPage() {
     setRiskEnabled(settings.data.risk_rules_enabled)
     setRiskThreshold((settings.data.risk_review_threshold_usd / 100).toString())
     setAutoVerify(settings.data.seller_auto_verify ?? false)
+    setRelayVerify(settings.data.seller_verification_relay ?? false)
     setHoldHours((settings.data.destination_hold_hours ?? 24).toString())
   }, [settings.data])
 
@@ -69,6 +71,7 @@ export function SettingsPage() {
       risk_rules_enabled: riskEnabled,
       risk_review_threshold_usd: Math.round(Number(riskThreshold) * 100),
       seller_auto_verify: autoVerify,
+      seller_verification_relay: relayVerify,
       destination_hold_hours: Number(holdHours),
     }),
   )
@@ -276,6 +279,38 @@ export function SettingsPage() {
                     and ownership — made once for the account rather than once
                     per seller, and recorded against you. Sellers already
                     registered are unaffected; verify those on their own page.
+                  </span>
+                </span>
+              </label>
+
+              {/*
+                The other half of the same question, and deliberately not the
+                same switch. The one above verifies a seller when they are
+                registered — before anyone has looked at them, which is what a
+                company doing its own manual review is precisely not asking
+                for. This one changes nothing about a new seller and only says
+                whose word we take when the review is finished.
+              */}
+              <label className="flex items-start gap-3">
+                <input
+                  type="checkbox"
+                  checked={relayVerify}
+                  onChange={(e) => setRelayVerify(e.target.checked)}
+                  className="mt-0.5 size-4 rounded border-line-strong text-brand focus:ring-brand/30"
+                />
+                <span>
+                  <span className="block text-sm font-semibold text-fg">
+                    I review each seller myself and tell PayHold the result
+                  </span>
+                  <span className="mt-1 block text-xs leading-relaxed text-fg-muted">
+                    Your own system can mark a seller verified here the moment
+                    you approve them, so nobody has to sign in and make the
+                    same decision twice. New sellers still arrive unverified
+                    and cannot be paid until you say so, and you can withdraw a
+                    verification the same way. This is your attestation that
+                    the review really happens — made once for the account and
+                    recorded against you. Payout destinations are a separate
+                    check and are still verified here.
                   </span>
                 </span>
               </label>

@@ -94,6 +94,20 @@ export interface FullSettings extends Settings {
    * Off by default; the gates that read those columns are unchanged.
    */
   seller_auto_verify: boolean
+  /**
+   * The owner's attestation that their own onboarding **reviews each seller**
+   * and will report the result seller by seller, so `POST /v1/sellers/:id/verify`
+   * accepts that account's API key.
+   *
+   * Not a variation on `seller_auto_verify` and deliberately a second switch.
+   * That one writes `verified` at INSERT, before anybody has looked at
+   * anything — a client that creates the PayHold seller when a user first ticks
+   * "I want to host" would verify every unreviewed signup on arrival. This one
+   * leaves the insert path alone: a seller still lands `pending` and stays
+   * unpayable until their own platform says otherwise about them. Off by
+   * default, person-only to change, and it moves no gate downstream.
+   */
+  seller_verification_relay: boolean
 }
 
 type Kind = 'rate' | 'money' | 'count' | 'flag' | 'currencies' | 'payout_mode' | 'country'
@@ -147,6 +161,9 @@ const SPEC: Record<keyof Omit<FullSettings, 'tenant_id'>, Spec> = {
   destination_hold_hours: { kind: 'count', fallback: 24, min: 0, max: 720 },
   sanctions_max_age_days: { kind: 'count', fallback: 365, min: 1, max: 3_650 },
   seller_auto_verify: { kind: 'flag', fallback: false },
+  // False, and independent of the one above: this one is the tenant's word on
+  // a seller it has already reviewed, not a blanket verification at signup.
+  seller_verification_relay: { kind: 'flag', fallback: false },
   checkout_session_hours: { kind: 'count', fallback: 24, min: 1, max: 720 },
   // False, and it must stay false for anyone who has not deliberately turned
   // it on — see the note on `Settings.raw_card_relay`.
