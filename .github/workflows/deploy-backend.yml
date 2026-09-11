@@ -8,25 +8,39 @@
 # Secrets this needs:
 #   SUPABASE_ACCESS_TOKEN   a personal access token, from the Supabase dashboard
 #   SUPABASE_PROJECT_REF    mwnbjjlilqrwdmwutbxr
-#   SUPABASE_DB_PASSWORD    only used by the migration job
+#   SUPABASE_DB_PASSWORD    used to apply migrations, and to check none are
+#                           pending before functions deploy
 #
 # The function secrets themselves — CREDENTIALS_KEY, CRON_SECRET,
 # DASHBOARD_ORIGIN, PUBLIC_URL — are set once with `supabase secrets set` and
 # are deliberately NOT in this file or in GitHub. CREDENTIALS_KEY decrypts every
 # tenant's provider credentials; it does not belong in a CI log.
+#
+# **Run by hand only, and database first (2026-09-11).** This used to start on
+# every push to main, and its functions job ran in parallel with — not after —
+# migrations, which only ever ran when dispatched. So a push carrying a schema
+# change deployed Edge Functions that read columns the live database did not
+# have yet: twice that day a push started this workflow for exactly such a
+# commit (one-destination-per-seller selects `seller_destinations.archived_at`,
+# which would have made every seller's destination list come back empty) and
+# the runs had to be cancelled by hand. It only failed harmlessly because
+# SUPABASE_ACCESS_TOKEN was never set; setting it would have armed it.
+#
+# Now: nothing runs on push. A person dispatches it, having read the diff.
+# `test` gates everything; `migrate` (when ticked) runs next; `functions` runs
+# only after `migrate` succeeded or was not requested, and then refuses to
+# deploy if the live database still has pending migrations — so functions can
+# never land ahead of the schema they need, ticked or not.
+#
+# The dashboard is not deployed here (Cloudflare Pages, by hand, after this).
 
 name: Deploy backend
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - 'payhold-backend/supabase/functions/**'
-      - '.github/workflows/deploy-backend.yml'
   workflow_dispatch:
     inputs:
       migrate:
-        description: 'Also apply pending migrations to the live database'
+        description: 'Apply pending migrations to the live database first'
         type: boolean
         default: false
 
@@ -67,9 +81,41 @@ jobs:
       - name: Edge Function tests
         run: npm run test:functions
 
-  functions:
+  # `db push` is forward-only and runs against the live database — the one
+  # holding real money. It runs only when a person ticks `migrate`, and always
+  # BEFORE functions deploy.
+  migrate:
     needs: test
+    if: inputs.migrate
     runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: supabase/setup-cli@v1
+        with:
+          version: latest
+
+      - name: Show what would be applied
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+        run: |
+          supabase link --project-ref "${{ secrets.SUPABASE_PROJECT_REF }}"
+          supabase migration list
+
+      - name: Apply migrations
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+        run: supabase db push
+
+  functions:
+    needs: [test, migrate]
+    # After `migrate` succeeded, or when it was not requested (skipped) —
+    # never alongside it, never after it failed, never if tests failed.
+    if: ${{ !cancelled() && needs.test.result == 'success' && (needs.migrate.result == 'success' || needs.migrate.result == 'skipped') }}
+    runs-on: ubuntu-latest
+    environment: production
     steps:
       - uses: actions/checkout@v4
       - uses: supabase/setup-cli@v1
@@ -92,15 +138,34 @@ jobs:
       # than one that does not exist, because a green tick is read as a deploy.
       #
       # So a missing token is now a red run that names the secret and the fix.
-      # A person seeing it can set it or run `supabase functions deploy` by
-      # hand; nobody can mistake it for a deployment that happened.
       - name: Check Supabase is configured
         env:
           TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
         run: |
           if [ -z "$TOKEN" ]; then
             echo "::error::SUPABASE_ACCESS_TOKEN is not set, so the Edge Functions were NOT deployed."
             echo "::error::Set it at Settings -> Secrets -> Actions, or deploy by hand with 'supabase functions deploy ... --project-ref <ref>'."
+            exit 1
+          fi
+          if [ -z "$DB_PASSWORD" ]; then
+            echo "::error::SUPABASE_DB_PASSWORD is not set, so pending migrations cannot be checked and the Edge Functions were NOT deployed."
+            exit 1
+          fi
+
+      # The guard that makes the order hold even when nobody ticked `migrate`:
+      # code that needs a column must not go live before the column does.
+      - name: Refuse to deploy ahead of the database
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+        run: |
+          supabase link --project-ref "${{ secrets.SUPABASE_PROJECT_REF }}"
+          pending=$(supabase migration list -o json | jq -r '.migrations[] | select((.remote // "") == "") | .local')
+          if [ -n "$pending" ]; then
+            echo "::error::These migrations are not applied to the live database yet, so the Edge Functions were NOT deployed:"
+            echo "$pending"
+            echo "::error::Re-run this workflow with 'migrate' ticked (having read the migration), or apply them by hand first."
             exit 1
           fi
 
@@ -118,34 +183,3 @@ jobs:
             webhook-dispatch reconcile auto-release payout-dispatch settle-pending \
             ai-dispute ai-risk-narrator ai-support ai-decisions \
             --project-ref "${{ secrets.SUPABASE_PROJECT_REF }}"
-
-  # Migrations are deliberately NOT on the push trigger.
-  #
-  # `db push` is forward-only and runs against the live database — the one
-  # holding real money. Running it automatically on every merge is how a lock
-  # on `deals` arrives during business hours, or a rename lands that nobody
-  # meant to ship today. Trigger this by hand, having read the diff.
-  migrate:
-    needs: test
-    if: github.event_name == 'workflow_dispatch' && inputs.migrate
-    runs-on: ubuntu-latest
-    environment: production
-    steps:
-      - uses: actions/checkout@v4
-      - uses: supabase/setup-cli@v1
-        with:
-          version: latest
-
-      - name: Show what would be applied
-        env:
-          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
-          SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
-        run: |
-          supabase link --project-ref "${{ secrets.SUPABASE_PROJECT_REF }}"
-          supabase migration list
-
-      - name: Apply migrations
-        env:
-          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
-          SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
-        run: supabase db push
