@@ -119,6 +119,19 @@ export interface FullSettings extends Settings {
    * the dispute's row lock with the same default. Owner-only to change.
    */
   dispute_decision_relay: boolean
+  /**
+   * §29.18: the tenant's own platform owns seller **and** destination
+   * verification. While on, both arrive only over the tenant's API key naming
+   * the person who decided; a signed-in person here cannot verify either, and
+   * `seller_auto_verify` writes nothing verified. It supersedes
+   * `seller_verification_relay` rather than reading it.
+   *
+   * **On by default**, matching `platform_owns_verification()`'s 1 in SQL and the
+   * dashboard's ticked checkbox — the dashboard saves every setting it holds.
+   * Owner-only to change. It changes who may write the verification columns and
+   * never what reading them means.
+   */
+  platform_owns_verification: boolean
 }
 
 type Kind = 'rate' | 'money' | 'count' | 'flag' | 'currencies' | 'payout_mode' | 'country'
@@ -180,6 +193,9 @@ const SPEC: Record<keyof Omit<FullSettings, 'tenant_id'>, Spec> = {
   // taken to have opted in by not opening Settings. The dashboard saves every
   // setting it holds, so its checkbox must start unticked too.
   dispute_decision_relay: { kind: 'flag', fallback: false },
+  // True, and it must match `platform_owns_verification()`'s 1 in SQL
+  // (20260911000004) and the dashboard's ticked checkbox.
+  platform_owns_verification: { kind: 'flag', fallback: true },
   checkout_session_hours: { kind: 'count', fallback: 24, min: 1, max: 720 },
   // False, and it must stay false for anyone who has not deliberately turned
   // it on — see the note on `Settings.raw_card_relay`.

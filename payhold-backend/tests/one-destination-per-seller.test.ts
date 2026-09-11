@@ -150,6 +150,11 @@ describe('§29.17 — one live destination per seller', () => {
   beforeAll(async () => {
     h = await migrated()
     tenant = await newTenant(h.db, 'one-destination-co')
+    // §29.18: verification here is a person's, so the account keeps it.
+    await h.db.query(
+      `insert into settings (tenant_id, key, value) values ($1, 'platform_owns_verification', '0')`,
+      [tenant],
+    )
   }, 120_000)
 
   afterAll(() => h.close())

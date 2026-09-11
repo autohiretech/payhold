@@ -40,6 +40,10 @@ export function SettingsPage() {
   // ticked starting state would switch the dispute relay on for any account
   // that saved anything at all. The backend default is off in both places.
   const [relayDisputes, setRelayDisputes] = useState(false)
+  // True, and it must stay true for an account that never saved it: Save writes
+  // every field on this form, and `platform_owns_verification()` defaults on in
+  // SQL and in settings.ts (§29.18).
+  const [ownsVerification, setOwnsVerification] = useState(true)
   const [holdHours, setHoldHours] = useState('')
   const [saved, setSaved] = useState(false)
 
@@ -60,6 +64,7 @@ export function SettingsPage() {
     setAutoVerify(settings.data.seller_auto_verify ?? false)
     setRelayVerify(settings.data.seller_verification_relay ?? true)
     setRelayDisputes(settings.data.dispute_decision_relay ?? false)
+    setOwnsVerification(settings.data.platform_owns_verification ?? true)
     setHoldHours((settings.data.destination_hold_hours ?? 24).toString())
   }, [settings.data])
 
@@ -75,9 +80,13 @@ export function SettingsPage() {
       ai_monthly_budget_usd: Math.round(Number(aiBudget) * 100),
       risk_rules_enabled: riskEnabled,
       risk_review_threshold_usd: Math.round(Number(riskThreshold) * 100),
-      seller_auto_verify: autoVerify,
+      // Not sent while the platform owns verification: the endpoint refuses
+      // turning it on then, and a stored value is inert, so there is nothing to
+      // write and a stored preference is left as it was.
+      seller_auto_verify: ownsVerification ? undefined : autoVerify,
       seller_verification_relay: relayVerify,
       dispute_decision_relay: relayDisputes,
+      platform_owns_verification: ownsVerification,
       destination_hold_hours: Number(holdHours),
     }),
   )
@@ -87,6 +96,7 @@ export function SettingsPage() {
   // so the mutation can be declared with the others, unconditionally.
   const { account } = useAuth()
   const isOwner = account?.role === 'owner'
+  const platformName = account?.tenant_name ?? 'Your platform'
   const [confirmSlug, setConfirmSlug] = useState('')
   const reset = useMoneyAction(() => api.resetSandbox(confirmSlug.trim()))
 
@@ -267,12 +277,47 @@ export function SettingsPage() {
               subtitle="Who checks that a seller is who they say they are, and how long a new payout destination waits before it can be used."
             />
             <div className="space-y-5 px-6 py-5">
+              {/*
+                Owner-only, like the dispute relay, and the endpoint refuses a
+                change from anyone else. While on it supersedes both boxes below:
+                verification arrives from the platform's own server, naming who
+                decided, and nobody here can make it.
+              */}
+              <label className="flex items-start gap-3">
+                <input
+                  type="checkbox"
+                  checked={ownsVerification}
+                  disabled={!isOwner}
+                  onChange={(e) => setOwnsVerification(e.target.checked)}
+                  className="mt-0.5 size-4 rounded border-line-strong text-brand focus:ring-brand/30 disabled:opacity-50"
+                />
+                <span>
+                  <span className="block text-sm font-semibold text-fg">
+                    {platformName} verifies my sellers and their payout accounts (PayHold can't)
+                  </span>
+                  <span className="mt-1 block text-xs leading-relaxed text-fg-muted">
+                    Your own system tells PayHold each seller's and each payout
+                    account's result over its API key, naming the person who
+                    checked. Nobody signed in here can verify or un-verify either,
+                    and no seller is verified automatically. Sellers already
+                    verified stay verified. A new payout account's security hold
+                    still runs, and ending it early is still done here.
+                  </span>
+                  {!isOwner && (
+                    <span className="mt-1 block text-xs text-fg-subtle">
+                      Only the account owner can change this.
+                    </span>
+                  )}
+                </span>
+              </label>
+
               <label className="flex items-start gap-3">
                 <input
                   type="checkbox"
                   checked={autoVerify}
+                  disabled={ownsVerification}
                   onChange={(e) => setAutoVerify(e.target.checked)}
-                  className="mt-0.5 size-4 rounded border-line-strong text-brand focus:ring-brand/30"
+                  className="mt-0.5 size-4 rounded border-line-strong text-brand focus:ring-brand/30 disabled:opacity-50"
                 />
                 <span>
                   <span className="block text-sm font-semibold text-fg">
@@ -287,6 +332,11 @@ export function SettingsPage() {
                     per seller, and recorded against you. Sellers already
                     registered are unaffected; verify those on their own page.
                   </span>
+                  {ownsVerification && (
+                    <span className="mt-1 block text-xs text-fg-subtle">
+                      Off while {platformName} verifies your sellers.
+                    </span>
+                  )}
                 </span>
               </label>
 
@@ -302,8 +352,9 @@ export function SettingsPage() {
                 <input
                   type="checkbox"
                   checked={relayVerify}
+                  disabled={ownsVerification}
                   onChange={(e) => setRelayVerify(e.target.checked)}
-                  className="mt-0.5 size-4 rounded border-line-strong text-brand focus:ring-brand/30"
+                  className="mt-0.5 size-4 rounded border-line-strong text-brand focus:ring-brand/30 disabled:opacity-50"
                 />
                 <span>
                   <span className="block text-sm font-semibold text-fg">
@@ -319,6 +370,12 @@ export function SettingsPage() {
                     recorded against you. Payout destinations are a separate
                     check and are still verified here.
                   </span>
+                  {ownsVerification && (
+                    <span className="mt-1 block text-xs text-fg-subtle">
+                      Not needed while {platformName} verifies your sellers — its
+                      API key is accepted either way.
+                    </span>
+                  )}
                 </span>
               </label>
 

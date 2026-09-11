@@ -74,7 +74,7 @@ environment or a build log.
 | `deals` | create (with §14's `completion_policy`), list, get, `/pay`, `/confirm`, `/refund`, `/deposit`, `/capture`, `/release-deposit`, `/cancel` (an unfunded deal only — `created`, `checkout_started`, `payment_failed`; a payment in flight is refused, anything funded is a refund) |
 | `checkout` | §10.1's sessions. `/sessions` for the client's server; `/public/:token` for the buyer, with no credential |
 | `payment-options` | what a buyer in a market can pay with; the catalogue a client renders its checkout from |
-| `sellers` | register (destination optional), list (`?external_user_id=` finds the client's own handle), `/wallets`, `/:id/capabilities`, `/:id/balance`, `/:id/withdraw`, `/:id/verify` (person-only), `/:id/active` (status only, no payout effect), `/:id/destinations` (the one live destination; a POST replaces it, §29.17; `?include=archived` for history), `/:id/destinations/:id/verify` and `/:id/destinations/:id/end-hold` (person-only), `/:id/connect/onboard`, `/:id/connect/session` and `/:id/connect/status` (Stripe Connect onboarding, redirected or embedded — see below) |
+| `sellers` | register (destination optional), list (`?external_user_id=` finds the client's own handle), `/wallets`, `/:id/capabilities`, `/:id/balance`, `/:id/withdraw`, `/:id/verify` (the platform's API key while `platform_owns_verification` is on, a person otherwise — §29.18), `/:id/active` (status only, no payout effect), `/:id/destinations` (the one live destination; a POST replaces it, §29.17; `?include=archived` for history), `/:id/destinations/:id/verify` (the platform's API key while ownership is on, a person otherwise) and `/:id/destinations/:id/end-hold` (person-only, always), `/:id/connect/onboard`, `/:id/connect/session` and `/:id/connect/status` (Stripe Connect onboarding, redirected or embedded — see below) |
 | `balance` | four buckets per currency, or `?by=rail` |
 | `ledger` | the entries behind those buckets, filterable by deal. No writer, on any method |
 | `audit-log` | who did what, including every act that moved no money |
@@ -535,6 +535,12 @@ and both are pinned in `tests/seller-auto-verify.test.ts`: `verify_seller(…,
 false)` still stops a payout on an auto-verified seller, and turning the flag on
 does **not** retroactively verify sellers already registered (those are a
 per-seller Verify, or a sandbox reset).
+
+**Inert while `platform_owns_verification` is on (§29.18)**, which is the
+default: all three insert paths compute `trusted := seller_auto_verify(t) and not
+platform_owns_verification(t)`, a stored 1 verifies nothing, and `PATCH /settings`
+refuses turning it on then (400 `auto_verify_owned_by_platform`). The dashboard
+does not send it while ownership is on, so a stored preference survives a Save.
 
 `security_hold_until` is `now()` rather than null for `end_destination_hold`'s
 reason: null means "never had a hold" to every reader, and they then fall back to
@@ -1585,6 +1591,89 @@ none; `?include=archived` adds the replaced ones, newest first, with
 `archived_at` and `replaced_by`. `/connect/status` is still the only onboarding
 path that writes a destination, and only once Stripe reports `payouts_enabled`,
 so a half-finished onboarding never archives a working one.
+
+## The platform owns verification — §29.18, migration `20260911000004`
+
+AutoHire's admins are the people who look at a host's documents and payout
+account. A second decision in PayHold's dashboard is transcription, and
+`seller_auto_verify` verifying everyone at signup is not a check. So
+`platform_owns_verification`, **on by default**, makes the tenant's own platform
+the only thing that can verify a seller or a destination.
+
+**The default lives in three places and all three say on:**
+`platform_owns_verification()`'s `setting_num(…, 1)` in SQL, `settings.ts`'s
+fallback, and the dashboard checkbox's `useState(true)` — the dashboard's Save
+writes every setting. Owner-only to change, the dispute relay's way: staff saving
+the form send it back unchanged and only a *change* is refused.
+
+| Caller | Ownership on | Ownership off |
+|---|---|---|
+| seller verify, API key | accepted with `{ verified, verified_by }` — supersedes a stored relay of 0 | accepted only while `seller_verification_relay` is on, else **422 `verification_relay_off`** |
+| seller verify, person | **409 `verification_owned_by_platform`**, both directions | as before |
+| destination verify, API key | accepted with `{ verified, verified_by }` | **422 `destination_relay_off`** — no setting opens it |
+| destination verify, person | **409 `verification_owned_by_platform`** | as before |
+| end-hold | person-only, API key refused | person-only, API key refused |
+| a malformed relayed body | **400 `invalid_request`** | **400 `invalid_request`** |
+| a viewer, on any seller write | **403 `forbidden`** | **403 `forbidden`** |
+
+Both SQL functions re-read both settings under the row lock; the edge checks in
+`_shared/seller-verification.ts` produce the code, not the rule.
+`verify_seller(p_seller, p_actor, p_verified, p_via_api_key, p_reported_verifier)`
+and `verify_seller_destination(p_destination, p_tenant, p_actor, p_verified,
+p_via_api_key, p_reported_verifier)` were dropped and recreated, with the
+`public`/`anon`/`authenticated` and `payhold_ai` revokes reissued and the
+`pg_proc` count pinned at one each.
+
+**A call is relayed when `p_via_api_key` is set or the actor is `api_key:…`**,
+so a caller written without the flag cannot reach the person path by forgetting
+it. The reported name is validated once, in `relayed_verifier()`: non-blank, at
+most 200 characters, and not starting with `api_key:` or `system` — a credential
+or the system reports nobody. It is stored the dispute relay's way:
+`sellers.reported_verifier` / `seller_destinations.reported_verifier` beside
+`verifier_source = 'platform_reported'` (or `person`), the audit row's actor is
+the credential, and its details carry both. A check constraint ties the name to
+the source. The columns describe the latest decision on the row, a withdrawal
+included; rows no verification call has touched are null in both.
+
+**A relayed seller verification still stamps no destination**, and verifying a
+destination never ends or shortens its hold. `end_destination_hold` is not
+relayed and must not be: a key that could add a destination, verify it and
+release it would have deleted §5.1's change protection.
+
+**One routing change came with it.** `route_payout` checked the hold only on a
+*requested* destination and routed a verified primary still inside its hold.
+`screen_payout` runs first in `dispatchPayout`, so no money moved — but with
+verification now arriving over a key, every reader should refuse a held
+destination, not only the one that happens to run first. A held primary is a
+no-route with its own reason, `destination_in_security_hold` ("The payout
+destination is new and still in its security hold."), in `route_reason_text` and
+its dashboard mirror. `tests/platform-owns-verification.test.ts` pins that a key
+adding a destination and verifying both seller and destination is refused by
+`seller_capabilities`, `screen_payout`, `route_payout` and `request_withdrawal`
+until the timer runs.
+
+**Nothing already verified is un-verified.** Grandfathered sellers, dashboard
+verifications and auto-verified rows keep their state. The same file runs all 27
+stored combinations of ownership, relay and auto-verify and proves each still has
+a path to a verified seller and destination.
+
+**The caller's kind is checked explicitly, never through `requireRole`**, which
+returns early for every API key and so keeps no key out. The two verify routes
+ask `verificationPath` (a key relays or gets its 422; a signed-in owner or staff
+member takes the person path or gets the 409; anyone else is 403). `end-hold`
+asks `assertEndHoldCaller`, which refuses anything that is not a dashboard
+session (422, its old sentence) and a viewer (403). Every other seller write —
+create, active, name, add destination, withdraw and the three Connect routes —
+calls `requireSellerWriter`, which lets a key through and answers a viewer with
+403 rather than `requireRole`'s 401. All three live in
+`_shared/seller-verification.ts`, pure, and `seller-verification.test.ts` pins a
+key refused on end-hold and on the person-only verifications, and a viewer
+refused on all of them.
+
+Test fixtures that verify as a person (`seller-onboarding`, `payout-routing`,
+`webhooks-risk-reconciliation`, `one-destination-per-seller`,
+`seller-auto-verify`) store the setting off for their tenant, because that is
+the path they exercise.
 
 ## Payout routing — §5.1, migrations `20260807000008` and `20260807000009`
 

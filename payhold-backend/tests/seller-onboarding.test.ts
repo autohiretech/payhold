@@ -18,6 +18,13 @@ beforeAll(async () => {
     `insert into tenants (name, slug) values ('Onboard Co', 'onboard-co') returning id`,
   )
   tenant = t.id
+  // §29.18 turns person verification off by default. This file exercises the
+  // PayHold-side verification the setting can still hand back to a person, so
+  // the account stores it off.
+  await h.db.query(
+    `insert into settings (tenant_id, key, value) values ($1, 'platform_owns_verification', '0')`,
+    [tenant],
+  )
 })
 
 afterAll(() => h.close())

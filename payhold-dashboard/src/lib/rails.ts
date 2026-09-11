@@ -385,6 +385,8 @@ export function routeReasonText(
       return `This amount is above the maximum ${name} will send.`
     case 'destination_not_verified':
       return 'The payout destination has not been verified.'
+    case 'destination_in_security_hold':
+      return 'The payout destination is new and still in its security hold.'
     case 'no_eligible_verified_destination':
       return 'No verified payout destination has been registered.'
     default:

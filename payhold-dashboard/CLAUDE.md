@@ -554,12 +554,17 @@ the session and never from a form — a caller that can name its own verifier ca
 forge one — and each is refused an API key at the endpoint.
 
 - **Verify** (`verifySeller`, on the Onboarding card) attests that the identity
-  check, the sanctions screen and the ownership check came back.
+  check, the sanctions screen and the ownership check came back. **Hidden, with
+  Withdraw verification, while the account's platform owns verification**
+  (§29.18, the default): the card then reads "Verified by <account>: <name>" from
+  `reported_verifier`, or "Waiting for <account> to verify".
 - **Verify this destination** (`verifySellerDestination`) and **End the hold**
   (`endDestinationHold`), on the seller's one live destination, both in
   `LiveDestinationActions` — its own component, holding its own state, mutations
   and confirm panels, so who may make these attestations can change without
-  touching the card. Ending the hold is §5.1's step-up: somebody confirmed the
+  touching the card. Its `canVerify` is false while the platform owns
+  verification, so only End the hold is offered then — that one stays
+  person-only either way. Ending the hold is §5.1's step-up: somebody confirmed the
   change with the seller themselves. The confirm panel says so in those words,
   because the thing being attested to is that the confirmation came from
   *outside* the session that made the change — the hold exists because "get in,

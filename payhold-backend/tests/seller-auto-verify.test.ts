@@ -39,6 +39,15 @@ async function newTenant(slug: string, autoVerify: boolean): Promise<string> {
     `insert into tenants (name, slug) values ($1, $1) returning id`,
     [slug],
   )
+  // §29.18: with `platform_owns_verification` on — the default — auto-verify
+  // writes nothing verified and the relay is superseded. This file is about
+  // what the two flags do when an account has handed verification back, so
+  // every tenant here stores it off. `platform-owns-verification.test.ts` is
+  // the other half.
+  await h.db.query(
+    `insert into settings (tenant_id, key, value) values ($1, 'platform_owns_verification', '0')`,
+    [t.id],
+  )
   if (autoVerify) {
     // A flag is stored as 1, never a JSON `true` — `setting_num` casts to
     // numeric and a literal `false` raises inside whichever money function
@@ -319,9 +328,10 @@ async function verifyBy(
   verified: boolean,
   viaApiKey: boolean,
 ): Promise<void> {
+  // A relayed call names who decided (§29.18); a person's never does.
   await h.db.query(
-    `select * from verify_seller($1, $2, $3, $4)`,
-    [seller, actor, verified, viaApiKey],
+    `select * from verify_seller($1, $2, $3, $4, $5)`,
+    [seller, actor, verified, viaApiKey, viaApiKey ? 'jane@autohire.rw' : null],
   )
 }
 
@@ -375,12 +385,12 @@ describe('the two flags are independent, and all four combinations are meant', (
     const seller = await newSeller(tenant)
 
     await expect(verifyBy(seller, API_KEY, true, true))
-      .rejects.toThrow(/policy_violation/)
+      .rejects.toThrow(/verification_relay_off/)
     // Withdrawing is the safe direction and still ends where the relay does:
     // with none turned on, this account's verifications were made by named
     // people, and a credential overturning one names nobody.
     await expect(verifyBy(seller, API_KEY, false, true))
-      .rejects.toThrow(/policy_violation/)
+      .rejects.toThrow(/verification_relay_off/)
 
     expect((await capabilities(seller)).kyc).toBe('pending')
     expect(await auditFor(tenant, 'seller.verified')).toHaveLength(0)
@@ -395,7 +405,7 @@ describe('the two flags are independent, and all four combinations are meant', (
     // The two settings answer different questions, so one must not be read as
     // the other — this is the combination that would break if it were.
     await expect(verifyBy(seller, API_KEY, false, true))
-      .rejects.toThrow(/policy_violation/)
+      .rejects.toThrow(/verification_relay_off/)
     expect((await capabilities(seller)).kyc).toBe('verified')
   })
 
@@ -531,10 +541,7 @@ describe('nothing downstream moved', () => {
   })
 })
 
-describe('the sentence a refused client reads has not changed', () => {
-  const REFUSAL =
-    "Verifying a seller is a person\\'s decision and cannot be done with an API key"
-
+describe('the endpoint asks the settings before it picks a door', () => {
   /** `functions/sellers/index.ts`, comments stripped — see `launch-gate`. */
   const code = readFileSync(
     join(import.meta.dirname, '..', 'supabase', 'functions', 'sellers', 'index.ts'),
@@ -543,22 +550,22 @@ describe('the sentence a refused client reads has not changed', () => {
     .replace(/\/\*[\s\S]*?\*\//g, '')
     .replace(/^\s*\/\/.*$/gm, '')
 
-  test('word for word, and still the only thing an unrelayed tenant gets', () => {
-    expect(code.split(REFUSAL)).toHaveLength(2)
+  const verifyRoute = code.slice(
+    code.indexOf('async function verify('),
+    code.indexOf('async function setActive('),
+  )
+
+  test('both refusals come after one read of the settings, and neither reads auto-verify', () => {
+    const read = verifyRoute.indexOf('readSettings(db, caller.tenant_id)')
+    expect(read).toBeGreaterThan(-1)
+    const door = verifyRoute.indexOf('verificationPath(caller,')
+    expect(door).toBeGreaterThan(read)
+    expect(verifyRoute).toMatch(/relaying: settings\.seller_verification_relay/)
+    expect(verifyRoute).not.toMatch(/seller_auto_verify/)
   })
 
-  test('it is reached only after the relay setting has been asked', () => {
-    // The refusal moved behind a read of the tenant's own attestation. If that
-    // read were dropped the string would still be here, so what is pinned is
-    // that the flag — and this flag, not the insert-time one — stands in front
-    // of it.
-    const [before] = code.split(REFUSAL)
-    expect(before).toMatch(/seller_verification_relay/)
-    expect(before).toMatch(/readSettings\(db, caller\.tenant_id\)/)
-    expect(before).not.toMatch(/seller_auto_verify/)
-  })
-
-  test('the call says which attestation it is relaying', () => {
-    expect(code).toMatch(/p_via_api_key: viaApiKey/)
+  test('the call says which attestation it is relaying, and who the platform named', () => {
+    expect(verifyRoute).toMatch(/p_via_api_key: viaApiKey/)
+    expect(verifyRoute).toMatch(/p_reported_verifier: reportedVerifier/)
   })
 })

@@ -37,6 +37,13 @@ import {
   withdrawalDestination,
 } from '../_shared/seller-destination.ts'
 import {
+  assertEndHoldCaller,
+  parseRelayedVerification,
+  requireSellerWriter,
+  verificationPath,
+  verificationRefusal,
+} from '../_shared/seller-verification.ts'
+import {
   assertRailOnRoute,
   assertRailRequirementsMet,
   assertRailSwitchedOnRows,
@@ -56,7 +63,8 @@ import {
 const SELLER_COLUMNS =
   'id, tenant_id, name, country, payout_currency, payout_provider, ' +
   'beneficiary_token, masked_destination, kyc_status, external_user_id, ' +
-  'sanctions_checked_at, destination_changed_at, active, created_at'
+  'sanctions_checked_at, destination_changed_at, active, verifier_source, ' +
+  'reported_verifier, created_at'
 
 /**
  * **`beneficiary_token` is not in this list and must not join it.** It is the
@@ -66,7 +74,8 @@ const SELLER_COLUMNS =
 const DESTINATION_COLUMNS =
   'id, seller_id, label, country, payout_currency, payout_provider, ' +
   'masked_destination, is_primary, is_backup, verified_at, ' +
-  'security_hold_until, archived_at, replaced_by, created_at'
+  'security_hold_until, archived_at, replaced_by, verifier_source, reported_verifier, ' +
+  'created_at'
 
 /**
  * What the rail needs to know about a destination beyond the number itself.
@@ -134,6 +143,7 @@ async function create(
   db: SupabaseClient,
   caller: Caller,
 ): Promise<Response> {
+  requireSellerWriter(caller)
   const body = await readJson<CreateSellerInput>(req)
   required(body as unknown as Record<string, unknown>, 'name')
 
@@ -354,33 +364,24 @@ async function readCapabilities(
 }
 
 /**
- * §12: record that the identity check, the sanctions screen and the ownership
- * check came back.
+ * `POST /v1/sellers/:id/verify` — §12's attestation for one seller.
  *
- * **Refuses an API key unless this tenant has turned on verification relay.**
- * The refusal is the same one it has always been and rests on the same ground
- * as `approve_payout_review`: a client that could verify its own sellers from
- * its own server has turned KYC into a field it sets, and the attestation is
- * supposed to be somebody's. `seller_verification_relay` is where it becomes
- * somebody's — an owner stating once, from Settings (which refuses an API key
- * in its turn), that their own onboarding reviews each seller and will report
- * the result seller by seller. Where it is on, this call is that tenant
- * relaying a decision a person there already made about this one host.
+ * **Who may make it is the account's setting** (§29.18). With
+ * `platform_owns_verification` on — the default — the decision arrives only from
+ * the tenant's own platform over its API key, as `{ verified, verified_by }`
+ * naming the person there who decided; a signed-in person here gets 409
+ * `verification_owned_by_platform`, in both directions. Ownership supersedes
+ * `seller_verification_relay`, so a stored relay of 0 does not refuse the key.
+ * With ownership off, a person here verifies as before, and an API key is
+ * accepted only while the relay is on — otherwise 422 `verification_relay_off`.
  *
- * **It is not `seller_auto_verify`**, which is a different claim entirely and
- * is not read here: that one writes `verified` at INSERT, before anyone has
- * looked at anything, so a client that registers a seller the moment somebody
- * ticks "I want to host" would verify every unreviewed signup on arrival. This
- * gate leaves the insert path alone — a seller still lands `pending` — which is
- * the whole reason the two are separate switches.
+ * The name is the platform's report and is stored as one: `reported_verifier`
+ * with `verifier_source: 'platform_reported'`, against the credential, which is
+ * the one party PayHold authenticated. A relayed verification stamps no
+ * destination — a payout account is its own relayed decision.
  *
- * Both directions go through the same gate. Withdrawing is the safe direction
- * and a key that could verify and never un-verify would be the worse door — but
- * that symmetry is an argument about a relay, so with the flag off both are
- * refused, in the words below and no others.
- *
- * `verify_seller` re-asks the flag under the seller's row lock; this check is
- * what produces the sentence the caller reads, not what enforces the rule.
+ * `verify_seller` re-reads both settings under the seller's row lock; the checks
+ * here produce the code a caller reads, not the rule.
  */
 async function verify(
   req: Request,
@@ -388,19 +389,27 @@ async function verify(
   caller: Caller,
   id: string,
 ): Promise<Response> {
-  const viaApiKey = caller.kind === 'api_key'
+  const settings = await readSettings(db, caller.tenant_id)
+  // The caller's kind decides the door, explicitly: a key relays or is refused,
+  // a signed-in owner or staff member is the person path or is refused, and
+  // anyone else is 403.
+  const viaApiKey = verificationPath(caller, {
+    owned: settings.platform_owns_verification,
+    relaying: settings.seller_verification_relay,
+    target: 'seller',
+  }) === 'relayed'
+
+  let verified: boolean
+  let reportedVerifier: string | null = null
 
   if (viaApiKey) {
-    const { seller_verification_relay: relaying } = await readSettings(db, caller.tenant_id)
-    if (!relaying) {
-      throw new PayHoldError(
-        'policy_violation',
-        'Verifying a seller is a person\'s decision and cannot be done with an API key',
-      )
-    }
+    const relayed = parseRelayedVerification(await readJson<unknown>(req))
+    verified = relayed.verified
+    reportedVerifier = relayed.verified_by
+  } else {
+    const body = await readJson<{ verified?: boolean }>(req)
+    verified = body.verified ?? true
   }
-
-  const body = await readJson<{ verified?: boolean }>(req)
 
   const { data: seller } = await db
     .from('sellers')
@@ -413,17 +422,17 @@ async function verify(
 
   const { error } = await db.rpc('verify_seller', {
     p_seller: id,
-    // From the session, never the request body — a caller that can name its own
-    // verifier can forge one. On the API-key path it is `api_key:<label>`,
-    // which names the credential and nobody: an audit row must not carry a
-    // person who was not there.
+    // From the session or the credential, never the request body — a caller
+    // that can name its own actor can forge one. The platform's named person
+    // travels separately, as a report.
     p_actor: caller.actor,
-    p_verified: body.verified ?? true,
-    // Which of the two attestations is behind this, recorded on the audit row
-    // and re-checked against the setting inside the function.
+    p_verified: verified,
     p_via_api_key: viaApiKey,
+    p_reported_verifier: reportedVerifier,
   })
-  if (error) throw new Error(`verify_seller failed: ${error.message}`)
+  if (error) {
+    throw verificationRefusal(error.message) ?? new Error(`verify_seller failed: ${error.message}`)
+  }
 
   const { data } = await db
     .from('sellers')
@@ -453,6 +462,7 @@ async function setActive(
   caller: Caller,
   id: string,
 ): Promise<Response> {
+  requireSellerWriter(caller)
   await ownSeller(db, caller, id)
 
   const body = await readJson<{ active?: boolean }>(req)
@@ -491,6 +501,7 @@ async function setName(
   caller: Caller,
   id: string,
 ): Promise<Response> {
+  requireSellerWriter(caller)
   await ownSeller(db, caller, id)
 
   const body = await readJson<{ name?: string }>(req)
@@ -548,13 +559,9 @@ async function endHold(
   id: string,
   destinationId: string,
 ): Promise<Response> {
-  if (caller.kind === 'api_key') {
-    throw new PayHoldError(
-      'policy_violation',
-      "Ending a destination's security hold is a person's decision and cannot " +
-        'be done with an API key',
-    )
-  }
+  // Any caller that is not a signed-in owner or staff member is refused: a key
+  // with the policy sentence it has always had, a viewer with 403. Never relayed.
+  assertEndHoldCaller(caller)
 
   await ownSeller(db, caller, id)
 
@@ -597,26 +604,19 @@ async function endHold(
 
 /**
  * `POST /v1/sellers/:id/destinations/:destinationId/verify` — §5.1's
- * attestation, per destination.
+ * attestation, for the seller's live destination.
  *
- * `verify_seller` stamps the primary as part of a person's identity review;
- * this is the attestation on its own, for a destination added after that
- * review. Since §29.17 a seller has one live destination and that is the only
- * one this can reach: `verify_seller_destination` refuses a replaced (archived)
- * row, answered here as 409 `destination_archived`.
+ * **Relayed only while the platform owns verification** (§29.18): an API key
+ * then sends `{ verified, verified_by }` and the name is stored as reported. With
+ * ownership off, an API key is 422 `destination_relay_off` — no other setting
+ * opens this door — and a person here verifies as before. A person while
+ * ownership is on is 409 `verification_owned_by_platform`. A replaced destination
+ * is 409 `destination_archived`, an unknown one 404.
  *
- * **Refuses an API key, and no tenant setting opens it** — which is the one
- * place it now parts company with `/verify` next door. `seller_verification_relay`
- * is a tenant's word on who a seller *is*; a payout account is a different
- * question, asked at a different time, and often about a number added long
- * after that identity was checked. That is why `verify_seller` stamps no
- * destination on its relayed path either: an identity decision relayed from
- * somebody else's review must not arrive here wearing two answers.
- *
- * **It does not end the security hold** — `end-hold` next door is the other
- * stop, and each attests to a different thing. Verifying says the account
- * belongs to them; ending the hold says this particular change was their own
- * act. §5.1 wants both, so one must never quietly satisfy the other.
+ * **It does not end or shorten the security hold**, on either path. `end-hold`
+ * next door is the other stop, stays person-only and refuses an API key: a
+ * platform that could add a destination, verify it and release it would have
+ * removed §5.1's change protection rather than passed it.
  */
 async function verifyDestination(
   req: Request,
@@ -625,22 +625,31 @@ async function verifyDestination(
   id: string,
   destinationId: string,
 ): Promise<Response> {
-  if (caller.kind === 'api_key') {
-    throw new PayHoldError(
-      'policy_violation',
-      'Verifying a payout destination is a person\'s decision and cannot be ' +
-        'done with an API key',
-    )
-  }
+  const settings = await readSettings(db, caller.tenant_id)
+  const viaApiKey = verificationPath(caller, {
+    owned: settings.platform_owns_verification,
+    relaying: settings.seller_verification_relay,
+    target: 'destination',
+  }) === 'relayed'
 
-  const body = await readJson<{ verified?: boolean }>(req)
+  let verified: boolean
+  let reportedVerifier: string | null = null
+
+  if (viaApiKey) {
+    const relayed = parseRelayedVerification(await readJson<unknown>(req))
+    verified = relayed.verified
+    reportedVerifier = relayed.verified_by
+  } else {
+    const body = await readJson<{ verified?: boolean }>(req)
+    verified = body.verified ?? true
+  }
 
   await ownSeller(db, caller, id)
 
-  // Scoped to the seller as well as the tenant, for `endHold`'s reason: a
-  // destination belonging to another of this account's sellers would otherwise
-  // be verifiable from whichever seller page the caller happened to be on, and
-  // the audit row would name the wrong one.
+  // Scoped to the seller as well as the tenant: a destination belonging to
+  // another of this account's sellers would otherwise be verifiable from
+  // whichever seller page the caller happened to be on, and the audit row would
+  // name the wrong one.
   const { data: destination } = await db
     .from('seller_destinations')
     .select('id')
@@ -656,13 +665,13 @@ async function verifyDestination(
   const { error } = await db.rpc('verify_seller_destination', {
     p_destination: destinationId,
     p_tenant: caller.tenant_id,
-    // From the session, never the request body — a caller that can name its own
-    // verifier can forge one.
     p_actor: caller.actor,
-    p_verified: body.verified ?? true,
+    p_verified: verified,
+    p_via_api_key: viaApiKey,
+    p_reported_verifier: reportedVerifier,
   })
   if (error) {
-    throw destinationRefusal(error.message) ??
+    throw destinationRefusal(error.message) ?? verificationRefusal(error.message) ??
       new Error(`verify_seller_destination failed: ${error.message}`)
   }
 
@@ -713,6 +722,7 @@ async function addDestination(
   caller: Caller,
   id: string,
 ): Promise<Response> {
+  requireSellerWriter(caller)
   const { data } = await db
     .from('sellers')
     .select('id, name, country, payout_currency')
@@ -941,6 +951,7 @@ async function withdraw(
   caller: Caller,
   id: string,
 ): Promise<Response> {
+  requireSellerWriter(caller)
   await ownSeller(db, caller, id)
 
   const body = await readJson<{ destination_id?: unknown }>(req)
@@ -1133,6 +1144,7 @@ async function startConnectOnboarding(
   caller: Caller,
   id: string,
 ): Promise<Response> {
+  requireSellerWriter(caller)
   const body = await readJson<{
     country?: string
     email?: string | null
@@ -1196,6 +1208,7 @@ async function startConnectSession(
   caller: Caller,
   id: string,
 ): Promise<Response> {
+  requireSellerWriter(caller)
   const body = await readJson<{ country?: string; email?: string | null }>(req)
   const { provider, accountId, market } = await connectAccountFor(db, caller, id, body)
   const { clientSecret, publishableKey } = await provider.createAccountSession(accountId)
@@ -1229,6 +1242,7 @@ async function connectStatus(
   caller: Caller,
   id: string,
 ): Promise<Response> {
+  requireSellerWriter(caller)
   const { data } = await db
     .from('sellers')
     .select('id, country, payout_currency, stripe_connect_pending_account_id')

@@ -375,8 +375,19 @@ export interface SellerDestination {
   archived_at: Timestamp | null
   /** The destination that replaced this one, when one did. */
   replaced_by: string | null
+  /**
+   * Who made the latest verification decision on this destination: `person`
+   * (signed in here) or `platform_reported` (relayed, with the name the platform
+   * reported). Null on a row no verification call has touched since §29.18.
+   */
+  verifier_source: VerifierSource | null
+  /** The name the platform reported. Only ever set with `platform_reported`. */
+  reported_verifier: string | null
   created_at: Timestamp
 }
+
+/** §29.18: whose word the latest verification decision was. */
+export type VerifierSource = 'person' | 'platform_reported'
 
 export interface Seller {
   id: string
@@ -409,6 +420,10 @@ export interface Seller {
    * the payout path. Defaults `true`.
    */
   active: boolean
+  /** Who made the latest identity decision — see `SellerDestination.verifier_source`. */
+  verifier_source: VerifierSource | null
+  /** The name the platform reported, when it relayed the decision. */
+  reported_verifier: string | null
   created_at: Timestamp
 }
 
@@ -875,6 +890,17 @@ export type PayHoldErrorCode =
   | 'backup_destination_removed'
   | 'destination_not_live'
   | 'destination_archived'
+  /**
+   * §29.18, `platform_owns_verification`. A signed-in person verifying while
+   * the platform owns verification (409); a seller verification over an API
+   * key with ownership and the relay both off (422); a destination
+   * verification over an API key with ownership off (422); turning
+   * auto-verify on while ownership is on (400).
+   */
+  | 'verification_owned_by_platform'
+  | 'verification_relay_off'
+  | 'destination_relay_off'
+  | 'auto_verify_owned_by_platform'
 
 /** Every failure the API can return, as a typed error. */
 export class PayHoldError extends Error {
@@ -916,4 +942,11 @@ export const ERROR_STATUS: Record<PayHoldErrorCode, number> = {
   destination_not_live: 400,
   // The row exists and is history; the request conflicts with its state.
   destination_archived: 409,
+  // §29.18. The request conflicts with who owns the decision, not its shape.
+  verification_owned_by_platform: 409,
+  // The account has not made the statement that would open this door.
+  verification_relay_off: 422,
+  destination_relay_off: 422,
+  // A setting combination that cannot be saved, refused as a malformed patch.
+  auto_verify_owned_by_platform: 400,
 }

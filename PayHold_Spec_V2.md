@@ -1245,6 +1245,35 @@ already going to, and nothing was promoted, so no payout moved.
 Implemented 2026-09-11, migration `20260911000003`.
 `payhold-backend/tests/one-destination-per-seller.test.ts` is the acceptance spec.
 
+## 29.18 A tenant's platform owns seller and destination verification — Part II reading of §12 and §5.1
+
+§12 requires that a seller not be paid until identity, sanctions and ownership
+checks come back, and §5.1 requires a payout destination's ownership be verified
+before use. Neither says who records it. For a tenant whose own administrators
+perform those checks, recording them again in PayHold is transcription rather
+than a second check, and verifying every seller at signup is no check at all.
+
+**With `platform_owns_verification` on — the default — seller and destination
+verification are made only by the tenant's own platform**, relayed over its API
+key and naming the person there who decided. A person signed in to PayHold
+cannot verify or un-verify either, and automatic verification at registration
+writes nothing verified. The setting supersedes the per-seller verification
+relay rather than consulting it, and only the account owner may change it.
+
+PayHold authenticates the credential, not the person, so the name is recorded as
+the platform's report — §29.16's shape. A relayed seller verification never
+verifies the payout account; that is its own relayed decision.
+
+The security hold is unchanged. Verifying never ends or shortens it; ending it
+early stays a person's decision in PayHold and is refused over an API key; and no
+reader — the capability read, the eligibility gate or the routing engine —
+treats a held destination as payable. Rows already verified stay verified:
+nothing is un-verified retroactively. An owner may hand verification back, which
+restores the person path exactly as it was.
+
+Implemented 2026-09-11, migration `20260911000004`.
+`payhold-backend/tests/platform-owns-verification.test.ts` is the acceptance spec.
+
 ## References
 
 1. Fiverr Help Center — Payment methods

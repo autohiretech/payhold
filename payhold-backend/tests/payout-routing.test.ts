@@ -50,6 +50,12 @@ beforeEach(async () => {
       where r.tenant_id is null`,
   )
   await h.db.query(`delete from settings where tenant_id = $1`, [tenant])
+  // §29.18 turns person verification off by default. Fixtures here verify as a
+  // person, which is still how an account with it off works.
+  await h.db.query(
+    `insert into settings (tenant_id, key, value) values ($1, 'platform_owns_verification', '0')`,
+    [tenant],
+  )
 })
 
 interface SellerSpec {

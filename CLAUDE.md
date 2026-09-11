@@ -372,6 +372,11 @@ own platform decides disputes and reports each outcome, so
 `decided_by`. Off by default where the verification relay is on, because a
 relayed verification only unblocks paperwork and a relayed decision releases or
 refunds money the moment it lands. Owner-only to change),
+`platform_owns_verification` (default **true** since `20260911000004`, §29.18 —
+the tenant's own platform verifies sellers and their payout accounts over its
+API key, naming who decided; nobody signed in here can verify either, it
+supersedes `seller_verification_relay`, and `seller_auto_verify` is inert while
+it is on. Owner-only to change),
 `risk_rules_enabled` (default true),
 `risk_review_threshold_usd` (default $1,000, converted to the payout currency
 at compare time), `payout_retry_max_attempts`
@@ -405,11 +410,12 @@ Auth: `X-Api-Key`, hashed at rest, rate-limited per key.
 | `POST /v1/sellers` | Register payout destination → tokenized beneficiary. Takes the client's own `external_user_id`, unique per tenant, so their system can find this seller again |
 | `GET /v1/sellers` | This tenant's sellers, or `?external_user_id=` to find the one registered against the client's own handle. No match is an empty list, not a 404 — that is the question a get-or-create asks |
 | `GET /v1/sellers/:id/capabilities` | Can this seller be paid, and if not, every reason. Two lists, kept apart |
-| `POST /v1/sellers/:id/verify` | Record the attestation. **Refuses an API key** unless that tenant's `seller_verification_relay` is on — otherwise it is a person's decision |
+| `POST /v1/sellers/:id/verify` | Record the attestation (§29.18). While `platform_owns_verification` is on (default) only the API key, with `{ verified, verified_by }`; a person is **409 `verification_owned_by_platform`**. Off, a person verifies and a key needs `seller_verification_relay` or is **422 `verification_relay_off`**. A bad relayed body is **400 `invalid_request`**; a viewer **403** |
 | `POST /v1/sellers/:id/active` | Whether this seller is currently one of the tenant's. Status only, no payout effect — takes an API key |
 | `GET /v1/sellers/:id/destinations` | The seller's one live destination (§29.17), as a list of one or none. `?include=archived` adds the ones it replaced, with `archived_at` |
 | `POST /v1/sellers/:id/destinations` | Replace where a seller is paid. The current destination is archived, never deleted; the new one is unverified and inside §5.1's security hold — payouts pause until it is checked, and no parameter skips that. `role` other than `primary` is **400 `backup_destination_removed`** |
 | `POST /v1/sellers/:id/destinations/:id/end-hold` | §5.1's step-up: somebody confirmed the change with the seller, so the hold ends early. **Refuses an API key** — a client that could end its own holds has deleted the defence rather than satisfied it. Does not verify the destination. A replaced destination is **409 `destination_archived`**, and so is `…/verify` on one |
+| `POST /v1/sellers/:id/destinations/:id/verify` | The live destination's attestation. Only the API key while `platform_owns_verification` is on, with `{ verified, verified_by }`, and the response carries `reported_verifier` / `verifier_source`; off, **422 `destination_relay_off`**. A person while on is **409 `verification_owned_by_platform`**. Never touches the security hold |
 | `GET /v1/sellers/:id/balance` | This seller's wallet — ledger buckets, plus what a withdrawal would move and every reason something is stuck |
 | `GET /v1/sellers/wallets` | Every seller's wallet in one query |
 | `POST /v1/sellers/:id/withdraw` | Ask for the cleared money. Stamps and dispatches; screens, routes and books exactly as the cron does. `destination_id` is optional; named, it must be the live destination or it is **400 `destination_not_live`** |
@@ -695,6 +701,17 @@ onboarding reviews each seller and will report the result. See
 `payhold-backend/CLAUDE.md`'s "`seller_verification_relay`" section for why that
 is a second setting rather than a wider `seller_auto_verify`, and for what the
 relayed path deliberately does not do.
+
+**Since §29.18 the default is that the tenant's platform owns verification.**
+`platform_owns_verification` (on unless the owner turns it off) makes the API
+key the only way to verify a seller *or* a destination, with the platform naming
+the person who decided — stored as `reported_verifier` beside
+`verifier_source: 'platform_reported'`, against the credential. A person here
+gets `verification_owned_by_platform` either way, `seller_auto_verify` writes
+nothing verified, and a stored relay of 0 no longer refuses the key. The hold is
+the part that did not move: `end-hold` is still person-only, and a key that adds
+a destination and verifies everything still waits out the timer. Rows verified
+before stay verified.
 
 **A security hold ends by expiring or by somebody ending it**, and until
 `20260809000002` only the first was possible. §5.1 asks for two things — a new

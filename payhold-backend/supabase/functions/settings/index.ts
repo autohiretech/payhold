@@ -19,6 +19,7 @@
 
 import { requireRole, resolveCaller, serviceClient } from '../_shared/auth.ts'
 import { handler, json, readJson } from '../_shared/http.ts'
+import { assertAutoVerifyAllowed } from '../_shared/seller-verification.ts'
 import { readSettings, writeSettings } from '../_shared/settings.ts'
 import { PayHoldError } from '../_shared/types.ts'
 
@@ -57,6 +58,25 @@ Deno.serve(handler(async (req) => {
       )
     }
   }
+  // `platform_owns_verification` is the owner's statement that their platform,
+  // and nobody signed in here, verifies sellers and their payout accounts —
+  // owner-only for the dispute relay's reason, and only a *change* is refused.
+  // While it is on (or turned on by this patch), turning `seller_auto_verify`
+  // on is refused: it would verify sellers before the platform has looked.
+  if ('platform_owns_verification' in patch || patch.seller_auto_verify === true) {
+    const current = await readSettings(db, caller.tenant_id)
+    if (
+      'platform_owns_verification' in patch && caller.role !== 'owner' &&
+      patch.platform_owns_verification !== current.platform_owns_verification
+    ) {
+      throw new PayHoldError(
+        'unauthorized',
+        'Only the account owner can change whether your platform verifies your sellers',
+      )
+    }
+    assertAutoVerifyAllowed(patch, current)
+  }
+
   const { settings, changed } = await writeSettings(db, caller.tenant_id, patch)
 
   // Audited even though no money moved: the fee on every deal created after

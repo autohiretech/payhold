@@ -44,6 +44,7 @@ import {
   useSellerCapabilities,
   useSellerDestinations,
   useSellers,
+  useSettings,
 } from '@/lib/queries'
 import {
   api,
@@ -523,6 +524,11 @@ export function SellerDetailPage() {
 function Onboarding({ seller, now }: { seller: Seller; now: Date }) {
   const { account } = useAuth()
   const capabilities = useSellerCapabilities(seller.id)
+  // §29.18. Unknown until settings load, and read as on meanwhile: showing a
+  // Verify button the endpoint would refuse is the worse of the two flashes.
+  const settings = useSettings()
+  const ownsVerification = settings.data?.platform_owns_verification ?? true
+  const platformName = account?.tenant_name ?? 'Your platform'
 
   // Recorded against whoever is signed in, never a name from a form: a caller
   // that can name its own verifier can forge one.
@@ -610,7 +616,18 @@ function Onboarding({ seller, now }: { seller: Seller; now: Date }) {
       </div>
 
       <div className="border-t border-line px-6 py-4">
-        {seller.kyc_status === 'verified' ? (
+        {ownsVerification ? (
+          <p className="text-xs leading-relaxed text-fg-muted">
+            <VerifiedByPlatform
+              verified={seller.kyc_status === 'verified'}
+              source={seller.verifier_source}
+              reporter={seller.reported_verifier}
+              platformName={platformName}
+            />{' '}
+            {platformName} verifies sellers and their payout accounts for this
+            account, so neither can be verified or withdrawn here.
+          </p>
+        ) : seller.kyc_status === 'verified' ? (
           <div className="flex flex-wrap items-center gap-3">
             <p className="flex-1 text-xs leading-relaxed text-fg-muted">
               Verified. Withdrawing it moves them to “needs review” and holds their
@@ -660,6 +677,41 @@ function Onboarding({ seller, now }: { seller: Seller; now: Date }) {
 }
 
 /**
+ * §29.18: what the Onboarding card says while the account's platform owns
+ * verification. The reported name is the platform's claim — PayHold
+ * authenticated its API key, not the person — and it is shown as that.
+ */
+function VerifiedByPlatform({
+  verified,
+  source,
+  reporter,
+  platformName,
+}: {
+  verified: boolean
+  source: Seller['verifier_source']
+  reporter: string | null
+  platformName: string
+}) {
+  if (!verified) {
+    return (
+      <span className="font-semibold text-pending">Waiting for {platformName} to verify.</span>
+    )
+  }
+  if (source === 'platform_reported' && reporter) {
+    return (
+      <span className="font-semibold text-fg">
+        Verified by {platformName}: {reporter}.
+      </span>
+    )
+  }
+  return (
+    <span className="font-semibold text-fg">
+      Verified before {platformName} took verification over.
+    </span>
+  )
+}
+
+/**
  * §29.17: a seller has one live payout destination. `seller_destinations` is
  * the record; `Seller.beneficiary_token` and `masked_destination` are its copy,
  * kept in step by a trigger with exactly one writer.
@@ -675,6 +727,10 @@ function Onboarding({ seller, now }: { seller: Seller; now: Date }) {
 function Destinations({ sellerId, now }: { sellerId: string; now: Date }) {
   // One read for both halves: the live row, and the ones it replaced.
   const destinations = useSellerDestinations(sellerId, true)
+  const { account } = useAuth()
+  const settings = useSettings()
+  const ownsVerification = settings.data?.platform_owns_verification ?? true
+  const platformName = account?.tenant_name ?? 'Your platform'
 
   if (destinations.isPending) {
     return (
@@ -723,7 +779,13 @@ function Destinations({ sellerId, now }: { sellerId: string; now: Date }) {
               value={
                 <>
                   {live.verified_at ? (
-                    `Verified ${formatDate(live.verified_at)}`
+                    live.verifier_source === 'platform_reported' && live.reported_verifier
+                      ? `Verified ${formatDate(live.verified_at)} by ${platformName}: ${live.reported_verifier}`
+                      : `Verified ${formatDate(live.verified_at)}`
+                  ) : ownsVerification ? (
+                    <span className="font-semibold text-pending">
+                      Waiting for {platformName} to verify
+                    </span>
                   ) : (
                     <span className="font-semibold text-danger">Not verified</span>
                   )}
@@ -737,7 +799,12 @@ function Destinations({ sellerId, now }: { sellerId: string; now: Date }) {
             />
           </dl>
 
-          <LiveDestinationActions sellerId={sellerId} destination={live} onHold={onHold} />
+          <LiveDestinationActions
+            sellerId={sellerId}
+            destination={live}
+            onHold={onHold}
+            canVerify={!ownsVerification}
+          />
         </div>
       ) : (
         <EmptyState
@@ -808,16 +875,20 @@ function Destinations({ sellerId, now }: { sellerId: string; now: Date }) {
  *
  * Self-contained on purpose: state, mutations and confirm panels all live here,
  * so changing who may make these attestations is a change to this component
- * alone. Both endpoints take the actor from the session and refuse an API key.
+ * alone. Since §29.18 `canVerify` is false while the account's platform owns
+ * verification — the endpoint would refuse a person — and only End the hold is
+ * offered, which stays person-only and refuses an API key.
  */
 function LiveDestinationActions({
   sellerId,
   destination,
   onHold,
+  canVerify,
 }: {
   sellerId: string
   destination: SellerDestination
   onHold: boolean
+  canVerify: boolean
 }) {
   const { account } = useAuth()
   const [confirming, setConfirming] = useState(false)
@@ -835,12 +906,12 @@ function LiveDestinationActions({
 
   return (
     <>
-      {((!destination.verified_at && !attesting) || (onHold && !confirming)) && (
+      {((canVerify && !destination.verified_at && !attesting) || (onHold && !confirming)) && (
         <div className="mt-4 flex flex-wrap gap-2">
           {/* The claim itself is in the panel below rather than beside the
               button: an attestation made where nobody can read what is
               being claimed is the thing that actually weakens it. */}
-          {!destination.verified_at && !attesting && (
+          {canVerify && !destination.verified_at && !attesting && (
             <Button
               size="sm"
               variant="ghost"
@@ -858,7 +929,7 @@ function LiveDestinationActions({
         </div>
       )}
 
-      {attesting && (
+      {canVerify && attesting && (
         <div className="mt-4 space-y-3 rounded-xl bg-surface-2 px-4 py-4">
           <p className="text-sm leading-relaxed text-fg">
             Record that <Mono>{destination.masked_destination}</Mono> belongs to this

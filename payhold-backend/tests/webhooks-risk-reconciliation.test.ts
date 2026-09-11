@@ -37,6 +37,12 @@ async function seed(opts: {
     `insert into tenants (name, slug) values ('Acme', 'acme-' || gen_random_uuid())
      returning id`,
   )
+  // §29.18 defaults verification to the tenant's platform; the fixture below
+  // verifies as a person, which an account with it off still does.
+  await h.db.query(
+    `insert into settings (tenant_id, key, value) values ($1, 'platform_owns_verification', '0')`,
+    [tenant.id],
+  )
   const { rows: [seller] } = await h.db.query<{ id: string }>(
     `insert into sellers (tenant_id, name, country, payout_currency, payout_provider,
                           beneficiary_token, masked_destination, created_at)

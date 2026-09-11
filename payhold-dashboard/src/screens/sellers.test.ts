@@ -136,6 +136,8 @@ function seller(
     sanctions_checked_at: null,
     destination_changed_at: null,
     active: true,
+    verifier_source: null,
+    reported_verifier: null,
     created_at: '2026-09-01T09:00:00.000Z',
   }
 }

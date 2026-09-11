@@ -374,6 +374,10 @@ export interface Seller {
    */
   active: boolean
   created_at: Timestamp
+  /** §29.18: whose word the latest identity decision was. */
+  verifier_source: VerifierSource | null
+  /** The name the platform reported with a relayed decision. */
+  reported_verifier: string | null
 }
 
 /** §12's state list, verbatim. */
@@ -669,6 +673,8 @@ export type RouteReasonCode =
   | 'below_route_minimum'
   | 'above_route_maximum'
   | 'destination_not_verified'
+  /** §29.18: verified, and still inside §5.1's security hold. */
+  | 'destination_in_security_hold'
   | 'no_eligible_verified_destination'
   | 'no_route_for_destination'
 
@@ -860,8 +866,19 @@ export interface SellerDestination {
   archived_at: Timestamp | null
   /** The destination that replaced this one, when one did. */
   replaced_by: string | null
+  /**
+   * §29.18: whose word the latest verification decision was — `person` (signed
+   * in here) or `platform_reported` (the tenant's platform, over its API key).
+   * Null on a row nothing has verified since.
+   */
+  verifier_source: VerifierSource | null
+  /** The name the platform reported. PayHold authenticated its key, not this person. */
+  reported_verifier: string | null
   created_at: Timestamp
 }
+
+/** §29.18: whose word a verification decision was. */
+export type VerifierSource = 'person' | 'platform_reported'
 
 /**
  * §10.1's `GET /v1/sellers/:id/capabilities` — can this seller be paid, and if
@@ -1414,6 +1431,12 @@ export interface TenantSettings {
    * Owner-only to change.
    */
   dispute_decision_relay?: boolean
+  /**
+   * §29.18: the account's own platform verifies sellers and their payout
+   * accounts, over its API key, and nobody signed in here can. On by default,
+   * and owner-only to change. While on, auto-verify writes nothing verified.
+   */
+  platform_owns_verification?: boolean
   /** After this, a sanctions screening is stale and the gate holds the payout. */
   sanctions_max_age_days?: number
   /** §10.1: how long a hosted payment link lives. */
@@ -2004,6 +2027,11 @@ export type PayHoldErrorCode =
   | 'backup_destination_removed'
   | 'destination_not_live'
   | 'destination_archived'
+  // §29.18: who owns seller and destination verification.
+  | 'verification_owned_by_platform'
+  | 'verification_relay_off'
+  | 'destination_relay_off'
+  | 'auto_verify_owned_by_platform'
 
 /** Every failure the API can return, as a typed error. */
 export class PayHoldError extends Error {
