@@ -11,29 +11,44 @@
  *   POST /disputes/:id/offers/:offer/respond         accept or decline. 48 hours
  *   POST /disputes/:id/offers/:offer/withdraw        take a request back
  *   POST /disputes/:id/evidence                      photos, documents, check-ins
- *   POST /disputes/:id/resolve                       decide it. A person only
+ *   POST /disputes/:id/resolve                       decide it. A person, or a
+ *                                                    tenant's key while its
+ *                                                    dispute_decision_relay is on
  *
  * **Everything except `resolve` is a party action**, and a client's server may
  * make it on a buyer's or seller's behalf with its API key — the same
  * arrangement `/deals/:id/confirm` runs under until §4's end-user tokens exist.
  *
- * `resolve` is not, and refuses a key. It is the administrator's judgement, and
- * §8 asks for a conflict-of-interest control over exactly that: a client able to
- * resolve its own disputes from its own server has turned the Resolution Center
- * into a formality, the same argument `approve-review` and `sellers/:id/verify`
- * both make. The check itself lives in `resolve_dispute`, where it runs under
- * the row lock — this function's job is to make sure a real name reaches it.
+ * `resolve` is not. It is the administrator's judgement, and §8 asks for a
+ * conflict-of-interest control over exactly that: a client able to resolve its
+ * own disputes from its own server has turned the Resolution Center into a
+ * formality, the same argument `approve-review` and `sellers/:id/verify` both
+ * make. So it refuses a key **unless the account owner turned on
+ * `dispute_decision_relay`** — their statement, made once, that their own
+ * platform hears both sides and decides. Then a key may relay the decision and
+ * must name the person who made it. The checks themselves live in
+ * `resolve_dispute`, where they run under the row lock — this function's job is
+ * to make sure a real name reaches it, and to say plainly when one cannot.
  */
 
 import type { SupabaseClient } from 'npm:@supabase/supabase-js@2'
 import { requireRole, resolveCaller, serviceClient, type Caller } from '../_shared/auth.ts'
+import {
+  alreadyResolved,
+  assertDisputeRelayOn,
+  parseRelayedResolution,
+} from '../_shared/dispute-relay.ts'
 import { releaseFigures } from '../_shared/figures.ts'
 import { handler, json } from '../_shared/http.ts'
+import { readSettings } from '../_shared/settings.ts'
 import { PayHoldError, type ConfirmSide, type Deal } from '../_shared/types.ts'
 
 const DISPUTE_COLUMNS =
   'id, tenant_id, deal_id, raised_by, raised_by_actor, reason, reason_code, ' +
-  'disputed_amount, status, opened_at, resolved_at, resolution_note, decided_by'
+  'disputed_amount, status, opened_at, resolved_at, resolution_note, decided_by, ' +
+  // 20260911000002: which kind of decider `decided_by` is, the name a platform
+  // reported when it relayed the decision, and what a split returned.
+  'decider_source, reported_decider, resolution_refund_amount'
 
 const OFFER_COLUMNS =
   'id, dispute_id, deal_id, offered_by, offered_by_actor, kind, amount, ' +
@@ -330,9 +345,10 @@ async function addEvidence(
 /**
  * §8's final decision record.
  *
- * A person only, and the name is taken from the session rather than the body —
- * a caller who can name their own decider can name somebody else and walk past
- * the conflict-of-interest check.
+ * A signed-in person's name is taken from the session rather than the body — a
+ * caller who can name their own decider can name somebody else and walk past the
+ * conflict-of-interest check. An API key goes to `resolveRelayed`, which is the
+ * only way a key reaches a resolution at all.
  */
 async function resolve(
   req: Request,
@@ -340,12 +356,8 @@ async function resolve(
   caller: Caller,
   id: string,
 ): Promise<Response> {
-  if (caller.kind !== 'dashboard') {
-    throw new PayHoldError(
-      'unauthorized',
-      'A dispute can only be decided by a signed-in person, not by an API key',
-    )
-  }
+  if (caller.kind === 'api_key') return await resolveRelayed(req, db, caller, id)
+
   requireRole(caller, 'owner', 'staff')
 
   const dispute = await getDispute(db, caller, id)
@@ -385,6 +397,72 @@ async function resolve(
 }
 
 /**
+ * A decision the tenant's own platform made, relayed over its API key.
+ *
+ * **Refused unless the account owner turned on `dispute_decision_relay`**, which
+ * is off by default — a relayed decision releases or refunds money the moment it
+ * lands, so nobody is taken to have opted in by not opening Settings.
+ *
+ * `decided_by` names the human who decided, and PayHold cannot check that name:
+ * what it authenticated is a credential. So the credential is what is recorded as
+ * deciding (`p_decided_by: caller.actor`) and the name goes in as the platform's
+ * report (`p_reported_decider`). A reader that has never heard of the second
+ * column shows the credential, never an unverified name wearing a PayHold user's
+ * clothes.
+ *
+ * A retry of the outcome already recorded returns the dispute unchanged and moves
+ * nothing; a different outcome is `dispute_already_resolved`, with what was
+ * recorded. Both are decided under the lock in `resolve_dispute` — which also
+ * re-asks the setting — and not here.
+ */
+async function resolveRelayed(
+  req: Request,
+  db: SupabaseClient,
+  caller: Caller,
+  id: string,
+): Promise<Response> {
+  const { dispute_decision_relay: relaying } = await readSettings(db, caller.tenant_id)
+  assertDisputeRelayOn(relaying)
+
+  const body = parseRelayedResolution(await req.json().catch(() => null))
+  const dispute = await getDispute(db, caller, id)
+
+  // FX and fees only while there is money left to move. A retry against a
+  // resolved dispute moves nothing, and a deal that was refunded is not one a
+  // payout figure should be computed for.
+  let figures: {
+    p_payout_amount: number | null
+    p_payout_currency: string | null
+    p_fee_presentment: number | null
+  } = { p_payout_amount: null, p_payout_currency: null, p_fee_presentment: null }
+
+  if (dispute.status === 'open') {
+    figures = await releaseFigures(db, await loadDeal(db, dispute.deal_id as string))
+  }
+
+  const { error } = await db.rpc('resolve_dispute', {
+    p_dispute_id: dispute.id,
+    p_resolution: body.resolution,
+    p_note: body.note,
+    ...figures,
+    p_refund_amount: body.refund_amount,
+    // The credential PayHold authenticated, never the name in the body.
+    p_decided_by: caller.actor,
+    p_reported_decider: body.decided_by,
+    p_via_api_key: true,
+  })
+
+  if (error) {
+    if (error.message.startsWith('dispute_already_resolved')) {
+      throw alreadyResolved(await getDispute(db, caller, id))
+    }
+    throw rpcError(error, 'resolve this dispute')
+  }
+
+  return json(req, await withCase(db, await getDispute(db, caller, id)))
+}
+
+/**
  * §8's communication export.
  *
  * The timeline, flattened to one row per event with the deal and the parties
@@ -415,6 +493,11 @@ async function exportCase(
       resolved_at: dispute.resolved_at,
       resolution_note: dispute.resolution_note,
       decided_by: dispute.decided_by,
+      // A regulator reading this needs to see which decisions PayHold's own
+      // people made and which a platform reported to it.
+      decider_source: dispute.decider_source,
+      reported_decider: dispute.reported_decider,
+      resolution_refund_amount: dispute.resolution_refund_amount,
     },
     deal: {
       id: deal.id,
@@ -435,7 +518,16 @@ function rpcError(error: { message: string }, what: string): PayHoldError {
 
   for (
     const code of
-      ['not_found', 'invalid_state', 'policy_violation', 'insufficient_balance'] as const
+      [
+        'not_found',
+        'invalid_state',
+        'policy_violation',
+        'insufficient_balance',
+        // 20260911000002's refusals on the relayed path.
+        'invalid_request',
+        'dispute_relay_off',
+        'dispute_already_resolved',
+      ] as const
   ) {
     if (message.startsWith(code)) {
       return new PayHoldError(code, message.slice(code.length + 2).trim())

@@ -43,6 +43,20 @@ Deno.serve(handler(async (req) => {
   requireRole(caller, 'owner', 'staff')
 
   const patch = await readJson<Record<string, unknown>>(req)
+
+  // `dispute_decision_relay` is the owner's statement that their platform
+  // decides disputes, and PayHold moves money on it — so only the owner changes
+  // it. Staff still save the rest of the form, which sends this key back
+  // unchanged; only a *change* is refused.
+  if ('dispute_decision_relay' in patch && caller.role !== 'owner') {
+    const current = await readSettings(db, caller.tenant_id)
+    if (patch.dispute_decision_relay !== current.dispute_decision_relay) {
+      throw new PayHoldError(
+        'unauthorized',
+        'Only the account owner can change whether your platform decides disputes',
+      )
+    }
+  }
   const { settings, changed } = await writeSettings(db, caller.tenant_id, patch)
 
   // Audited even though no money moved: the fee on every deal created after

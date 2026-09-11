@@ -327,6 +327,13 @@ final decision record.
 A dispute freezes release and payout for the affected amount. A partial dispute
 freezes only the disputed amount when the ledger can safely separate it.
 
+The final decision may be made on the tenant's own platform and relayed to
+PayHold, where the tenant has opted in (§29.16). Webhook payloads:
+`dispute.opened` carries `dispute_id`, `raised_by`, `reason`, `reason_code` and
+`disputed_amount` (null when the whole payment is in dispute);
+`dispute.resolved` carries `dispute_id`, `status`, `decided_by`,
+`decider_source` and `reported_decider`.
+
 ## 9. Provider adapter architecture
 
 A provider-neutral interface, so applications never depend on Stripe,
@@ -1190,6 +1197,19 @@ during an incident for no gain.
 Implemented 2026-08-08. `payhold-backend/tests/payout-retry.test.ts`.
 
 ---
+
+## 29.16 A tenant's platform may make §8's final decision — Part II reading of §8
+
+§8 asks for conflict-of-interest controls for administrators and a final
+decision record. It does not require that administrator to sign in to PayHold. A
+tenant whose own admins hear both parties may relay the decision over its API
+key once its owner turns on `dispute_decision_relay`, which is **off by
+default** because the decision moves money. PayHold authenticates the key, not
+the person, so the named decider is recorded as reported by the platform and
+never as a PayHold-authenticated user, and the conflict-of-interest control
+applies to that named person. PayHold still holds and moves the money, and every
+§7.1 and §8 bound on a resolution applies unchanged. An AI draft is never
+approved over an API key.
 
 ## References
 

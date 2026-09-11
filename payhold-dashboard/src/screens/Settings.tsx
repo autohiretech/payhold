@@ -36,6 +36,10 @@ export function SettingsPage() {
   const [riskThreshold, setRiskThreshold] = useState('')
   const [autoVerify, setAutoVerify] = useState(false)
   const [relayVerify, setRelayVerify] = useState(true)
+  // False, and it must stay false: Save writes every field on this form, so a
+  // ticked starting state would switch the dispute relay on for any account
+  // that saved anything at all. The backend default is off in both places.
+  const [relayDisputes, setRelayDisputes] = useState(false)
   const [holdHours, setHoldHours] = useState('')
   const [saved, setSaved] = useState(false)
 
@@ -55,6 +59,7 @@ export function SettingsPage() {
     setRiskThreshold((settings.data.risk_review_threshold_usd / 100).toString())
     setAutoVerify(settings.data.seller_auto_verify ?? false)
     setRelayVerify(settings.data.seller_verification_relay ?? true)
+    setRelayDisputes(settings.data.dispute_decision_relay ?? false)
     setHoldHours((settings.data.destination_hold_hours ?? 24).toString())
   }, [settings.data])
 
@@ -72,6 +77,7 @@ export function SettingsPage() {
       risk_review_threshold_usd: Math.round(Number(riskThreshold) * 100),
       seller_auto_verify: autoVerify,
       seller_verification_relay: relayVerify,
+      dispute_decision_relay: relayDisputes,
       destination_hold_hours: Number(holdHours),
     }),
   )
@@ -80,6 +86,7 @@ export function SettingsPage() {
   // below for why both. The account is read here rather than inside the card
   // so the mutation can be declared with the others, unconditionally.
   const { account } = useAuth()
+  const isOwner = account?.role === 'owner'
   const [confirmSlug, setConfirmSlug] = useState('')
   const reset = useMoneyAction(() => api.resetSandbox(confirmSlug.trim()))
 
@@ -330,6 +337,50 @@ export function SettingsPage() {
                   <span className="text-sm text-fg-muted">hours</span>
                 </div>
               </Field>
+            </div>
+          </Card>
+
+          <Card>
+            <CardHeader
+              title="Disputes"
+              subtitle="Who decides a dispute: someone signed in here, or your own platform."
+            />
+            <div className="space-y-5 px-6 py-5">
+              {/*
+                Owner-only, and the endpoint refuses a change from anyone else.
+                Unlike the seller relay above this one moves money: PayHold
+                releases or refunds on whatever the platform reports. The
+                warning is its own line so it cannot be skimmed past as part of
+                the description.
+              */}
+              <label className="flex items-start gap-3">
+                <input
+                  type="checkbox"
+                  checked={relayDisputes}
+                  disabled={!isOwner}
+                  onChange={(e) => setRelayDisputes(e.target.checked)}
+                  className="mt-0.5 size-4 rounded border-line-strong text-brand focus:ring-brand/30 disabled:opacity-50"
+                />
+                <span>
+                  <span className="block text-sm font-semibold text-fg">
+                    My platform decides disputes and tells PayHold the outcome
+                  </span>
+                  <span className="mt-1 block text-xs leading-relaxed text-fg-muted">
+                    Your own system can resolve a dispute with its API key and
+                    name the person who decided. That name is shown here as
+                    reported by your platform.
+                  </span>
+                  <span className="mt-1 block text-xs font-semibold leading-relaxed text-fg">
+                    PayHold will then release or refund money on your platform's
+                    word, without anyone here checking the decision.
+                  </span>
+                  {!isOwner && (
+                    <span className="mt-1 block text-xs text-fg-subtle">
+                      Only the account owner can change this.
+                    </span>
+                  )}
+                </span>
+              </label>
             </div>
           </Card>
 

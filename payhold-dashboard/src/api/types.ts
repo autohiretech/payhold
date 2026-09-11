@@ -1219,9 +1219,33 @@ export interface Dispute {
   opened_at: Timestamp
   resolved_at: Timestamp | null
   resolution_note: string | null
-  /** §8's final decision record. `both-parties` when the two sides agreed. */
+  /**
+   * §8's final decision record: whom PayHold recorded as deciding. A signed-in
+   * person's actor, `both-parties` when the two sides agreed — or, for a
+   * decision a platform relayed over its API key, **the credential**
+   * (`api_key:<label>`), because that is the only party PayHold authenticated.
+   */
   decided_by: string | null
+  /** Which kind of decider `decided_by` is. Null while the dispute is open. */
+  decider_source: DisputeDeciderSource | null
+  /**
+   * The person a platform *said* decided, on a relayed decision only. PayHold
+   * cannot check it, so a screen must render it as reported — "Reported by
+   * <platform> via API key: <name>" — and never as a PayHold user. `lib/decider.ts`
+   * is where that sentence is built.
+   */
+  reported_decider: string | null
+  /** What a `partial_refund` resolution returned, presentment minor units. */
+  resolution_refund_amount: Money | null
 }
+
+/**
+ * `person` — someone signed in here, or an AI draft's approver.
+ * `both_parties` — the two sides agreed with each other.
+ * `platform_reported` — the tenant's own platform decided and relayed it, under
+ * the owner's `dispute_decision_relay` setting.
+ */
+export type DisputeDeciderSource = 'person' | 'both_parties' | 'platform_reported'
 
 export interface DisputeEvidence {
   side: ConfirmSide
@@ -1381,6 +1405,18 @@ export interface TenantSettings {
    * the decision is finally made. On by default.
    */
   seller_verification_relay?: boolean
+  /**
+   * The account owner's attestation that their own platform **decides
+   * disputes** and tells PayHold each outcome, so
+   * `POST /v1/disputes/:id/resolve` accepts that company's API key with a named
+   * decider. PayHold then releases or refunds money on the platform's word.
+   *
+   * **Off by default**, unlike the verification relay above, because this one
+   * moves money. The Settings screen saves every field it holds, so its
+   * checkbox must start unticked or the first Save would store it on.
+   * Owner-only to change.
+   */
+  dispute_decision_relay?: boolean
   /** After this, a sanctions screening is stale and the gate holds the payout. */
   sanctions_max_age_days?: number
   /** §10.1: how long a hosted payment link lives. */
@@ -1957,6 +1993,13 @@ export type PayHoldErrorCode =
   | 'policy_violation'
   | 'insufficient_balance'
   | 'unauthorized'
+  // 20260911000002. `forbidden` is a key on a person-only screen,
+  // `invalid_request` a malformed body; the two dispute codes are what a
+  // platform relaying a decision reads.
+  | 'forbidden'
+  | 'invalid_request'
+  | 'dispute_relay_off'
+  | 'dispute_already_resolved'
 
 /** Every failure the API can return, as a typed error. */
 export class PayHoldError extends Error {

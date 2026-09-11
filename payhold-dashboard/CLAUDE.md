@@ -485,6 +485,16 @@ Four things are load-bearing:
 reads the offers, so what the assistant is given depends on what the parties
 have actually exchanged — there is no fixture standing in for a conversation.
 
+**A decision a platform relayed reads as reported.** With the owner's
+`dispute_decision_relay` on, a tenant's server can resolve a dispute over its
+API key and name who decided. PayHold authenticated the key, not that person, so
+`decided_by` is the key and `reported_decider` the name; `lib/decider.ts` turns
+both into "Reported by <platform> via API key: <name>" for the outcome and the
+timeline, and nothing on this screen may render that name as "Decided by". The
+Settings checkbox for it starts **unticked** — Save writes every field, so a
+ticked start would switch it on for anyone who saved anything — and is
+owner-only. `screens/settings-defaults.test.ts` pins both.
+
 ## Reconciliation passes on Admin
 
 The alerts table says what is wrong *now* and structurally cannot say that we

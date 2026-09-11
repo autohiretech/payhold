@@ -109,6 +109,19 @@ export interface FullSettings extends Settings {
    * change, and it moves no gate downstream.
    */
   seller_verification_relay: boolean
+  /**
+   * The owner's attestation that their own platform **decides disputes** and
+   * will tell PayHold each outcome, so `POST /v1/disputes/:id/resolve` accepts
+   * that account's API key with a named `decided_by`.
+   *
+   * **Off by default, unlike the verification relay, and it must stay off.** A
+   * relayed verification can only unblock paperwork; every payout gate still
+   * reads its columns. A relayed dispute decision releases or refunds money the
+   * moment it lands, so an account that never opened Settings must not be taken
+   * to have said its platform decides. `resolve_dispute` re-checks this under
+   * the dispute's row lock with the same default. Owner-only to change.
+   */
+  dispute_decision_relay: boolean
 }
 
 type Kind = 'rate' | 'money' | 'count' | 'flag' | 'currencies' | 'payout_mode' | 'country'
@@ -167,6 +180,11 @@ const SPEC: Record<keyof Omit<FullSettings, 'tenant_id'>, Spec> = {
   // tenant's word on a seller it has already reviewed, not a blanket
   // verification at signup, which stays off.
   seller_verification_relay: { kind: 'flag', fallback: true },
+  // False, and it must match `dispute_decision_relay()`'s 0 in SQL
+  // (20260911000002): a relayed dispute decision moves money, so nobody is
+  // taken to have opted in by not opening Settings. The dashboard saves every
+  // setting it holds, so its checkbox must start unticked too.
+  dispute_decision_relay: { kind: 'flag', fallback: false },
   checkout_session_hours: { kind: 'count', fallback: 24, min: 1, max: 720 },
   // False, and it must stay false for anyone who has not deliberately turned
   // it on — see the note on `Settings.raw_card_relay`.

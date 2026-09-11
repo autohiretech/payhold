@@ -97,13 +97,17 @@ export function preflight(req: Request): Response | null {
   return new Response(null, { status: 204, headers: corsHeaders(req) })
 }
 
-/** The wire shape of every failure. */
+/**
+ * The wire shape of every failure. `details` adds fields beside `code` and
+ * `message` and can never replace either.
+ */
 export function errorResponse(
   req: Request,
   code: PayHoldErrorCode,
   message: string,
+  details?: Record<string, unknown>,
 ): Response {
-  return json(req, { error: { code, message } }, ERROR_STATUS[code])
+  return json(req, { error: { ...details, code, message } }, ERROR_STATUS[code])
 }
 
 /**
@@ -124,7 +128,7 @@ export function handler(
       return await fn(req)
     } catch (err) {
       if (err instanceof PayHoldError) {
-        return errorResponse(req, err.code, err.message)
+        return errorResponse(req, err.code, err.message, err.details)
       }
 
       console.error('unhandled error', {

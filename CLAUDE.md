@@ -366,6 +366,12 @@ account's API key. A **separate** switch from the one before it and never a
 variation on it: that one verifies at registration, before anybody has looked,
 which is the opposite of what a tenant doing manual review is asking for. This
 one leaves the insert path alone — a seller still lands `pending`),
+`dispute_decision_relay` (default **false**, and it stays false — the tenant's
+own platform decides disputes and reports each outcome, so
+`POST /v1/disputes/:id/resolve` accepts that account's API key with a named
+`decided_by`. Off by default where the verification relay is on, because a
+relayed verification only unblocks paperwork and a relayed decision releases or
+refunds money the moment it lands. Owner-only to change),
 `risk_rules_enabled` (default true),
 `risk_review_threshold_usd` (default $1,000, converted to the payout currency
 at compare time), `payout_backup_enabled` (default true),
@@ -425,9 +431,9 @@ Auth: `X-Api-Key`, hashed at rest, rate-limited per key.
 | `POST /v1/disputes/:id/offers` `/offers/:id/respond` `/withdraw` | Request an update, extension, cancellation or refund. The other party has 48 hours |
 | `POST /v1/disputes/:id/evidence` | Photos, documents, check-ins. A description and a reference — never the file |
 | `GET /v1/disputes/:id/export` | §8's communication export, for a chargeback response or a regulator |
-| `POST /v1/disputes/:id/resolve` | Decide it. **Refuses an API key**, and refuses anyone who acted for a party |
+| `POST /v1/disputes/:id/resolve` | Decide it. **Refuses an API key** (422 `dispute_relay_off`) unless that tenant's `dispute_decision_relay` is on — then the key relays its platform's decision and must name who made it (`decided_by`, recorded as reported). Refuses anyone who acted for a party; a retry of the recorded outcome moves nothing |
 | `POST /ai-dispute` `/ai-risk-narrator` `/ai-support` | Draft, brief, answer. Advisory; each writes a suggestion and nothing else |
-| `POST /ai-decisions` | A person approves or rejects a draft. The only path from model output to money |
+| `POST /ai-decisions` | A person approves or rejects a draft. The only path from model output to money. **Refuses an API key** (403), relay or not |
 | `GET /v1/launch` `POST /v1/launch/:code/sign-off` | §16's checklist, and what stands between us and live money. PayHold staff only; refuses an API key |
 | `/admin/tenants` `/admin/reconciliation-alerts` `/admin/reconciliation-runs` | The master-admin console: every account, every drift case, every pass. Run one now, sign one off, freeze or unfreeze an account. **PayHold staff only** — the one function whose reads are not tenant-scoped, which is why it is a function of its own |
 | `/flutterwave-webhook/:tenant` `/stripe-webhook/:tenant` | Inbound provider webhooks. Signature checked against *that tenant's* own secret, then the transaction re-fetched |
@@ -767,6 +773,35 @@ agreeing with each other, and it is the one actor allowed to have acted.
 
 A resolution **requires a decider**, the same way clearing a payout hold and
 verifying a seller do. A decision without a name is not a record.
+
+**A tenant's own platform may decide instead** — `dispute_decision_relay`,
+migration `20260911000002`, spec §29.16, **off by default**. Once the owner ticks
+"My platform decides disputes and tells PayHold the outcome" in Settings,
+`POST /v1/disputes/:id/resolve` accepts that account's API key with
+`{ resolution, note, refund_amount?, decided_by }` and moves the money exactly as
+it would for a person here. With it off the key gets **422
+`dispute_relay_off`**; a missing `decided_by` or `note` is **400
+`invalid_request`**. `resolve_dispute` re-checks the setting under the
+dispute's row lock.
+
+PayHold authenticates the key, not the person, so **the name is stored as
+reported**: `decided_by` is the credential (`api_key:<label>`),
+`reported_decider` is the name, `decider_source` is `platform_reported`, and the
+audit row's actor is the credential. The dashboard renders it "Reported by
+<platform> via API key: <name>". The conflict check compares the reported name.
+The credential may itself have raised or argued the dispute — a platform does
+both with the same key — only because a distinct person is named and the tenant
+opted in. A retry of the recorded outcome returns the dispute unchanged; a
+different outcome is **409 `dispute_already_resolved`**, carrying what was
+recorded.
+
+**An AI draft is never approved by a key.** `ai-decisions` and
+`decide_ai_suggestion` refuse an API key (403 `forbidden`) whatever the relay
+says, which closes the route a key used to have to `resolve_dispute` through an
+approval.
+
+`dispute.opened` carries `dispute_id`, `raised_by`, `reason`, `reason_code` and
+`disputed_amount` (null for the whole payment). It used to carry nothing.
 
 ## Fraud controls (spec §6)
 

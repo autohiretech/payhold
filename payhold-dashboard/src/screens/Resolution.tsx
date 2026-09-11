@@ -46,6 +46,7 @@ import {
 } from '@/api'
 import { useAuth } from '@/auth/AuthProvider'
 import { actorId } from '@/auth'
+import { deciderSentence, timelineActor } from '@/lib/decider'
 import {
   AiSuggestionCard,
   AiUnavailable,
@@ -274,11 +275,8 @@ function Outcome({ dispute }: { dispute: Dispute }) {
       {dispute.resolution_note && (
         <p className="text-fg-muted">{dispute.resolution_note}</p>
       )}
-      <p className="text-fg-subtle">
-        {dispute.decided_by === 'both-parties'
-          ? 'The two sides agreed with each other.'
-          : `Decided by ${dispute.decided_by ?? 'nobody recorded'}.`}
-      </p>
+      {/* A platform's relayed decision reads as reported, never as a user here. */}
+      <p className="text-fg-subtle">{deciderSentence(dispute)}</p>
     </div>
   )
 }
@@ -805,7 +803,7 @@ function Timeline({ disputeId }: { disputeId: string }) {
           <div className="min-w-0 pb-1">
             <p className="text-sm text-fg">{event.summary}</p>
             <p className="text-xs text-fg-subtle">
-              {formatDateTime(event.at)} · {event.actor}
+              {formatDateTime(event.at)} · {timelineActor(event)}
               {event.side ? ` (${event.side})` : ''}
             </p>
           </div>

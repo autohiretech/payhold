@@ -21,10 +21,17 @@
  *     that was shown rather than whatever the request body says.
  *   * It does not let the AI role in. A draft can be approved only through
  *     here, by a signed-in owner or staff member.
+ *   * **It does not let an API key in, for anything.** `requireRole` passes every
+ *     key by design, so until `20260911000002` a key could approve a dispute draft
+ *     and reach `resolve_dispute` with no reported decider and no setting asked.
+ *     That holds whether or not the tenant's `dispute_decision_relay` is on: the
+ *     relay, through `POST /v1/disputes/:id/resolve`, is the one API-key route to
+ *     a resolution. `decide_ai_suggestion` refuses a key on its own as well.
  */
 
 import { requireRole, resolveCaller, serviceClient } from '../_shared/auth.ts'
 import { aiUsage, SUGGESTION_COLUMNS, type StoredSuggestion } from '../_shared/ai.ts'
+import { refuseApiKeyOnAiDecisions } from '../_shared/dispute-relay.ts'
 import { releaseFigures } from '../_shared/figures.ts'
 import { handler, json, readJson, required } from '../_shared/http.ts'
 import { PayHoldError, type Deal } from '../_shared/types.ts'
@@ -32,6 +39,11 @@ import { PayHoldError, type Deal } from '../_shared/types.ts'
 Deno.serve(handler(async (req) => {
   const db = serviceClient()
   const caller = await resolveCaller(db, req)
+
+  // Before any read as well as the write: this function is a signed-in person's
+  // screen, and no tenant server has a reason to be here.
+  refuseApiKeyOnAiDecisions(caller)
+
   const url = new URL(req.url)
 
   if (req.method === 'GET') {
@@ -139,12 +151,18 @@ Deno.serve(handler(async (req) => {
     p_decision: body.decision,
     p_decided_by: caller.actor,
     ...figures,
+    // Always false by this line. Passed so the function's own refusal is
+    // exercised by the flag and not only by the actor's shape.
+    p_via_api_key: caller.kind === 'api_key',
   })
 
   if (error) {
     // The SQL function raises with a `code: message` prefix, the same
     // convention the money functions use.
     const message = error.message ?? 'Could not record that decision'
+    if (message.includes('forbidden')) {
+      throw new PayHoldError('forbidden', message.replace(/^.*forbidden: /, ''))
+    }
     if (message.includes('invalid_state')) {
       throw new PayHoldError('invalid_state', message.replace(/^.*invalid_state: /, ''))
     }

@@ -89,11 +89,11 @@ environment or a build log.
 | `launch` | §16's checklist and its sign-offs. PayHold staff only, and it refuses an API key |
 | `payouts` | list, get with signals **and the routing decision and display status**, `/hold`, `/approve-review`, `/retry` |
 | `risk-signals` | what the deterministic rules noticed, filterable; `?context=1` for where payments came from |
-| `disputes` | §8's Resolution Center. Open, list, get with offers/evidence/timeline, `/offers`, `/offers/:id/respond`, `/offers/:id/withdraw`, `/evidence`, `/export`, and `/resolve` (person-only) |
+| `disputes` | §8's Resolution Center. Open, list, get with offers/evidence/timeline, `/offers`, `/offers/:id/respond`, `/offers/:id/withdraw`, `/evidence`, `/export`, and `/resolve` (a person, or the tenant's API key while `dispute_decision_relay` is on — see the Resolution Center section) |
 | `webhook-dispatch`, `reconcile`, `auto-release`, `payout-dispatch` | cron only, `CRON_SECRET` |
 | `settle-pending` | cron only. Asks each rail about charges that started and never landed, and funds the ones that did — the backstop under both inbound webhooks |
 | `ai-dispute`, `ai-risk-narrator`, `ai-support` | draft a resolution, brief a payout, answer a question. These run as `payhold_ai` and never hold the service role |
-| `ai-decisions` | approve or reject a draft; `?usage=1`, `?outcomes=1`. The one AI-adjacent function that *does* hold the service role, because approving is what moves money |
+| `ai-decisions` | approve or reject a draft; `?usage=1`, `?outcomes=1`. The one AI-adjacent function that *does* hold the service role, because approving is what moves money. Refuses an API key on every route |
 
 `resolveCaller` takes either an `X-Api-Key` or a dashboard JWT, key first. Every
 handler filters on the tenant it resolves, and a row belonging to someone else
@@ -636,7 +636,8 @@ It carries the project's real JWT secret under a name the Supabase CLI will
 actually let you set — `SUPABASE_JWT_SECRET` is refused outright, reserved for
 the values Supabase auto-injects into every function.
 
-`decide_ai_suggestion` is the single bridge across. It locks the suggestion
+`decide_ai_suggestion` is the single bridge across. It refuses an API key
+(`20260911000002` — on the flag and on an `api_key:` actor), locks the suggestion
 `for update`, requires a `decided_by`, and only reaches `resolve_dispute` for an
 approved `dispute_resolution` of `release`, `refund` or — as of Phase 3 —
 `partial_refund`, whose amount it reads off the suggestion the approver was
@@ -1287,6 +1288,54 @@ an AI draft either.
   which is the contract `20260807000015` states. It clears the blocker and does
   not sign the item off: the table existing is a fact, and whether the behaviour
   is right is a person's judgement.
+
+### `dispute_decision_relay` — migration `20260911000002`
+
+`seller_verification_relay`'s shape applied to §8's decision, with the default
+the other way round. The owner ticks "My platform decides disputes and tells
+PayHold the outcome" in Settings (owner-only: `settings` refuses a *change* from
+staff), and from then `POST /v1/disputes/:id/resolve` accepts that account's API
+key. The default lives in three places and they must all say **off**: the SQL
+helper `dispute_decision_relay()` that `resolve_dispute` re-asks under the
+dispute's row lock, `settings.ts`'s fallback, and the dashboard checkbox. The
+last matters more than it looks, because the dashboard's Save writes every
+setting the form holds.
+
+Four things are worth knowing before changing it:
+
+- **The credential is the decider; the name is a report.** `functions/disputes`
+  passes `p_decided_by` = `api_key:<label>` and `p_reported_decider` = the body's
+  `decided_by`, and the row records `decider_source = 'platform_reported'`. A
+  reader that has never heard of `reported_decider` shows the key, never an
+  unverifiable name presented like a PayHold user. An `api_key:` decider is read
+  as relayed even without `p_via_api_key`, so a caller written without the flag
+  is still caught.
+- **Conflict of interest compares the reported name.** The credential may itself
+  have raised or argued the dispute — a platform does both with the same key — as
+  long as a distinct person is named. `both-parties` and `api_key:` names are
+  refused as reported deciders, because either would report nobody.
+- **Retries are idempotent on the relayed path only.** The same outcome (for a
+  split, at the same `resolution_refund_amount`) returns the row and writes no
+  ledger entry, audit row or webhook; a different one raises
+  `dispute_already_resolved`, which the function answers with 409 and the stored
+  outcome. A person resolving a resolved dispute still gets `invalid_state`.
+- **The audit row carries `from_status` and `dispute_from_status`, captured
+  before the records are rewritten.** `update … returning * into` replaces the
+  whole variable — `20260909000007`'s bug. On the relayed path the refund row
+  and its audit name the credential rather than `payhold-staff`.
+
+The body is validated in `_shared/dispute-relay.ts`, pure so
+`dispute-relay.test.ts` can pin every status; the money and the names are pinned
+in `tests/dispute-decision-relay.test.ts`. New error codes: `invalid_request`
+(400), `forbidden` (403), `dispute_relay_off` (422), `dispute_already_resolved`
+(409). `PayHoldError` gained optional `details`, spread into the wire `error`
+object beside `code` and `message`, which it can never replace.
+
+The same migration closes `ai-decisions`' key route — `decide_ai_suggestion`
+refuses an API key, and the function refuses one before any read — and gives
+`dispute.opened` a payload: `dispute_id`, `raised_by`, `reason`, `reason_code`,
+`disputed_amount`. `dispute.resolved` gained `decider_source` and
+`reported_decider`, additively.
 
 ## Risk rules live in SQL
 

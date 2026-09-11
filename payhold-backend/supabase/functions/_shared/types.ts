@@ -827,15 +827,49 @@ export type PayHoldErrorCode =
   | 'policy_violation'
   | 'insufficient_balance'
   | 'unauthorized'
+  /**
+   * The caller is authenticated and is the wrong *kind* of caller for this, and
+   * nothing it could change about the request would help — an API key asking to
+   * approve an AI draft. Not for another tenant's row: that stays a 404, because
+   * a 403 there confirms the row exists.
+   */
+  | 'forbidden'
+  /**
+   * The request is malformed — a required field missing, blank or the wrong
+   * shape. Newer than `policy_violation`, which older routes still use for the
+   * same thing and keep using: changing an existing error's status is an API
+   * change. New routes that need a 400 use this.
+   */
+  | 'invalid_request'
+  /**
+   * `POST /v1/disputes/:id/resolve` from an API key, on an account whose owner
+   * has not turned on `dispute_decision_relay`. Its own code rather than
+   * `policy_violation` for the reason `unknown_route` has one: a client needs to
+   * tell "your account has not opted in" from "this decider acted for a party"
+   * without reading prose, and both are 422s.
+   */
+  | 'dispute_relay_off'
+  /**
+   * A relayed decision on a dispute already resolved a different way. The same
+   * outcome sent again is not an error — it returns the dispute unchanged.
+   */
+  | 'dispute_already_resolved'
 
 /** Every failure the API can return, as a typed error. */
 export class PayHoldError extends Error {
   code: PayHoldErrorCode
+  /**
+   * Extra fields for the wire `error` object, beside `code` and `message` —
+   * `dispute_already_resolved` carries the stored outcome. Never a place for
+   * anything a client should not see.
+   */
+  details?: Record<string, unknown>
 
-  constructor(code: PayHoldErrorCode, message: string) {
+  constructor(code: PayHoldErrorCode, message: string, details?: Record<string, unknown>) {
     super(message)
     this.name = 'PayHoldError'
     this.code = code
+    this.details = details
   }
 }
 
@@ -850,4 +884,9 @@ export const ERROR_STATUS: Record<PayHoldErrorCode, number> = {
   policy_violation: 422,
   insufficient_balance: 409,
   unauthorized: 401,
+  forbidden: 403,
+  invalid_request: 400,
+  // The same status the verification relay's refusal has always had.
+  dispute_relay_off: 422,
+  dispute_already_resolved: 409,
 }
