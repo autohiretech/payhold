@@ -15,6 +15,18 @@
  * Note it is encrypted rather than hashed, unlike an API key. A key is only
  * compared, so a hash is strictly safer; a signing secret has to be recovered
  * on every delivery. `sealWebhookSecret` is the one place that decision lives.
+ *
+ * **Registering and disabling are a signed-in person's acts, never an API
+ * key's.** `requireRole` lets every key through, and until this was written
+ * down here the two were guarded by nothing else: any key could register a URL
+ * of its own — receiving every deal, payout and dispute event, signed with a
+ * secret it was handed — or disable the client's endpoint, so paid orders stop
+ * reaching the platform that creates the booking. That is the shape of a key
+ * that leaked from a client's server, which is exactly the credential
+ * `api-keys` already refuses to let mint another. Reading endpoints and
+ * deliveries, and re-arming a delivery (`retryDelivery`), stay open to a key:
+ * none of them changes where an event goes.
+ * `tests/api-key-boundaries.test.ts` holds every role check to that line.
  */
 
 import type { SupabaseClient } from 'npm:@supabase/supabase-js@2'
@@ -112,6 +124,11 @@ const DELIVERY_COLUMNS =
  * claim query joins on `disabled_at is null`. That is the honest outcome —
  * nothing was sent, and the row says the attempt is still pending rather than
  * claiming a delivery to somewhere the tenant switched off.
+ *
+ * **Accepts an API key**, unlike registering or disabling: it only re-arms a
+ * delivery to an endpoint a signed-in person registered, signed with the secret
+ * PayHold holds, so it cannot send an event anywhere new — and a client
+ * recovering from its own outage is exactly who wants to ask.
  */
 async function retryDelivery(
   req: Request,
@@ -178,6 +195,12 @@ Deno.serve(handler(async (req) => {
       }
       if (resource) throw new PayHoldError('not_found', 'No such action')
 
+      if (caller.kind !== 'dashboard') {
+        throw new PayHoldError(
+          'unauthorized',
+          'Webhook endpoints are registered by a signed-in person, not by an API key',
+        )
+      }
       requireRole(caller, 'owner', 'staff')
       return await register(req, db, caller)
 
@@ -213,6 +236,12 @@ Deno.serve(handler(async (req) => {
     }
 
     case 'DELETE': {
+      if (caller.kind !== 'dashboard') {
+        throw new PayHoldError(
+          'unauthorized',
+          'Webhook endpoints are disabled by a signed-in person, not by an API key',
+        )
+      }
       requireRole(caller, 'owner', 'staff')
       const id = url.searchParams.get('id')
       if (!id) throw new PayHoldError('policy_violation', 'Specify ?id=')
