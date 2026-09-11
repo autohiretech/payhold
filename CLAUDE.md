@@ -360,7 +360,7 @@ Flutterwave.** Adding Paystack/DPO later = one new class + one webhook function
 who a seller is, sellers and destinations are written verified and out of hold
 rather than waiting for a person here; the gates that read those columns are
 unchanged, so `verify_seller(…, false)` still stops a payout),
-`seller_verification_relay` (default **false** — the tenant reviews each seller
+`seller_verification_relay` (default **true** since `20260911000001` — the tenant reviews each seller
 itself and reports the result, so `POST /v1/sellers/:id/verify` accepts that
 account's API key. A **separate** switch from the one before it and never a
 variation on it: that one verifies at registration, before anybody has looked,

@@ -291,6 +291,18 @@ async function setFlag(tenant: string, key: string): Promise<void> {
 
 const relayOn = (tenant: string) => setFlag(tenant, 'seller_verification_relay')
 
+/**
+ * Stores the relay explicitly off. Since `20260911000001` the setting defaults
+ * on, so "off" is no longer the absence of a row — a test that means relay off
+ * has to store it, or it quietly tests the default instead.
+ */
+async function relayOff(tenant: string): Promise<void> {
+  await h.db.query(
+    `insert into settings (tenant_id, key, value) values ($1, 'seller_verification_relay', '0')`,
+    [tenant],
+  )
+}
+
 async function verifyBy(
   seller: string,
   actor: string,
@@ -349,6 +361,7 @@ describe('the two flags are independent, and all four combinations are meant', (
 
   test('relay off: the same call is refused, in both directions', async () => {
     const tenant = await newTenant('no-relay-co', false)
+    await relayOff(tenant)
     const seller = await newSeller(tenant)
 
     await expect(verifyBy(seller, API_KEY, true, true))
@@ -365,6 +378,7 @@ describe('the two flags are independent, and all four combinations are meant', (
 
   test('auto-verify on, relay off: sellers arrive verified and the key is still refused', async () => {
     const tenant = await newTenant('auto-only-co', true)
+    await relayOff(tenant)
     const seller = await newSeller(tenant)
     expect((await capabilities(seller)).kyc).toBe('verified')
 
@@ -394,6 +408,26 @@ describe('the two flags are independent, and all four combinations are meant', (
 
     await verifyBy(seller, 'user:owner@example.com', true, false)
     expect((await capabilities(seller)).kyc).toBe('verified')
+  })
+})
+
+describe('on by default (20260911000001)', () => {
+  test('an account that never stored the setting accepts its API key', async () => {
+    const tenant = await newTenant('default-relay-co', false)
+    const seller = await newSeller(tenant)
+
+    await verifyBy(seller, API_KEY, true, true)
+
+    expect((await capabilities(seller)).kyc).toBe('verified')
+  })
+
+  test('the default still verifies nobody on arrival', async () => {
+    // On by default loosens whose word is taken, not when: a seller still lands
+    // pending until their platform says otherwise about them.
+    const tenant = await newTenant('default-relay-pending-co', false)
+    const seller = await newSeller(tenant)
+
+    expect((await capabilities(seller)).kyc).toBe('pending')
   })
 })
 

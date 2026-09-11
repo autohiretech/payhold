@@ -104,8 +104,9 @@ export interface FullSettings extends Settings {
    * anything — a client that creates the PayHold seller when a user first ticks
    * "I want to host" would verify every unreviewed signup on arrival. This one
    * leaves the insert path alone: a seller still lands `pending` and stays
-   * unpayable until their own platform says otherwise about them. Off by
-   * default, person-only to change, and it moves no gate downstream.
+   * unpayable until their own platform says otherwise about them. On by
+   * default since `20260911000001` (a stored 0 turns it off), person-only to
+   * change, and it moves no gate downstream.
    */
   seller_verification_relay: boolean
 }
@@ -161,9 +162,11 @@ const SPEC: Record<keyof Omit<FullSettings, 'tenant_id'>, Spec> = {
   destination_hold_hours: { kind: 'count', fallback: 24, min: 0, max: 720 },
   sanctions_max_age_days: { kind: 'count', fallback: 365, min: 1, max: 3_650 },
   seller_auto_verify: { kind: 'flag', fallback: false },
-  // False, and independent of the one above: this one is the tenant's word on
-  // a seller it has already reviewed, not a blanket verification at signup.
-  seller_verification_relay: { kind: 'flag', fallback: false },
+  // True since 20260911000001: the account holder asked for it on unless an
+  // account turns it off. Still independent of the one above — this is the
+  // tenant's word on a seller it has already reviewed, not a blanket
+  // verification at signup, which stays off.
+  seller_verification_relay: { kind: 'flag', fallback: true },
   checkout_session_hours: { kind: 'count', fallback: 24, min: 1, max: 720 },
   // False, and it must stay false for anyone who has not deliberately turned
   // it on — see the note on `Settings.raw_card_relay`.

@@ -35,7 +35,7 @@ export function SettingsPage() {
   const [riskEnabled, setRiskEnabled] = useState(true)
   const [riskThreshold, setRiskThreshold] = useState('')
   const [autoVerify, setAutoVerify] = useState(false)
-  const [relayVerify, setRelayVerify] = useState(false)
+  const [relayVerify, setRelayVerify] = useState(true)
   const [holdHours, setHoldHours] = useState('')
   const [saved, setSaved] = useState(false)
 
@@ -54,7 +54,7 @@ export function SettingsPage() {
     setRiskEnabled(settings.data.risk_rules_enabled)
     setRiskThreshold((settings.data.risk_review_threshold_usd / 100).toString())
     setAutoVerify(settings.data.seller_auto_verify ?? false)
-    setRelayVerify(settings.data.seller_verification_relay ?? false)
+    setRelayVerify(settings.data.seller_verification_relay ?? true)
     setHoldHours((settings.data.destination_hold_hours ?? 24).toString())
   }, [settings.data])
 
