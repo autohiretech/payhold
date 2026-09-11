@@ -262,45 +262,56 @@ describe('§5.2 — payout routing acceptance tests', () => {
     expect(status).toBe('blocked')
   })
 
-  test('5. a failed primary does not lose funds and offers the verified backup', async () => {
+  test('5. a failed primary does not lose funds, and nothing reroutes it', async () => {
+    // §29.17 supersedes this case's "offers the verified backup route": a seller
+    // has one live destination, so a failed payout keeps its amount and says why
+    // rather than moving anywhere. Pinned against the strongest version of the
+    // old case — a verified destination on a working rail, replaced and archived,
+    // after the primary has failed more than the old policy's two attempts.
     const seller = await newSeller()
-    // A verified backup on a different rail, which is the case one pair of
-    // columns on `sellers` could not have expressed.
+    const { rows: [old] } = await h.db.query<{ id: string }>(
+      `select id from seller_destinations where seller_id = $1 and is_primary`, [seller],
+    )
     await h.db.query(
-      `insert into seller_destinations (tenant_id, seller_id, label, country,
-         payout_currency, payout_provider, beneficiary_token, masked_destination,
-         is_backup, verified_at)
-       values ($1, $2, 'Backup', 'RW', 'RWF', 'flutterwave_bank',
-               'tok_backup', 'BK •••• 9910', true, now())`,
-      [tenant, seller],
+      `select add_seller_destination($1, $2, 'RW', 'RWF', 'flutterwave_bank',
+                                     'tok_bank', 'BK •••• 9910', null, 'primary', 'api')`,
+      [seller, tenant],
+    )
+    const { rows: [live] } = await h.db.query<{ id: string }>(
+      `update seller_destinations
+          set verified_at = now(), security_hold_until = now()
+        where seller_id = $1 and archived_at is null
+        returning id`,
+      [seller],
     )
 
-    // Only the primary rail goes down. The money is untouched by that.
+    // Only the live destination's rail goes down. The archived one's rail is up.
     await h.db.query(
       `update payout_routes set enabled = false
-        where tenant_id is null and payout_provider = 'flutterwave_momo'`,
+        where tenant_id is null and payout_provider = 'flutterwave_bank'`,
     )
 
-    // §5.1 permits the backup *only* after a failed primary payout and the
-    // policy check. One attempt is not enough.
-    const early = await payoutFor(seller, { status: 'failed', attempts: 1 })
-    expect((await route(early)).reason_code).toBe('provider_disabled')
-
-    const payout = await payoutFor(seller, { status: 'failed', attempts: 2 })
+    const payout = await payoutFor(seller, { status: 'failed', attempts: 3 })
     const decision = await route(payout)
 
-    expect(decision.reason_code).toBe('routed')
-    expect(decision.payout_provider).toBe('flutterwave_bank')
-    expect(decision.is_fallback).toBe(true)
+    expect(decision.reason_code).toBe('provider_disabled')
+    expect(decision.destination_id).toBe(live.id)
+    expect(decision.destination_id).not.toBe(old.id)
+    expect(decision.is_fallback).toBe(false)
 
-    // §5.1: the seller must be notified and the change logged.
+    // Funds untouched: same amount, the rail's refusal kept, nothing sent.
+    const { rows: [p] } = await h.db.query<{ status: string; amount: string }>(
+      `select status::text, amount::text from payouts where id = $1`, [payout],
+    )
+    expect(p).toEqual({ status: 'failed', amount: '90000' })
+
     const { rows: audits } = await h.db.query<{ n: string }>(
       `select count(*) as n from audit_log
         where action = 'payout.route_changed'
           and details ->> 'payout_id' = $1`,
       [payout],
     )
-    expect(Number(audits[0].n)).toBe(1)
+    expect(Number(audits[0].n)).toBe(0)
   })
 
   test('6. a currency mismatch records the conversion detail', async () => {

@@ -78,9 +78,6 @@ export interface FullSettings extends Settings {
   ai_monthly_budget_usd: Money
   ai_dispute_assistant: boolean
   ai_risk_narrator: boolean
-  /** §5.1's routing policy for the seller's verified backup destination. */
-  payout_backup_enabled: boolean
-  payout_primary_attempts: number
   /** §13's budget before a refused payout stops being retried automatically. */
   payout_retry_max_attempts: number
   /** `wallet` stops the cron sending cleared money nobody has asked for. */
@@ -166,8 +163,6 @@ const SPEC: Record<keyof Omit<FullSettings, 'tenant_id'>, Spec> = {
   ai_risk_narrator: { kind: 'flag', fallback: true },
   risk_rules_enabled: { kind: 'flag', fallback: true },
   risk_review_threshold_usd: { kind: 'money', fallback: 100_000, min: 0 },
-  payout_backup_enabled: { kind: 'flag', fallback: true },
-  payout_primary_attempts: { kind: 'count', fallback: 2, min: 1, max: 20 },
   // Floor 1: a budget of zero would block every payout on the first transient
   // error a rail has.
   payout_retry_max_attempts: { kind: 'count', fallback: 5, min: 1, max: 20 },

@@ -45,7 +45,14 @@ import {
   useSellerDestinations,
   useSellers,
 } from '@/lib/queries'
-import { api, type Currency, type Money, type RiskSeverity, type Seller } from '@/api'
+import {
+  api,
+  type Currency,
+  type Money,
+  type RiskSeverity,
+  type Seller,
+  type SellerDestination,
+} from '@/api'
 
 /**
  * One counterparty, everything this account knows about them.
@@ -208,7 +215,7 @@ export function SellerDetailPage() {
       <Card className="mb-8">
         <CardHeader
           title="Payout destinations"
-          subtitle="Tokenized by the provider. PayHold never stores the real number. §5.1 gives a seller a preferred destination and, optionally, one verified backup."
+          subtitle="Tokenized by the provider. PayHold never stores the real number. A seller has one payout destination: adding one replaces it, and the one it replaced is kept below as history."
         />
         <dl className="grid gap-x-8 gap-y-5 px-6 pb-6 sm:grid-cols-2 lg:grid-cols-3">
           <Detail label="Seller id" value={<Mono>{seller.id}</Mono>} />
@@ -653,28 +660,168 @@ function Onboarding({ seller, now }: { seller: Seller; now: Date }) {
 }
 
 /**
- * §5.1's `seller_destinations`. The primary is the record;
- * `Seller.beneficiary_token` and `masked_destination` are its copy, kept in
- * step by a trigger with exactly one writer.
+ * §29.17: a seller has one live payout destination. `seller_destinations` is
+ * the record; `Seller.beneficiary_token` and `masked_destination` are its copy,
+ * kept in step by a trigger with exactly one writer.
  *
- * The backup is read-only here and deliberately so: it is used only after a
- * failed primary, `payout_primary_attempts` attempts, an explicit policy check,
- * and its own verification and security hold. A button that could pick it would
- * be the silent redirection §5.1 forbids.
+ * Adding a destination replaces the live one, and the replaced one is archived
+ * rather than deleted — a paid payout still has to say where it went. Those are
+ * listed underneath, collapsed and read-only: nothing can pay, verify or release
+ * one, so there is nothing to press.
  *
- * **The one action is ending a security hold**, and it is the second half of a
- * §5.1 sentence the table used to only implement the first half of: a new
- * destination enters a hold *and may require step-up verification before use*.
- * The hold could previously only expire, so somebody who confirmed the change
- * with the seller by phone had nothing to write that down with. It is a
- * separate act from verifying, records a separate audit row, and leaves the
- * destination unverified — which is why the row can still say so afterwards.
+ * The two actions on the live destination are `LiveDestinationActions`, kept
+ * apart so who may take them can change without touching this card.
  */
 function Destinations({ sellerId, now }: { sellerId: string; now: Date }) {
-  const destinations = useSellerDestinations(sellerId)
+  // One read for both halves: the live row, and the ones it replaced.
+  const destinations = useSellerDestinations(sellerId, true)
+
+  if (destinations.isPending) {
+    return (
+      <div className="border-t border-line px-6 py-6">
+        <Skeleton className="h-16" />
+      </div>
+    )
+  }
+
+  if (destinations.isError) {
+    return (
+      <div className="border-t border-line px-6 py-6">
+        <ErrorNote message={destinations.error.message} />
+      </div>
+    )
+  }
+
+  const live = destinations.data.find((d) => d.archived_at === null)
+  const previous = destinations.data.filter((d) => d.archived_at !== null)
+  const onHold =
+    live?.security_hold_until != null && new Date(live.security_hold_until) > now
+
+  return (
+    <div className="border-t border-line">
+      {live ? (
+        <div className="px-6 py-5">
+          <div className="flex flex-wrap items-baseline justify-between gap-3">
+            <p className="text-sm font-semibold text-fg">
+              Paid to <Mono>{live.masked_destination}</Mono>
+              {live.label && (
+                <span className="ml-2 text-xs font-normal text-fg-muted">{live.label}</span>
+              )}
+            </p>
+            <p className="text-xs text-fg-muted">Since {formatDateTime(live.created_at)}</p>
+          </div>
+
+          <dl className="mt-4 grid gap-x-8 gap-y-5 sm:grid-cols-2 lg:grid-cols-4">
+            <Detail label="Method" value={PAYOUT_PROVIDER_LABEL[live.payout_provider]} />
+            <Detail
+              label="Market"
+              value={`${countryFlag(live.country)} ${countryName(live.country)}`}
+            />
+            <Detail label="Paid in" value={live.payout_currency} />
+            <Detail
+              label="Verification"
+              value={
+                <>
+                  {live.verified_at ? (
+                    `Verified ${formatDate(live.verified_at)}`
+                  ) : (
+                    <span className="font-semibold text-danger">Not verified</span>
+                  )}
+                  {onHold && (
+                    <span className="block text-xs text-pending">
+                      In its security hold until {formatDateTime(live.security_hold_until)}
+                    </span>
+                  )}
+                </>
+              }
+            />
+          </dl>
+
+          <LiveDestinationActions sellerId={sellerId} destination={live} onHold={onHold} />
+        </div>
+      ) : (
+        <EmptyState
+          title="No destination registered"
+          body="Money still accrues for this seller. Nothing can be paid out until they add where."
+        />
+      )}
+
+      {previous.length > 0 && (
+        <details className="border-t border-line">
+          <summary className="cursor-pointer px-6 py-4 text-sm font-medium text-fg-muted hover:text-fg">
+            Previous destinations ({previous.length})
+          </summary>
+          <p className="px-6 pb-3 text-xs leading-relaxed text-fg-muted">
+            Replaced, and kept because a payout sent to one still has to say where it
+            went. Nothing can be paid to, verified or released on these.
+          </p>
+          <Table>
+            <thead>
+              <tr>
+                <Th>Destination</Th>
+                <Th>Method</Th>
+                <Th>Market</Th>
+                <Th>Paid in</Th>
+                <Th>Verified</Th>
+                <Th align="right">Replaced</Th>
+              </tr>
+            </thead>
+            <tbody>
+              {previous.map((d) => (
+                <tr key={d.id}>
+                  <Td>
+                    <Mono>{d.masked_destination}</Mono>
+                    {d.label && (
+                      <span className="block text-xs text-fg-muted">{d.label}</span>
+                    )}
+                  </Td>
+                  <Td className="text-fg-muted">{PAYOUT_PROVIDER_LABEL[d.payout_provider]}</Td>
+                  <Td className="text-fg-muted">
+                    {countryFlag(d.country)} {countryName(d.country)}
+                  </Td>
+                  <Td className="tabular text-fg-muted">{d.payout_currency}</Td>
+                  <Td className="text-fg-muted">
+                    {d.verified_at ? formatDate(d.verified_at) : 'Never'}
+                  </Td>
+                  <Td align="right" className="text-fg-muted">
+                    {formatDateTime(d.archived_at)}
+                  </Td>
+                </tr>
+              ))}
+            </tbody>
+          </Table>
+        </details>
+      )}
+    </div>
+  )
+}
+
+/**
+ * The two attestations on a seller's live destination, and nothing else.
+ *
+ * Verify records that the account belongs to the seller. Ending the hold is
+ * §5.1's step-up — the second half of a sentence the table once implemented only
+ * the first half of: a new destination enters a hold *and may require step-up
+ * verification before use*. They are separate acts with separate audit rows, and
+ * ending a hold leaves the destination unverified, which is why the card still
+ * says so afterwards.
+ *
+ * Self-contained on purpose: state, mutations and confirm panels all live here,
+ * so changing who may make these attestations is a change to this component
+ * alone. Both endpoints take the actor from the session and refuse an API key.
+ */
+function LiveDestinationActions({
+  sellerId,
+  destination,
+  onHold,
+}: {
+  sellerId: string
+  destination: SellerDestination
+  onHold: boolean
+}) {
   const { account } = useAuth()
-  const [confirming, setConfirming] = useState<string | null>(null)
-  const [attesting, setAttesting] = useState<string | null>(null)
+  const [confirming, setConfirming] = useState(false)
+  const [attesting, setAttesting] = useState(false)
 
   // Recorded against whoever is signed in. The endpoint takes the actor from
   // the session and refuses an API key outright, so there is no form field.
@@ -682,225 +829,100 @@ function Destinations({ sellerId, now }: { sellerId: string; now: Date }) {
   const endHold = useMoneyMutation((destinationId: string) =>
     api.endDestinationHold(sellerId, destinationId),
   )
-  // No confirm step: this one reaches nothing new. The endpoint refuses an
-  // unverified destination and one still inside its hold, so the worst a stray
-  // click does is move a seller between two destinations a person has already
-  // attested to — and the audit row names both.
-  const promote = useMoneyMutation((destinationId: string) =>
-    api.promoteSellerDestination(sellerId, destinationId),
-  )
-  // §5.1's per-destination attestation. `verifySeller` stamps only the primary,
-  // so a backup displaced before anyone checked it could be neither verified
-  // nor promoted into being verifiable — this is what breaks that deadlock.
   const verifyDest = useMoneyMutation((destinationId: string) =>
     api.verifySellerDestination(sellerId, destinationId),
   )
 
-  if (destinations.isPending) {
-    return (
-      <div className="px-6 pb-6">
-        <Skeleton className="h-16" />
-      </div>
-    )
-  }
-
-  if (!destinations.data?.length) {
-    return (
-      <EmptyState
-        title="No destination registered"
-        body="Money still accrues for this seller. Nothing can be paid out until they add where."
-      />
-    )
-  }
-
   return (
-    <Table>
-      <thead>
-        <tr>
-          <Th>Role</Th>
-          <Th>Destination</Th>
-          <Th>Method</Th>
-          <Th>Market</Th>
-          <Th>Paid in</Th>
-          <Th align="right">Verified</Th>
-        </tr>
-      </thead>
-      <tbody>
-        {destinations.data.map((d) => {
-          const onHold =
-            d.security_hold_until !== null && new Date(d.security_hold_until) > now
-          return (
-            <tr key={d.id}>
-              <Td className="font-medium">
-                {d.is_primary ? 'Preferred' : d.is_backup ? 'Backup' : 'Other'}
-                {d.label && (
-                  <span className="block text-xs text-fg-muted">{d.label}</span>
-                )}
-              </Td>
-              <Td>
-                <Mono>{d.masked_destination}</Mono>
-              </Td>
-              <Td className="text-fg-muted">
-                {PAYOUT_PROVIDER_LABEL[d.payout_provider]}
-              </Td>
-              <Td className="text-fg-muted">
-                {countryFlag(d.country)} {countryName(d.country)}
-              </Td>
-              <Td className="tabular text-fg-muted">{d.payout_currency}</Td>
-              <Td align="right" className="text-fg-muted">
-                {d.verified_at ? (
-                  formatDate(d.verified_at)
-                ) : (
-                  <span className="font-semibold text-danger">Not verified</span>
-                )}
-                {onHold && (
-                  <span className="block text-xs text-pending">
-                    In its security hold until {formatDateTime(d.security_hold_until)}
-                  </span>
-                )}
-                {onHold && confirming !== d.id && (
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    className="mt-1.5"
-                    onClick={() => setConfirming(d.id)}
-                  >
-                    End the hold
-                  </Button>
-                )}
-                {/* The claim itself is in the panel below rather than
-                    beside the button, which is the one departure from how
-                    `verifySeller` renders the same kind of attestation: a table
-                    cell has no room to say what is being claimed, and an
-                    attestation made where nobody can read it is the thing that
-                    actually weakens it. */}
-                {!d.verified_at && attesting !== d.id && (
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    className="mt-1.5"
-                    disabled={verifyDest.isPending || !actor}
-                    onClick={() => setAttesting(d.id)}
-                  >
-                    Verify this destination
-                  </Button>
-                )}
-                {/* §5.1's move back. Only offered where it can succeed —
-                    already checked, out of its hold, and not already primary —
-                    because a disabled control that says why is a smaller
-                    surprise than a call the endpoint will refuse. */}
-                {!d.is_primary && d.verified_at && !onHold && (
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    className="mt-1.5"
-                    disabled={promote.isPending || !actor}
-                    onClick={() => promote.mutate(d.id)}
-                  >
-                    {promote.isPending ? 'Moving…' : 'Make primary'}
-                  </Button>
-                )}
-              </Td>
-            </tr>
-          )
-        })}
-      </tbody>
-      {(confirming || attesting || promote.isError) && (
-        <tfoot>
-          <tr>
-            <Td colSpan={6}>
-              <div className="space-y-3 py-1 text-left">
-                {/* Outside the confirm block: promoting has no confirm step, so
-                    its refusal has nowhere else to land. */}
-                {promote.isError && <ErrorNote message={promote.error.message} />}
-                {attesting && (
-                <>
-                <p className="text-sm leading-relaxed text-fg">
-                  Record that{' '}
-                  <Mono>
-                    {destinations.data.find((d) => d.id === attesting)
-                      ?.masked_destination}
-                  </Mono>{' '}
-                  belongs to this seller? PayHold does not check this. You are
-                  recording that you did, against{' '}
-                  <strong className="font-semibold">{actor}</strong>.
-                </p>
-                <p className="text-xs leading-relaxed text-fg-muted">
-                  This is about this destination only — it is not the identity,
-                  sanctions and ownership check, which is Verify on the
-                  onboarding card, and it does not end a security hold. Each
-                  stops a payout on its own.
-                </p>
-                <div className="flex gap-2">
-                  <Button
-                    size="sm"
-                    variant="primary"
-                    disabled={verifyDest.isPending || !actor}
-                    onClick={() =>
-                      verifyDest.mutate(attesting, {
-                        onSuccess: () => setAttesting(null),
-                      })
-                    }
-                  >
-                    {verifyDest.isPending ? 'Recording…' : 'Yes, I checked it'}
-                  </Button>
-                  <Button size="sm" variant="ghost" onClick={() => setAttesting(null)}>
-                    Cancel
-                  </Button>
-                </div>
-                {verifyDest.isError && <ErrorNote message={verifyDest.error.message} />}
-                </>
-                )}
-                {confirming && (
-                <>
-                <p className="text-sm leading-relaxed text-fg">
-                  End the security hold on{' '}
-                  <Mono>
-                    {destinations.data.find((d) => d.id === confirming)
-                      ?.masked_destination}
-                  </Mono>
-                  ? You are recording that you confirmed this change with the
-                  seller themselves — a phone call, a step-up check, something
-                  that was not the same session that made the change. It is
-                  written against{' '}
-                  <strong className="font-semibold">{actor}</strong>.
-                </p>
-                <p className="text-xs leading-relaxed text-fg-muted">
-                  The hold exists because moving a destination and withdrawing is
-                  what an account takeover looks like. It does not verify the
-                  destination — that is a separate attestation and stays
-                  outstanding.
-                </p>
-                <div className="flex gap-2">
-                  <Button
-                    size="sm"
-                    variant="primary"
-                    disabled={endHold.isPending || !actor}
-                    onClick={() =>
-                      endHold.mutate(confirming, {
-                        onSuccess: () => setConfirming(null),
-                      })
-                    }
-                  >
-                    {endHold.isPending ? 'Recording…' : 'Yes, I confirmed it'}
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    onClick={() => setConfirming(null)}
-                  >
-                    Cancel
-                  </Button>
-                </div>
-                {endHold.isError && <ErrorNote message={endHold.error.message} />}
-                </>
-                )}
-              </div>
-            </Td>
-          </tr>
-        </tfoot>
+    <>
+      {((!destination.verified_at && !attesting) || (onHold && !confirming)) && (
+        <div className="mt-4 flex flex-wrap gap-2">
+          {/* The claim itself is in the panel below rather than beside the
+              button: an attestation made where nobody can read what is
+              being claimed is the thing that actually weakens it. */}
+          {!destination.verified_at && !attesting && (
+            <Button
+              size="sm"
+              variant="ghost"
+              disabled={verifyDest.isPending || !actor}
+              onClick={() => setAttesting(true)}
+            >
+              Verify this destination
+            </Button>
+          )}
+          {onHold && !confirming && (
+            <Button size="sm" variant="ghost" onClick={() => setConfirming(true)}>
+              End the hold
+            </Button>
+          )}
+        </div>
       )}
-    </Table>
+
+      {attesting && (
+        <div className="mt-4 space-y-3 rounded-xl bg-surface-2 px-4 py-4">
+          <p className="text-sm leading-relaxed text-fg">
+            Record that <Mono>{destination.masked_destination}</Mono> belongs to this
+            seller? PayHold does not check this. You are recording that you
+            did, against <strong className="font-semibold">{actor}</strong>.
+          </p>
+          <p className="text-xs leading-relaxed text-fg-muted">
+            This is about this destination only — it is not the identity,
+            sanctions and ownership check, which is Verify on the onboarding
+            card, and it does not end a security hold. Each stops a payout on
+            its own.
+          </p>
+          <div className="flex gap-2">
+            <Button
+              size="sm"
+              variant="primary"
+              disabled={verifyDest.isPending || !actor}
+              onClick={() =>
+                verifyDest.mutate(destination.id, { onSuccess: () => setAttesting(false) })
+              }
+            >
+              {verifyDest.isPending ? 'Recording…' : 'Yes, I checked it'}
+            </Button>
+            <Button size="sm" variant="ghost" onClick={() => setAttesting(false)}>
+              Cancel
+            </Button>
+          </div>
+          {verifyDest.isError && <ErrorNote message={verifyDest.error.message} />}
+        </div>
+      )}
+
+      {confirming && (
+        <div className="mt-4 space-y-3 rounded-xl bg-surface-2 px-4 py-4">
+          <p className="text-sm leading-relaxed text-fg">
+            End the security hold on <Mono>{destination.masked_destination}</Mono>? You
+            are recording that you confirmed this change with the seller
+            themselves — a phone call, a step-up check, something that was not
+            the same session that made the change. It is written against{' '}
+            <strong className="font-semibold">{actor}</strong>.
+          </p>
+          <p className="text-xs leading-relaxed text-fg-muted">
+            The hold exists because moving a destination and withdrawing is what
+            an account takeover looks like. It does not verify the destination —
+            that is a separate attestation and stays outstanding.
+          </p>
+          <div className="flex gap-2">
+            <Button
+              size="sm"
+              variant="primary"
+              disabled={endHold.isPending || !actor}
+              onClick={() =>
+                endHold.mutate(destination.id, { onSuccess: () => setConfirming(false) })
+              }
+            >
+              {endHold.isPending ? 'Recording…' : 'Yes, I confirmed it'}
+            </Button>
+            <Button size="sm" variant="ghost" onClick={() => setConfirming(false)}>
+              Cancel
+            </Button>
+          </div>
+          {endHold.isError && <ErrorNote message={endHold.error.message} />}
+        </div>
+      )}
+    </>
   )
 }
 

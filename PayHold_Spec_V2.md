@@ -163,14 +163,14 @@ formal country-launch checklist.
 
 ### 5.1 Payout Preferences and Automatic Routing Center
 
-One seller-facing centre. The seller selects a preferred payout destination,
-verifies ownership, and may add a backup. PayHold then chooses only an eligible
+One seller-facing centre. The seller selects a payout destination and verifies
+ownership — one destination, with no backup (§29.17). PayHold then chooses only an eligible
 route; **it must never silently redirect funds to another destination.**
 
 | Component | Required behavior |
 |---|---|
 | Preferred payout method | Seller chooses bank account, mobile wallet, PayPal, Venmo, Cash App Pay or another method enabled for that seller's country and currency. |
-| Backup method | A secondary verified destination, used only after a failed primary payout and an explicit routing-policy check. |
+| Backup method | **Superseded by §29.17.** A seller has one payout destination; adding one replaces it and the replaced one is kept as history. |
 | Verification | Identity, country, tax information where required, account ownership, sanctions status, and provider onboarding before payouts are enabled. |
 | Eligibility engine | Evaluates seller country, buyer country, currency, provider capability, transaction type, business category, limits, risk score, current provider status. |
 | Routing priority | The seller's preferred eligible method first; otherwise the highest-ranked eligible fallback, with the reason shown. |
@@ -201,8 +201,9 @@ function choosePayoutRoute(input: PayoutContext): EligibleRoute | NoRoute {
 ```
 
 When the primary payout fails, retry per the provider's documented rules, then
-place the payout in `payout_failed` or `payout_blocked`. The verified backup may
-be offered, but the seller must be notified and the change logged. A destination
+place the payout in `payout_failed` or `payout_blocked`. There is no backup to
+offer (§29.17): the amount is kept and the seller is asked for an eligible
+destination. A destination
 changed after funds become available triggers a security delay and a re-check of
 fraud, KYC and account ownership.
 
@@ -216,7 +217,7 @@ detail view identifies the provider and destination used for each payout.
 2. A U.S. seller selects Venmo but is shown a clear ineligibility message outside the U.S.
 3. A China seller selects Alipay or WeChat Pay and is routed only if the approved provider supports seller payouts for that entity.
 4. A seller with no verified destination is blocked from payout.
-5. A primary payout failure does not lose funds and offers the verified backup route.
+5. A primary payout failure does not lose funds. *(Its second half, "offers the verified backup route", is superseded by §29.17: nothing is rerouted, and the seller is asked for a destination.)*
 6. A currency mismatch shows conversion details.
 7. A new payout destination is held for security review.
 8. A disabled provider is removed from checkout and payout selection **without a code redeploy**.
@@ -817,7 +818,7 @@ nothing rather than this one's rows. RLS is only proven against the real project
 (PGlite shims `auth.uid()`), so this is where that check lives.
 
 V2 adds to the gate: a partial refund at each of the four §7.1 lifecycle points;
-a routing failure that falls back to a verified backup; a payout to an unverified
+a routing failure that keeps the money and reroutes nothing (§29.17 — this was a fallback to a verified backup); a payout to an unverified
 seller that must be refused; and a country disabled in data that disappears from
 checkout without a redeploy.
 
@@ -1010,7 +1011,9 @@ nothing to a bank transfer, so "fall back to the next rail" would mean paying a
 different destination — the thing the sentence forbids. The fallback §5.1
 actually gates is the seller's **backup destination**, behind a failed primary
 payout, an explicit policy check and a notification, and that is what
-`route_payout` implements.
+`route_payout` implemented. Since §29.17 there is no backup destination either,
+so nothing is a fallback: a payout that cannot reach the seller's one destination
+keeps its amount and says why.
 
 `route_evaluation` still ranks every rail, because the losing rows are the
 eligibility record §5.1 asks to be stored and are what answers a seller asking
@@ -1187,10 +1190,10 @@ the same shared `dispatchPayout` and are unaffected. A person is not a machine,
 and that distinction is the column's whole purpose.
 
 Two consequences are deliberate. A person's retry is **one** more attempt rather
-than a fresh series, because `route_payout` reads the attempt counter to decide
-whether the seller's verified backup destination may be used (§29.10) and
-resetting it would quietly send the next attempt back to the primary that has
-been failing. And the ladder is the webhook dispatcher's — 1m, 5m, 30m, 2h,
+than a fresh series, because the attempt counter is the retry budget and
+resetting it would hand a rail that keeps refusing a fresh series of automatic
+attempts. (It was also what the backup-destination gate read, §29.10, until
+§29.17 removed backups.) And the ladder is the webhook dispatcher's — 1m, 5m, 30m, 2h,
 capped — because two backoff curves in one system are two things to reason about
 during an incident for no gain.
 
@@ -1210,6 +1213,37 @@ never as a PayHold-authenticated user, and the conflict-of-interest control
 applies to that named person. PayHold still holds and moves the money, and every
 §7.1 and §8 bound on a resolution applies unchanged. An AI draft is never
 approved over an API key.
+
+## 29.17 A seller has one payout destination — Part II ruling, superseding §5.1's backup
+
+§5.1 gives a seller "a preferred payout destination" that they may "add a
+backup" to, and §5.2's fifth case offers that backup after a failed primary. In
+practice the second destination was never chosen as one: every change of
+destination left the previous row behind, so a seller who re-entered their number
+four times had five destinations, each still verifiable and reachable. **A seller
+has exactly one live payout destination.** The backup destination is removed,
+superseding §5.1's "Backup method" row, the backup it offers after a primary
+failure, and §5.2 #5's "offers the verified backup route".
+
+Changing where a seller is paid is **replace-and-archive**. The new destination
+becomes the live one, with the same verification, security hold and step-up any
+new destination gets — replacing a destination is still the account-takeover
+shape §5.1's change protection exists for. The one it replaces is archived.
+**History is kept**: an archived destination is never deleted, because a payout
+already sent has to keep saying where it went, but it cannot be verified, have
+its hold ended, be withdrawn to or be routed to. Returning to a destination used
+before is adding it again.
+
+A primary payout failure still loses no funds. The amount stays where it is, the
+payout says why, and the seller is asked for an eligible destination — §5.1's
+no-route behaviour, which never rerouted invisibly. §29.10's reasoning stands and
+now has nothing left to gate.
+
+Where the rule met existing data, each seller kept the destination money was
+already going to, and nothing was promoted, so no payout moved.
+
+Implemented 2026-09-11, migration `20260911000003`.
+`payhold-backend/tests/one-destination-per-seller.test.ts` is the acceptance spec.
 
 ## References
 

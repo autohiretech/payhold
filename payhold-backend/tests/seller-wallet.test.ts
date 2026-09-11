@@ -348,10 +348,9 @@ describe('requesting a withdrawal', () => {
   })
 
   /**
-   * The attempt counter is what `route_payout` reads to decide whether the
-   * verified backup destination may be used. Zeroing it on a request would send
-   * the next attempt back to the primary that has been failing — the same trap
-   * `reset_payout_retry` documents.
+   * The attempt counter is what the retry budget reads. Zeroing it on a request
+   * would hand a rail that keeps refusing a fresh series of automatic attempts —
+   * the same trap `reset_payout_retry` documents.
    */
   test('does not reset the attempt counter', async () => {
     const tenant = await seedTenant()
@@ -410,85 +409,107 @@ describe('requesting a withdrawal', () => {
   })
 
   describe('choosing a destination', () => {
-    const addDestination = async (
-      tenant: string,
+    /**
+     * The seller's one live destination (§29.17), as registration seeded it,
+     * made verified or held as the case needs.
+     */
+    const liveDestination = async (
       seller: string,
       opts: { verified: boolean; hold?: string },
     ): Promise<string> => {
       const { rows: [d] } = await h.db.query<Tenant>(
-        `insert into seller_destinations
-           (tenant_id, seller_id, country, payout_currency, payout_provider,
-            beneficiary_token, masked_destination, is_backup, verified_at,
-            security_hold_until)
-         values ($1, $2, 'RW', 'RWF', 'flutterwave_momo',
-                 'tok_' || gen_random_uuid(), 'Airtel •••• 9910', true,
-                 case when $3 then now() else null end, $4::timestamptz)
-         returning id`,
-        [tenant, seller, opts.verified, opts.hold ?? null],
+        `update seller_destinations
+            set verified_at = case when $2 then now() else null end,
+                security_hold_until = $3::timestamptz
+          where seller_id = $1 and archived_at is null
+          returning id`,
+        [seller, opts.verified, opts.hold ?? null],
       )
       return d.id
     }
+
+    const withdrawTo = (seller: string, destination: string) =>
+      h.db.query(`select * from request_withdrawal($1, 'seller-app', $2)`, [seller, destination])
 
     test('refuses a destination belonging to someone else', async () => {
       const tenant = await seedTenant()
       const seller = await seedSeller(tenant)
       const stranger = await seedSeller(tenant, 'Stranger')
-      const theirs = await addDestination(tenant, stranger, { verified: true })
+      const theirs = await liveDestination(stranger, { verified: true })
 
-      await rejects(
-        () => h.db.query(
-          `select * from request_withdrawal($1, 'seller-app', $2)`, [seller, theirs],
-        ),
-        /does not belong to seller/,
+      await rejects(() => withdrawTo(seller, theirs), /destination_not_live/)
+    })
+
+    /** §29.17: a replaced destination is history, even one that was verified. */
+    test('refuses a destination that has been replaced', async () => {
+      const tenant = await seedTenant()
+      const seller = await seedSeller(tenant)
+      const old = await liveDestination(seller, { verified: true })
+      await h.db.query(
+        `select add_seller_destination($1, $2, 'RW', 'RWF', 'flutterwave_momo',
+                                       'tok_new', 'MTN •••• 0001', null, 'primary', 'api')`,
+        [seller, tenant],
       )
+
+      await rejects(() => withdrawTo(seller, old), /destination_not_live/)
     })
 
     test('refuses an unverified destination', async () => {
       const tenant = await seedTenant()
       const seller = await seedSeller(tenant)
-      const dest = await addDestination(tenant, seller, { verified: false })
+      const dest = await liveDestination(seller, { verified: false })
 
-      await rejects(
-        () => h.db.query(
-          `select * from request_withdrawal($1, 'seller-app', $2)`, [seller, dest],
-        ),
-        /has not been verified/,
-      )
+      await rejects(() => withdrawTo(seller, dest), /has not been verified/)
     })
 
     /** §5.1's change protection, and the account-takeover shape it catches. */
     test('refuses a destination still inside its security hold', async () => {
       const tenant = await seedTenant()
       const seller = await seedSeller(tenant)
-      const dest = await addDestination(tenant, seller, {
+      const dest = await liveDestination(seller, {
         verified: true,
         hold: new Date(Date.now() + 3_600_000).toISOString(),
       })
 
-      await rejects(
-        () => h.db.query(
-          `select * from request_withdrawal($1, 'seller-app', $2)`, [seller, dest],
-        ),
-        /security hold/,
-      )
+      await rejects(() => withdrawTo(seller, dest), /security hold/)
     })
 
     test('records the chosen destination on the payout', async () => {
       const tenant = await seedTenant()
       const seller = await seedSeller(tenant)
-      const dest = await addDestination(tenant, seller, { verified: true })
+      const dest = await liveDestination(seller, { verified: true })
       const deal = await seedFundedDeal(tenant, seller)
       await release(deal)
       await mature(deal)
 
-      await h.db.query(
-        `select * from request_withdrawal($1, 'seller-app', $2)`, [seller, dest],
-      )
+      await withdrawTo(seller, dest)
 
       const { rows: [p] } = await h.db.query<{ requested_destination_id: string }>(
         `select requested_destination_id from payouts where deal_id = $1`, [deal],
       )
       expect(p.requested_destination_id).toBe(dest)
+    })
+
+    /** What live AutoHire sends: `{}`. The live destination, by default. */
+    test('naming no destination is still valid', async () => {
+      const tenant = await seedTenant()
+      const seller = await seedSeller(tenant)
+      const deal = await seedFundedDeal(tenant, seller)
+      await release(deal)
+      await mature(deal)
+
+      await h.db.query(`select * from request_withdrawal($1, 'seller-app')`, [seller])
+
+      const { rows: [p] } = await h.db.query<{
+        requested: Date | null
+        requested_destination_id: string | null
+      }>(
+        `select withdrawal_requested_at as requested, requested_destination_id
+           from payouts where deal_id = $1`,
+        [deal],
+      )
+      expect(p.requested).not.toBeNull()
+      expect(p.requested_destination_id).toBeNull()
     })
   })
 })

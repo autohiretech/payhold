@@ -74,7 +74,7 @@ environment or a build log.
 | `deals` | create (with §14's `completion_policy`), list, get, `/pay`, `/confirm`, `/refund`, `/deposit`, `/capture`, `/release-deposit`, `/cancel` (an unfunded deal only — `created`, `checkout_started`, `payment_failed`; a payment in flight is refused, anything funded is a refund) |
 | `checkout` | §10.1's sessions. `/sessions` for the client's server; `/public/:token` for the buyer, with no credential |
 | `payment-options` | what a buyer in a market can pay with; the catalogue a client renders its checkout from |
-| `sellers` | register (destination optional), list (`?external_user_id=` finds the client's own handle), `/wallets`, `/:id/capabilities`, `/:id/balance`, `/:id/withdraw`, `/:id/verify` (person-only), `/:id/active` (status only, no payout effect), `/:id/destinations` and `/:id/destinations/:id/end-hold` (person-only), `/:id/connect/onboard`, `/:id/connect/session` and `/:id/connect/status` (Stripe Connect onboarding, redirected or embedded — see below) |
+| `sellers` | register (destination optional), list (`?external_user_id=` finds the client's own handle), `/wallets`, `/:id/capabilities`, `/:id/balance`, `/:id/withdraw`, `/:id/verify` (person-only), `/:id/active` (status only, no payout effect), `/:id/destinations` (the one live destination; a POST replaces it, §29.17; `?include=archived` for history), `/:id/destinations/:id/verify` and `/:id/destinations/:id/end-hold` (person-only), `/:id/connect/onboard`, `/:id/connect/session` and `/:id/connect/status` (Stripe Connect onboarding, redirected or embedded — see below) |
 | `balance` | four buckets per currency, or `?by=rail` |
 | `ledger` | the entries behind those buckets, filterable by deal. No writer, on any method |
 | `audit-log` | who did what, including every act that moved no money |
@@ -1436,10 +1436,11 @@ could give them one. A seller whose MoMo line was cut off had no way through the
 API to say so. `POST /v1/sellers/:id/destinations` is this function's only
 caller.
 
-It is SQL because moving the primary is a *swap*: `seller_destinations_one_primary`
-refuses the overlap, so the demote and the insert have to be one transaction,
-and the window between two statements is a seller with no primary destination at
-all — which every reader correctly reads as unpayable. The provider call stays
+It is SQL because changing the destination is two writes that must be one:
+`seller_destinations_one_primary` (and, since §29.17, `_one_live`) refuses the
+overlap, so the old row has to stop being live before the new one is inserted,
+and the window between two statements is a seller with no destination at all —
+which every reader correctly reads as unpayable. The provider call stays
 in the Edge Function; Postgres does not make HTTP requests, and a transaction
 held open across a provider round trip is a lock held across someone else's
 outage.
@@ -1449,10 +1450,10 @@ argument turns either off. Each condition independently stops a payout,
 `screen_payout` holds anything already scheduled off `destination_changed_at`,
 and together they are §5.1's change protection: "get in, move the destination,
 withdraw" is the shape of an account takeover, and this is what puts a person
-between the second step and the third. The outgoing destination is demoted and
-never deleted — a paid payout still has to say where it went, and a seller
-moving back to an account PayHold has already verified should not serve a second
-hold for it.
+between the second step and the third. The outgoing destination is archived and
+never deleted — a paid payout still has to say where it went. Since §29.17 a
+seller has exactly one live destination; see "One destination per seller"
+below.
 
 ## Ending a hold, and three readers of one fact — migration `20260809000002`
 
@@ -1481,6 +1482,8 @@ Three smaller decisions:
 - **It does not verify the destination.** Both conditions stop a payout on their
   own and §5.1 wants both. Ending one quietly satisfying the other is precisely
   the shape being defended against.
+- **It refuses an archived destination** (`destination_archived`, 409) since
+  §29.17: a replaced row's hold is history, and so is its verification.
 
 **The reason `screen_payout` is in this migration is that one hold was read
 three ways.** `seller_capabilities` and `route_payout` read
@@ -1495,41 +1498,93 @@ another, which is the failure returning every reason at once exists to prevent.
 The stamp now wins wherever it exists, and both readers emit the identical
 sentence.
 
-## Moving back — migration `20260809000003`
+## One destination per seller — §29.17, migration `20260911000003`
 
-`add_seller_destination` always **inserts**, which is right for a destination
-nobody has seen and wrong for one already tokenized, verified and held once. So
-a seller whose new destination turned out to be unroutable — a card in a market
-Stripe cannot pay into, which is the case that found this — could only reach
-their old line by re-registering it: a second token, a second hold, and the
-verified row sitting right beside it unreachable by any endpoint. The header of
-`20260809000001` already said that should not happen.
+A seller has **one live payout destination**, and `add_seller_destination`
+replaces it. The old writer demoted the primary and inserted beside it, forever,
+so one host's four re-saves read as five destinations — four "Other" rows that
+were still verifiable, still endable, and reachable by a withdrawal naming one or
+by `route_payout`'s backup branch. Nobody had chosen any of them.
 
-`promote_seller_destination` swaps which row is primary and writes no new row.
-Two things keep it from being a way around the hold, and both are re-read under
-the seller's lock rather than trusted from the endpoint:
+**Replace is archive-then-insert, under the seller's lock.** Every live row gets
+`archived_at = now()` and loses both roles; after the insert — the foreign key is
+checked per statement, so not before — each gets `replaced_by` the new id. The
+new row is primary with **exactly** the verification, hold and auto-verify
+behaviour it had before: one row is not a reason to relax change protection,
+because replacing is still "get in, move the destination, withdraw". The archive
+writes `is_primary = false`, which `sync_primary_destination` returns early on,
+so the seller's columns move only with the new primary's insert. The
+`seller.destination_added` audit row gains `archived_destination_ids`. The
+insert's `returning * into d` comes before the `replaced_by` update, which returns
+nothing into `d` — `20260909000007`'s trap, avoided rather than rediscovered.
 
-- **it refuses an unverified destination** — you cannot promote past a check
-- **it refuses one still inside its hold** — nor past the clock
+**Rows are archived, never deleted.** `payouts.destination_id`,
+`payouts.requested_destination_id` and `payout_decisions.destination_id` are all
+`on delete set null`, and `dispatchPayout` throws when a routed decision's row is
+gone, so a delete would erase where a paid payout went and strand one still
+`processing`. `tests/one-destination-per-seller.test.ts` pins that no function,
+migration or Edge Function deletes from the table. (A sandbox reset deleting a
+tenant's own sellers cascades; that is a wipe refused once live, not a
+destination change.)
 
-So it is a **narrower** door than `end_destination_hold` next door, which a
-person can open on a destination nobody has checked. Promotion opens nothing; it
-picks between destinations already checked, and a takeover's freshly added row
-fails both guards.
+The shape is Postgres's to enforce, not a writer's to remember:
 
-**It stamps `security_hold_until = coalesce(security_hold_until, now())` on the
-way through, and `20260809000002` is what makes that expressible.**
-`sync_primary_destination` sets `sellers.destination_changed_at = now()` whenever
-the primary's token moves — correctly, it did move — and `screen_payout` reads
-that as a hold. Without the stamp a promotion would arm a fresh 24 hours against
-the destination that just passed the test for needing none. A row seeded by
-`sellers_seed_primary_destination` carries no stamp at all, which is exactly the
-row this is for. **The fallback is not a transitional kindness**:
-`sellers_seed_primary_destination` writes no expiry, so a seller whose primary
-was seeded at registration has only `destination_changed_at` to go on and must
-keep exactly the protection it gives them. `create or replace` with an identical
-signature, so no `drop function` — but the revoke is reissued, because a
-recreated function is granted to PUBLIC again.
+| | |
+|---|---|
+| `seller_destinations_one_live` | unique on `seller_id` where `archived_at is null` — two live rows are impossible |
+| `seller_destinations_archived_not_primary` | an archived row is never primary, which is why every `where is_primary` reader (`seller_capabilities`, `screen_payout`, `verify_seller`) needed no change |
+| `seller_destinations_no_backup` | `is_backup` is always false. The column stays because a live client maps it off the API |
+
+**What an archived row cannot do**, each refused under its own lock.
+`verify_seller_destination` and `end_destination_hold` raise
+`destination_archived` (409 at the edge, in either verification direction).
+`request_withdrawal` accepts a `p_destination` only when it is the live primary
+and raises `destination_not_live` otherwise (400 — another seller's row and a
+non-uuid included; `_shared/seller-destination.ts` refuses the second before
+SQL), and an absent one is unchanged. `route_payout` reads `archived_at is null`
+on both destination lookups, so a payout that requested a since-replaced row
+falls through to the primary, exactly as a requested destination whose
+verification was withdrawn always has.
+
+**The backup destination and the move back are gone.** `route_payout` lost its
+backup branch — `allow_backup`, the `is_backup` read, the
+`payout_primary_attempts` / `payout_backup_enabled` settings (removed from
+`settings.ts`; nothing else read them) and the `payout.route_changed` audit and
+webhook only it could cause. `payout_decisions.is_fallback` stays for decisions
+already recorded, and every new one writes `false`.
+`promote_seller_destination` is dropped, and its endpoint with it; a POST to the
+old `/promote` path is now an unknown route rather than an attempt to register a
+destination. Returning to a destination used before is adding it again, with a
+new hold.
+
+**`add_seller_destination` kept its signature, `p_role` included.** PostgREST
+matches a function by argument names, so dropping the parameter would have made
+every call from the functions still deployed between `db push` and
+`functions deploy` fail to resolve. It accepts `'primary'` or null and raises
+`backup_destination_removed` for anything else. The Edge Function refuses the
+same thing with a 400 before tokenizing — live AutoHire sends `role: 'primary'`
+on every save, and that and an absent role are accepted silently — and no longer
+sends `p_role` at all. The revokes (`public`, `anon`, `authenticated`,
+`payhold_ai`) and the `service_role` grant are reissued anyway, and
+`verify_seller_destination` gained the `payhold_ai` revoke it was missing.
+
+**The backfill kept where money goes.** A seller with a primary kept it with no
+column written, so the sync trigger had nothing to copy; every other live row,
+backups included, was archived with `replaced_by = null` and one
+`seller.destination_archived` audit row as `system`. A seller with live rows and
+no primary — a backup added to a seller registered without a destination — kept
+the newest row **unpromoted**, because routing reads only the primary and
+promoting it would have started paying a destination nothing was paying. The
+index is created after the backfill in the same migration, and a second run
+archives nothing. The backfill test stops the harness one migration short
+(`migrated({ stopBefore })`), because a fully migrated database cannot hold the
+rows the backfill exists to fix.
+
+`GET /v1/sellers/:id/destinations` returns the live row, as a list of one or
+none; `?include=archived` adds the replaced ones, newest first, with
+`archived_at` and `replaced_by`. `/connect/status` is still the only onboarding
+path that writes a destination, and only once Stripe reports `payouts_enabled`,
+so a half-finished onboarding never archives a working one.
 
 ## Payout routing — §5.1, migrations `20260807000008` and `20260807000009`
 
@@ -1617,9 +1672,9 @@ the same transfer, and it books then. Booking first would report a seller paid
 who was not.
 
 The rail and the beneficiary token both come from the routing decision now, not
-from `payoutProviderFor(seller.country, …)` and `sellers.beneficiary_token`. A
-seller has more than one destination and only the decision knows which was
-picked.
+from `payoutProviderFor(seller.country, …)` and `sellers.beneficiary_token`.
+Only the decision knows which row was picked, and that row may have been replaced
+— archived, never deleted — since.
 
 `held_for_review` is absent from `DISPATCHABLE` and must stay absent — cron may
 never be the thing that lets a held payout through. `blocked` and
@@ -1649,9 +1704,8 @@ settled.
 ### Retry and the clock — §13, migration `20260807000014`
 
 `failed` joined `DISPATCHABLE`, so a refused transfer is now re-sent by the
-cron. Until this landed nothing automatic retried a payout at all: Phase 5 built
-the backup-destination *selection* for a retry and left the retry itself to a
-person pressing a button.
+cron. Until this landed nothing automatic retried a payout at all: the retry
+itself was left to a person pressing a button.
 
 **`payouts.next_attempt_at` is the whole mechanism, and null is the interesting
 value.** It means no machine may try this payout again. The cron filters
@@ -1671,11 +1725,11 @@ doing anything; a rail that refused us five times does not.
 Three consequences worth knowing:
 
 - **The attempt counter is never reset**, including by `reset_payout_retry`,
-  which is what `/payouts/:id/retry` calls before it dispatches. `route_payout`
-  reads `attempts >= payout_primary_attempts` to decide whether the seller's
-  verified backup destination may be used, so zeroing it would quietly send the
-  next attempt back to the primary that has been failing. A person's retry is
-  one more attempt, not a fresh series.
+  which is what `/payouts/:id/retry` calls before it dispatches. It is what
+  `payout_retry_max_attempts` is measured against, so zeroing it would hand a
+  rail that keeps refusing a fresh series of automatic attempts. (It was also the
+  backup-destination gate until §29.17 removed backups.) A person's retry is one
+  more attempt, not a fresh series.
 - **`mark_payout_processing` had to accept `failed`.** The second attempt on an
   async rail arrives from that status, since `route_payout` only rewrites
   `blocked`. The bug predates phase 9 and nothing reached it, because the only
@@ -1731,9 +1785,8 @@ and §12's whole point is that there must not be a second way to pay a seller
 nobody verified.
 
 `attempts` is untouched, for the reason `reset_payout_retry` leaves it untouched:
-`route_payout` reads it to decide whether the verified backup destination may be
-used, so zeroing it would quietly send the next attempt back to the primary that
-has been failing. `held_for_review` is absent from the statuses it stamps, for
+it is the retry budget, and zeroing it would hand a rail that keeps refusing a
+fresh series. `held_for_review` is absent from the statuses it stamps, for
 the reason it is absent from `DISPATCHABLE`.
 
 `withdrawal_requested_at` is **never cleared**, including when the payout is
@@ -1744,8 +1797,10 @@ when a seller disputes a transfer.
 
 The only change to it is the destination lookup: the seller's requested
 destination, if the payout carries one and it still stands, else their primary
-exactly as before. Every eligibility check, the backup policy, the decision row,
-`route_reason_text` and the `payout.route_changed` webhook are untouched.
+exactly as before. Every eligibility check, the decision row and
+`route_reason_text` are untouched. (`20260911000003` recreated it again: both
+lookups skip archived rows, and the backup policy and its `payout.route_changed`
+webhook are gone — §29.17.)
 
 The verification and security-hold conditions are **re-checked there** rather
 than trusted from `request_withdrawal`, because a verification can be withdrawn

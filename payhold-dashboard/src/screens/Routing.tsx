@@ -1,14 +1,17 @@
 /**
  * The Routing Center — spec §5.1.
  *
- * Three questions, in the order somebody actually asks them:
+ * Two questions, in the order somebody actually asks them:
  *
  *   1. **What is stopped, and why?** Every payout that is not moving, with the
  *      recorded decision behind it and every route that was considered.
  *   2. **Where can money go at all?** `payout_routes`, which is data rather than
  *      code precisely so a corridor can be closed without a deploy.
- *   3. **Where would it land?** Every destination this account has registered,
- *      and whether it is verified.
+ *
+ * Where one seller's money would land is on that seller's page. A seller has one
+ * live destination (§29.17) and destinations are read per seller — there is no
+ * account-wide list, and this screen used to ask for one and render the refusal
+ * as an empty table.
  *
  * The screen is **read-only, and that is structural**. Enablement is a row an
  * operator changes deliberately, and a dashboard that could switch its own
@@ -50,7 +53,6 @@ import {
 } from '@/lib/format'
 import {
   countryFlag,
-  countryName,
   PAYOUT_PROVIDER_LABEL,
   routeReasonText,
 } from '@/lib/rails'
@@ -58,7 +60,6 @@ import {
   keys,
   usePayoutRoutes,
   usePayouts,
-  useSellerDestinations,
   useSellers,
 } from '@/lib/queries'
 
@@ -82,7 +83,6 @@ export function RoutingPage() {
   const payouts = usePayouts()
   const routes = usePayoutRoutes()
   const sellers = useSellers()
-  const destinations = useSellerDestinations()
   const now = new Date()
 
   const stuck = (payouts.data ?? []).filter((p) => STUCK.includes(p.status))
@@ -101,7 +101,6 @@ export function RoutingPage() {
   const sellerFor = (id: string) => sellers.data?.find((s) => s.id === id)
 
   const live = (routes.data ?? []).filter((r) => r.enabled && r.supports_payouts)
-  const unverifiedDestinations = (destinations.data ?? []).filter((d) => !d.verified_at)
 
   return (
     <>
@@ -110,7 +109,7 @@ export function RoutingPage() {
         subtitle="Which rail carries a payout, why, and what is stopping the ones that are stopped."
       />
 
-      <div className="mb-8 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+      <div className="mb-8 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
         <StatTile
           label="Payouts stopped"
           value={String(stuck.length)}
@@ -123,15 +122,9 @@ export function RoutingPage() {
           hint="The rest are declared and switched off"
         />
         <StatTile
-          label="Destinations"
-          value={String(destinations.data?.length ?? 0)}
-          hint={`${unverifiedDestinations.length} not yet verified`}
-          tone={unverifiedDestinations.length > 0 ? 'pending' : 'neutral'}
-        />
-        <StatTile
           label="Sellers"
           value={String(sellers.data?.length ?? 0)}
-          hint="Each needs at least one destination to be payable"
+          hint="Each is paid to one destination, shown on their own page"
         />
       </div>
 
@@ -256,82 +249,6 @@ export function RoutingPage() {
         </p>
       </Card>
 
-      {/* -- 3. Where money would land ----------------------------------------- */}
-
-      <Card>
-        <CardHeader
-          title="Destinations"
-          subtitle="§5.1: a preferred destination and, optionally, one verified backup. A route is never a fallback for another route — the fallback is the seller's second destination, and only after a failed primary."
-        />
-        {destinations.isPending ? (
-          <div className="space-y-2 p-6">
-            {[0, 1].map((i) => (
-              <Skeleton key={i} className="h-9" />
-            ))}
-          </div>
-        ) : !destinations.data?.length ? (
-          <EmptyState
-            title="No destinations"
-            body="Register a seller and one is created with them."
-          />
-        ) : (
-          <Table>
-            <thead>
-              <tr>
-                <Th>Seller</Th>
-                <Th>Role</Th>
-                <Th>Destination</Th>
-                <Th>Method</Th>
-                <Th>Market</Th>
-                <Th align="right">Verified</Th>
-              </tr>
-            </thead>
-            <tbody>
-              {destinations.data.map((d) => {
-                const onHold =
-                  d.security_hold_until !== null &&
-                  new Date(d.security_hold_until) > now
-                return (
-                  <tr key={d.id} className="hover:bg-surface-2">
-                    <Td className="font-medium">
-                      <Link
-                        className="text-brand hover:underline"
-                        to={`/sellers/${d.seller_id}`}
-                      >
-                        {sellerFor(d.seller_id)?.name ?? d.seller_id}
-                      </Link>
-                    </Td>
-                    <Td className="text-fg-muted">
-                      {d.is_primary ? 'Preferred' : d.is_backup ? 'Backup' : 'Other'}
-                    </Td>
-                    <Td>
-                      <Mono>{d.masked_destination}</Mono>
-                    </Td>
-                    <Td className="text-fg-muted">
-                      {PAYOUT_PROVIDER_LABEL[d.payout_provider]} · {d.payout_currency}
-                    </Td>
-                    <Td className="text-fg-muted">
-                      {countryFlag(d.country)} {countryName(d.country)}
-                    </Td>
-                    <Td align="right" className="text-fg-muted">
-                      {d.verified_at ? (
-                        formatRelative(d.verified_at, now)
-                      ) : (
-                        <span className="font-semibold text-danger">Not verified</span>
-                      )}
-                      {onHold && (
-                        <span className="block text-xs text-pending">
-                          In its security hold
-                        </span>
-                      )}
-                    </Td>
-                  </tr>
-                )
-              })}
-            </tbody>
-          </Table>
-        )}
-      </Card>
     </>
   )
 }

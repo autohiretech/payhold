@@ -65,15 +65,13 @@ export interface Harness {
   close(): Promise<void>
 }
 
-export async function migrated(): Promise<Harness> {
-  // pgcrypto is a contrib extension: Supabase ships it, PGlite needs it loaded
-  // explicitly. `gen_random_uuid()` is every table's primary key default, so
-  // nothing applies without it.
-  const db = new PGlite({ extensions: { pgcrypto } })
-  await db.exec('create extension if not exists pgcrypto;')
-  await db.exec(AUTH_SHIM)
+/** Every migration file, in the order `db push` applies them. */
+export function migrationFiles(): string[] {
+  return readdirSync(MIGRATIONS).filter((f) => f.endsWith('.sql')).sort()
+}
 
-  const files = readdirSync(MIGRATIONS).filter((f) => f.endsWith('.sql')).sort()
+/** Apply migration files in order, naming the one that failed. */
+export async function applyMigrations(db: PGlite, files: string[]): Promise<void> {
   for (const file of files) {
     const sql = readFileSync(join(MIGRATIONS, file), 'utf8')
     try {
@@ -82,6 +80,28 @@ export async function migrated(): Promise<Harness> {
       throw new Error(`migration ${file} failed: ${(err as Error).message}`)
     }
   }
+}
+
+/**
+ * A database migrated up to — not including — `stopBefore`, when given.
+ *
+ * A backfill only means something against rows that existed before it ran, and
+ * a fully migrated database cannot hold them: the constraint the backfill makes
+ * room for already refuses them. So a backfill test stops one file short,
+ * writes the old shape, then applies the rest with `applyMigrations`.
+ */
+export async function migrated(opts: { stopBefore?: string } = {}): Promise<Harness> {
+  // pgcrypto is a contrib extension: Supabase ships it, PGlite needs it loaded
+  // explicitly. `gen_random_uuid()` is every table's primary key default, so
+  // nothing applies without it.
+  const db = new PGlite({ extensions: { pgcrypto } })
+  await db.exec('create extension if not exists pgcrypto;')
+  await db.exec(AUTH_SHIM)
+
+  const files = migrationFiles()
+  const stop = opts.stopBefore ? files.indexOf(opts.stopBefore) : files.length
+  if (stop < 0) throw new Error(`no migration named ${opts.stopBefore}`)
+  await applyMigrations(db, files.slice(0, stop))
 
   return {
     db,

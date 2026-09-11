@@ -362,12 +362,19 @@ export interface SellerDestination {
   beneficiary_token: string
   masked_destination: string
   is_primary: boolean
-  /** Used only after a failed primary payout and an explicit policy check. */
+  /**
+   * Always false since §29.17 removed backup destinations. Kept on the wire
+   * because a live client maps it.
+   */
   is_backup: boolean
   /** Null means ownership has not been confirmed. */
   verified_at: Timestamp | null
   /** §5.1's change protection: a newly added destination waits. */
   security_hold_until: Timestamp | null
+  /** Null on the seller's one live destination; set once it was replaced. */
+  archived_at: Timestamp | null
+  /** The destination that replaced this one, when one did. */
+  replaced_by: string | null
   created_at: Timestamp
 }
 
@@ -794,8 +801,13 @@ export interface AddDestinationInput {
   country?: Country
   payout_currency?: Currency
   label?: string
-  /** 'primary' moves where the money goes. Defaults to primary. */
-  role?: 'primary' | 'backup'
+  /**
+   * Accepted for clients written before §29.17 and ignored: absent or
+   * `'primary'` is the only request there is, because adding a destination
+   * replaces the seller's one live destination. Anything else is refused with
+   * `backup_destination_removed`.
+   */
+  role?: 'primary'
   /** The wallet, for a mobile money destination. See `CreateSellerInput`. */
   network?: string
   /** The bank's own code, for a bank-account destination. */
@@ -854,6 +866,15 @@ export type PayHoldErrorCode =
    * outcome sent again is not an error — it returns the dispute unchanged.
    */
   | 'dispute_already_resolved'
+  /**
+   * §29.17. A seller has one payout destination: `role` other than `'primary'`
+   * on an add is refused (400), a withdrawal naming a destination that is not
+   * the live one is refused (400), and verifying or ending the hold on a
+   * replaced destination conflicts with its state (409).
+   */
+  | 'backup_destination_removed'
+  | 'destination_not_live'
+  | 'destination_archived'
 
 /** Every failure the API can return, as a typed error. */
 export class PayHoldError extends Error {
@@ -889,4 +910,10 @@ export const ERROR_STATUS: Record<PayHoldErrorCode, number> = {
   // The same status the verification relay's refusal has always had.
   dispute_relay_off: 422,
   dispute_already_resolved: 409,
+  // §29.17. A malformed request shape, so 400 — the caller asked for a second
+  // destination that cannot exist, or named one that is not the live row.
+  backup_destination_removed: 400,
+  destination_not_live: 400,
+  // The row exists and is history; the request conflicts with its state.
+  destination_archived: 409,
 }

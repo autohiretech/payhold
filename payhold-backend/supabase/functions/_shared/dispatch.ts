@@ -231,8 +231,9 @@ export async function dispatchPayout(
   // The destination the routing engine chose — §5.1's record of where this
   // money went, read from `seller_destinations` rather than from the seller's
   // copy of it. That copy exists because Phase 4 could not move fifty call
-  // sites at once; this is the one that had to move, because a seller now has
-  // more than one destination and only the decision knows which was picked.
+  // sites at once; this is the one that had to move, because only the decision
+  // knows which row was picked — and since §29.17 that row may have been
+  // replaced (archived, never deleted) while the payout was in flight.
   //
   // The rail and country ride along with the token: an adapter cannot tell a
   // wallet from a bank account by its token, and Flutterwave's Kenya M-Pesa

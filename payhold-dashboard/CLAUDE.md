@@ -546,7 +546,7 @@ knows about them: onboarding state, destinations and route, every deal, every
 payout, every signal their name is on, and where their buyers paid from. It is a
 record and not a verdict — nothing on it scores anybody.
 
-**It carries two actions and neither is a payout decision.** Clearing a payout
+**It carries three actions and none is a payout decision.** Clearing a payout
 hold still belongs on Payouts, because that is a question about one payment.
 Both of these are facts about the seller, §12 and §5.1 require a person to record
 them, and this is the page that person is looking at. Each takes the name from
@@ -555,30 +555,33 @@ forge one — and each is refused an API key at the endpoint.
 
 - **Verify** (`verifySeller`, on the Onboarding card) attests that the identity
   check, the sanctions screen and the ownership check came back.
-- **End the hold** (`endDestinationHold`, on the destinations row that is in
-  one) is §5.1's step-up: somebody confirmed the change with the seller
-  themselves. The confirm panel says so in those words, because the thing being
-  attested to is that the confirmation came from *outside* the session that made
-  the change — the hold exists because "get in, move the destination, withdraw"
-  is what a takeover looks like.
-- **Make primary** (`promoteSellerDestination`, on a non-primary row) is the
-  move back, and it is offered only where it can succeed: verified, out of its
-  hold, not already primary. A disabled control that says why is a smaller
-  surprise than a call the endpoint will refuse.
+- **Verify this destination** (`verifySellerDestination`) and **End the hold**
+  (`endDestinationHold`), on the seller's one live destination, both in
+  `LiveDestinationActions` — its own component, holding its own state, mutations
+  and confirm panels, so who may make these attestations can change without
+  touching the card. Ending the hold is §5.1's step-up: somebody confirmed the
+  change with the seller themselves. The confirm panel says so in those words,
+  because the thing being attested to is that the confirmation came from
+  *outside* the session that made the change — the hold exists because "get in,
+  move the destination, withdraw" is what a takeover looks like.
+
+**A seller has one payout destination (§29.17), so it is one card, not a
+table.** Adding a destination replaces it. The ones it replaced sit under a
+collapsed **Previous destinations (N)**, read-only with the date each was
+replaced, from `listSellerDestinations(id, { includeArchived: true })` — the
+endpoints refuse to verify or release an archived row, so there is nothing to
+press. Preferred/Backup/Other and Make primary are gone with the backup
+destination.
 
 They stay separate acts with separate audit rows, and ending a hold leaves the
-destination unverified — the row still says so afterwards, which is correct and
+destination unverified — the card still says so afterwards, which is correct and
 not a stale render.
 
-**Only "End the hold" has a confirm step, and the asymmetry is deliberate.**
-Verifying is one click with its sentence rendered beside the button rather than
-behind it: the attestation is not weakened by dropping a second click, it is
-weakened by being made where nobody can see what is claimed, so the sentence
-moved out from behind the click instead of being deleted. Promoting has no
-confirm because it reaches nothing new — both guards are on the endpoint, so a
-stray click moves a seller between two destinations somebody already attested to.
-Ending a hold is the one that overrides a live security control on a destination
-nobody has checked, and that one keeps its panel.
+**The destination attestations each have a confirm panel with the claim written
+out; verifying the seller does not.** That one is a single click with its
+sentence rendered beside the button. An attestation is not weakened by dropping a
+second click, it is weakened by being made where nobody can see what is claimed —
+and a destination action has no room beside its button for the sentence.
 
 The onboarding card renders `getSellerCapabilities`, which returns **every**
 reason rather than the first. The two lists stay visually apart because they are
@@ -660,15 +663,16 @@ enablement is a row an operator changes.
 
 **A route is never a fallback for another route.** §5.1 forbids silently
 redirecting funds to another destination, and a destination is a token minted
-for one rail — so the fallback is the seller's **backup destination**, gated on
-a failed primary, `payout_primary_attempts`, `payout_backup_enabled`, and the
-backup being verified and out of its security hold. Taking it emits
-`payout.route_changed` once.
+for one rail — and since §29.17 there is no second destination to fall to
+either: a seller has one, and a payout that cannot reach it keeps its amount and
+says why.
 
 **Destinations are their own table.** `seller_destinations` is the record;
 `Seller.beneficiary_token` and `masked_destination` are the primary's copy, kept
 in step by a trigger with exactly one writer — which is also why creating a
-seller here is one call and not two.
+seller here is one call and not two. Destinations are read per seller: the
+Routing Center does not list them, because there is no account-wide read, and it
+used to ask for one and render the refusal as an empty table.
 
 **Two new payout statuses, separated by who ends them.** `held_for_review` needs
 a named approval; `needs_verification` (§12) needs an attestation and is

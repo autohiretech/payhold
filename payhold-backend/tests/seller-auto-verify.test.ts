@@ -217,6 +217,16 @@ describe('on — the tenant attests once for the account', () => {
     expect(dest.verified_at).not.toBeNull()
     expect(dest.in_hold).toBe(false)
     expect((await capabilities(seller)).can).toBe(true)
+
+    // §29.17: it replaced the seeded destination rather than joining it. The
+    // flag changes what the new row carries, never how many live rows there are.
+    const { rows: [n] } = await h.db.query<{ live: number; archived: number }>(
+      `select count(*) filter (where archived_at is null)::int as live,
+              count(*) filter (where archived_at is not null)::int as archived
+         from seller_destinations where seller_id = $1`,
+      [seller],
+    )
+    expect(n).toEqual({ live: 1, archived: 1 })
   })
 
   test('the audit trail says the flag did it, not a person', async () => {

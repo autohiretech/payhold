@@ -249,11 +249,14 @@ export interface PayHoldClient {
    */
   getPayoutOptions(country: Country, currency?: Currency): Promise<PayoutOptions>
   /**
-   * §5.1: a seller has a preferred destination and may have a verified backup,
-   * which one pair of columns on the seller could not express. Omit the id for
-   * every destination this account has.
+   * §29.17: the seller's one live destination, as a list of one or none. With
+   * `includeArchived`, also the destinations it replaced, newest first, for
+   * history. There is no account-wide list — destinations hang off a seller.
    */
-  listSellerDestinations(sellerId?: string): Promise<SellerDestination[]>
+  listSellerDestinations(
+    sellerId: string,
+    options?: { includeArchived?: boolean },
+  ): Promise<SellerDestination[]>
   /**
    * §12: can this seller be paid, and if not, what is missing — every reason,
    * so onboarding is not one round trip per missing document.
@@ -294,23 +297,11 @@ export interface PayHoldClient {
     destinationId: string,
   ): Promise<SellerDestination>
   /**
-   * §5.1's move back: make an already-verified destination primary again,
-   * without the second hold `POST /destinations` would impose on a row this
-   * system has already checked. Refused for an unverified destination and for
-   * one still inside its hold, so it reaches nothing new.
-   */
-  promoteSellerDestination(
-    sellerId: string,
-    destinationId: string,
-  ): Promise<SellerDestination>
-  /**
    * §5.1's attestation for one destination: this account belongs to the seller.
    *
    * Separate from `verifySeller`, which stamps identity, sanctions and
-   * ownership — and which only ever stamped the *primary* destination. A
-   * backup displaced before anyone checked it could not be verified and could
-   * not be promoted to become verifiable, so §5.1's failover destination was
-   * unreachable for it. This is the endpoint that breaks that.
+   * ownership as one review. Only the live destination can be verified; a
+   * replaced one is refused with `destination_archived`.
    *
    * **A person's decision; the endpoint refuses an API key.** It does not end
    * the security hold — `endDestinationHold` is the other stop, and each

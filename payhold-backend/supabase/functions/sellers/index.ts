@@ -32,6 +32,11 @@ import {
 } from '../_shared/seller-market.ts'
 import { readSettings } from '../_shared/settings.ts'
 import {
+  assertDestinationRole,
+  destinationRefusal,
+  withdrawalDestination,
+} from '../_shared/seller-destination.ts'
+import {
   assertRailOnRoute,
   assertRailRequirementsMet,
   assertRailSwitchedOnRows,
@@ -61,7 +66,7 @@ const SELLER_COLUMNS =
 const DESTINATION_COLUMNS =
   'id, seller_id, label, country, payout_currency, payout_provider, ' +
   'masked_destination, is_primary, is_backup, verified_at, ' +
-  'security_hold_until, created_at'
+  'security_hold_until, archived_at, replaced_by, created_at'
 
 /**
  * What the rail needs to know about a destination beyond the number itself.
@@ -532,6 +537,9 @@ async function setName(
  * and it attests to a different thing: that the identity, sanctions and
  * ownership checks came back, rather than that this particular change was the
  * seller's own act.
+ *
+ * A replaced destination has no hold left to end: `end_destination_hold`
+ * refuses an archived row, answered here as 409 `destination_archived`.
  */
 async function endHold(
   req: Request,
@@ -573,7 +581,10 @@ async function endHold(
     // actor can forge one.
     p_actor: caller.actor,
   })
-  if (error) throw new Error(`end_destination_hold failed: ${error.message}`)
+  if (error) {
+    throw destinationRefusal(error.message) ??
+      new Error(`end_destination_hold failed: ${error.message}`)
+  }
 
   const { data } = await db
     .from('seller_destinations')
@@ -588,14 +599,11 @@ async function endHold(
  * `POST /v1/sellers/:id/destinations/:destinationId/verify` — §5.1's
  * attestation, per destination.
  *
- * `verify_seller` stamps only the primary, which was right while a seller had
- * one destination and wrong the moment §5.1 gave them a backup. A destination
- * displaced before anyone verified it could not be verified (not primary) and
- * could not be promoted to become primary (`promote_seller_destination`
- * refuses an unverified row) — a deadlock with no endpoint to break it. The
- * visible cost was a row reading "Not verified" forever; the real one is that
- * `route_payout` requires `verified_at is not null` on a backup, so §5.1's
- * failover was unreachable for any backup that missed its turn as primary.
+ * `verify_seller` stamps the primary as part of a person's identity review;
+ * this is the attestation on its own, for a destination added after that
+ * review. Since §29.17 a seller has one live destination and that is the only
+ * one this can reach: `verify_seller_destination` refuses a replaced (archived)
+ * row, answered here as 409 `destination_archived`.
  *
  * **Refuses an API key, and no tenant setting opens it** — which is the one
  * place it now parts company with `/verify` next door. `seller_verification_relay`
@@ -653,71 +661,9 @@ async function verifyDestination(
     p_actor: caller.actor,
     p_verified: body.verified ?? true,
   })
-  if (error) throw new Error(`verify_seller_destination failed: ${error.message}`)
-
-  const { data } = await db
-    .from('seller_destinations')
-    .select(DESTINATION_COLUMNS)
-    .eq('id', destinationId)
-    .maybeSingle()
-
-  return json(req, data)
-}
-
-/**
- * `POST /v1/sellers/:id/destinations/:destinationId/promote` — §5.1's move back.
- *
- * `POST /destinations` always writes a new row with a new hold, which is right
- * for a destination nobody has seen and wrong for one this system already
- * tokenized, verified and held once. A seller whose card destination turned out
- * to be unroutable had no way back to their old mobile-money line except by
- * re-registering it and serving the hold again.
- *
- * **Refuses an API key**, like its two neighbours. It is a narrower door than
- * either: `promote_seller_destination` refuses an unverified destination and
- * one still inside its hold, so it picks between destinations a person has
- * already checked and cannot reach anything new. A takeover's freshly added row
- * fails both guards.
- */
-async function promoteDestination(
-  req: Request,
-  db: SupabaseClient,
-  caller: Caller,
-  id: string,
-  destinationId: string,
-): Promise<Response> {
-  if (caller.kind === 'api_key') {
-    throw new PayHoldError(
-      'policy_violation',
-      "Moving a seller's payout destination is a person's decision and cannot " +
-        'be done with an API key',
-    )
-  }
-
-  await ownSeller(db, caller, id)
-
-  const { data: destination } = await db
-    .from('seller_destinations')
-    .select('id')
-    .eq('id', destinationId)
-    .eq('seller_id', id)
-    .eq('tenant_id', caller.tenant_id)
-    .maybeSingle()
-
-  if (!destination) {
-    throw new PayHoldError('not_found', `Destination ${destinationId} not found`)
-  }
-
-  const { error } = await db.rpc('promote_seller_destination', {
-    p_destination: destinationId,
-    p_tenant: caller.tenant_id,
-    p_actor: caller.actor,
-  })
   if (error) {
-    // Its refusals are answers, not faults — an unverified destination, one
-    // still inside its hold. Same reading `addDestination` gives them: a 500
-    // would tell the client to retry something that will never succeed.
-    throw new PayHoldError('policy_violation', error.message)
+    throw destinationRefusal(error.message) ??
+      new Error(`verify_seller_destination failed: ${error.message}`)
   }
 
   const { data } = await db
@@ -730,23 +676,30 @@ async function promoteDestination(
 }
 
 /**
- * `POST /v1/sellers/:id/destinations` — §5.1: move where a seller is paid, or
- * give them a backup.
+ * `POST /v1/sellers/:id/destinations` — §29.17: replace where a seller is paid.
  *
  * The other half of `POST /sellers`, and the reason that one is allowed to
  * refuse a handle it already knows. A registration carries the *first*
  * destination; every one after it comes through here, where the security hold
- * is, and a client with a seller whose MoMo line was cut off finally has
- * something to call.
+ * is, and a client with a seller whose MoMo line was cut off has something to
+ * call.
+ *
+ * **A seller has one payout destination, and this replaces it.** The current
+ * one is archived — never deleted, because payouts still say where they went —
+ * and the new one becomes the seller's live destination. `role` is accepted for
+ * clients written before that ruling: absent or `'primary'` is the only request
+ * there is, and anything else, `'backup'` included, is a 400
+ * `backup_destination_removed`, refused before a provider is asked for a token
+ * nobody could use.
  *
  * Three things happen in an order that matters. The corridor is checked first,
  * so a destination PayHold could never pay is refused before a provider is
  * asked for anything. Then the raw destination is tokenized — used exactly once
  * and dropped, §19, the same as at registration. Only then does
- * `add_seller_destination` swap the primary over inside one transaction, which
- * is where the demote-and-insert has to happen: `seller_destinations_one_primary`
- * refuses the overlap, and doing it in two statements leaves a window in which
- * the seller has no primary destination and is unpayable.
+ * `add_seller_destination` archive and insert inside one transaction under the
+ * seller's lock: `seller_destinations_one_live` refuses the overlap, and doing
+ * it in two statements would leave a window in which the seller has no
+ * destination and is unpayable.
  *
  * The new row comes back unverified and inside its hold. That is §5.1's change
  * protection and there is no parameter to turn it off: a takeover's whole play
@@ -773,13 +726,9 @@ async function addDestination(
   const body = await readJson<AddDestinationInput>(req)
   required(body as unknown as Record<string, unknown>, 'payout_provider', 'destination')
 
-  const role = body.role ?? 'primary'
-  if (role !== 'primary' && role !== 'backup') {
-    throw new PayHoldError(
-      'policy_violation',
-      `A destination is primary or backup, not ${role}`,
-    )
-  }
+  // Before anything is tokenized, so asking for a second destination mints no
+  // beneficiary. `add_seller_destination` refuses the same thing under the lock.
+  assertDestinationRole((body as { role?: unknown }).role)
 
   // Defaulting to the seller's own country and currency rather than requiring
   // them: a seller who moves from MoMo to a bank account has not moved country,
@@ -874,14 +823,14 @@ async function addDestination(
     p_token: token.beneficiary_token,
     p_masked: masked,
     p_label: body.label ?? null,
-    p_role: role,
     p_actor: caller.actor,
   })
 
   if (error) {
     // The function's own refusals are answers, not faults — an unknown seller,
     // a role that is not a role. A 500 would tell the client to retry them.
-    throw new PayHoldError('policy_violation', error.message)
+    throw destinationRefusal(error.message) ??
+      new PayHoldError('policy_violation', error.message)
   }
 
   // `beneficiary_token` is on the returned row and must not go out: it is the
@@ -974,10 +923,13 @@ async function readWallet(
  * is the point: a withdrawal path that skipped the gate would be a second way
  * to pay a seller nobody had verified, and §12 says there must not be one.
  *
- * `destination_id` is optional and must be one of the seller's own verified
- * destinations. It is a choice among rows they already registered, never a new
- * address — a withdrawal that could name a fresh destination is the shape an
- * account takeover uses, which is what §5.1's security hold exists to catch.
+ * `destination_id` is optional, and leaving it out — which is what AutoHire
+ * sends — withdraws to the seller's one live destination. Named, it must be
+ * that destination (§29.17): anything else is a 400 `destination_not_live`, and
+ * the live one still has to be verified and out of its security hold. It is
+ * never a new address — a withdrawal that could name a fresh destination is
+ * the shape an account takeover uses, which is what §5.1's security hold exists
+ * to catch.
  *
  * Unlike `/verify` this accepts an API key. Verifying is an attestation and has
  * to be somebody's; asking for money that has already cleared every check is
@@ -991,19 +943,22 @@ async function withdraw(
 ): Promise<Response> {
   await ownSeller(db, caller, id)
 
-  const body = await readJson<{ destination_id?: string }>(req)
+  const body = await readJson<{ destination_id?: unknown }>(req)
+  const destinationId = withdrawalDestination(body.destination_id)
 
   const { data, error } = await db.rpc('request_withdrawal', {
     p_seller: id,
     p_actor: caller.actor,
-    p_destination: body.destination_id ?? null,
+    p_destination: destinationId,
   })
 
   if (error) {
     // The function's own refusals are the seller's answer — nothing cleared to
-    // withdraw, an unverified destination, one still inside its security hold.
-    // They are policy, not faults, and a 500 would tell a client to retry.
-    throw new PayHoldError('policy_violation', error.message)
+    // withdraw, an unverified destination, one still inside its security hold,
+    // a destination that is not their live one. They are policy, not faults,
+    // and a 500 would tell a client to retry.
+    throw destinationRefusal(error.message) ??
+      new PayHoldError('policy_violation', error.message)
   }
 
   const requested = (data ?? []) as unknown as { id: string }[]
@@ -1378,6 +1333,11 @@ async function connectStatus(
     country: seller.country!,
   })
 
+  // This replaces the seller's live destination (§29.17), and this is the only
+  // place onboarding writes one: `/connect/onboard` and `/connect/session` store
+  // nothing but `stripe_connect_pending_account_id`, and this call returned
+  // above unless Stripe reports `payouts_enabled`. So a half-finished onboarding
+  // never archives a destination that works.
   const { data: added, error } = await db.rpc('add_seller_destination', {
     p_seller: id,
     p_tenant: caller.tenant_id,
@@ -1387,10 +1347,12 @@ async function connectStatus(
     p_token: token.beneficiary_token,
     p_masked: token.masked_destination,
     p_label: 'Stripe',
-    p_role: 'primary',
     p_actor: 'stripe_connect_onboarding',
   })
-  if (error) throw new PayHoldError('policy_violation', error.message)
+  if (error) {
+    throw destinationRefusal(error.message) ??
+      new PayHoldError('policy_violation', error.message)
+  }
 
   await db
     .from('sellers')
@@ -1425,19 +1387,25 @@ Deno.serve(handler(async (req) => {
     return await readCapabilities(req, db, caller, id)
   }
 
-  // §5.1's preferred destination and verified backup — which one pair of
-  // columns on the seller could not express, and which the payout path now
-  // reads instead of `sellers.beneficiary_token`.
+  // The seller's one live destination (§29.17) — a list of one, or of none, so
+  // a client reading it never has to filter. `?include=archived` adds the ones
+  // it replaced, newest first, each with its `archived_at`, for history.
   if (req.method === 'GET' && id && action === 'destinations') {
     await ownSeller(db, caller, id)
 
-    const { data } = await db
+    let query = db
       .from('seller_destinations')
       .select(DESTINATION_COLUMNS)
       .eq('seller_id', id)
       .eq('tenant_id', caller.tenant_id)
-      .order('is_primary', { ascending: false })
-      .order('created_at', { ascending: true })
+
+    if (url.searchParams.get('include') !== 'archived') {
+      query = query.is('archived_at', null)
+    }
+
+    const { data } = await query
+      .order('archived_at', { ascending: false, nullsFirst: true })
+      .order('created_at', { ascending: false })
 
     return json(req, { destinations: data ?? [] })
   }
@@ -1459,13 +1427,6 @@ Deno.serve(handler(async (req) => {
     return await endHold(req, db, caller, id, sub)
   }
 
-  if (
-    req.method === 'POST' && id && action === 'destinations' &&
-    sub && subAction === 'promote'
-  ) {
-    return await promoteDestination(req, db, caller, id, sub)
-  }
-
   // Ahead of the bare `destinations` POST for `end-hold`'s reason: that route
   // would otherwise swallow this one and try to register a destination from a
   // body carrying only `verified`.
@@ -1476,7 +1437,9 @@ Deno.serve(handler(async (req) => {
     return await verifyDestination(req, db, caller, id, sub)
   }
 
-  if (req.method === 'POST' && id && action === 'destinations') {
+  // `!sub`, so a retired sub-route — `/promote`, gone with §29.17 — is an
+  // unknown route rather than an attempt to register a destination from its body.
+  if (req.method === 'POST' && id && action === 'destinations' && !sub) {
     return await addDestination(req, db, caller, id)
   }
 

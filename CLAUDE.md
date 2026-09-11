@@ -374,9 +374,7 @@ relayed verification only unblocks paperwork and a relayed decision releases or
 refunds money the moment it lands. Owner-only to change),
 `risk_rules_enabled` (default true),
 `risk_review_threshold_usd` (default $1,000, converted to the payout currency
-at compare time), `payout_backup_enabled` (default true),
-`payout_primary_attempts` (default 2) — §5.1's explicit routing-policy check
-before a backup destination may be used — `payout_retry_max_attempts`
+at compare time), `payout_retry_max_attempts`
 (default 5, floor 1), §13's budget before a refused payout stops being retried
 by anything automatic, and `payout_mode` (`auto` by default, or `wallet` to
 stop the cron sending cleared money nobody has asked for).
@@ -409,13 +407,12 @@ Auth: `X-Api-Key`, hashed at rest, rate-limited per key.
 | `GET /v1/sellers/:id/capabilities` | Can this seller be paid, and if not, every reason. Two lists, kept apart |
 | `POST /v1/sellers/:id/verify` | Record the attestation. **Refuses an API key** unless that tenant's `seller_verification_relay` is on — otherwise it is a person's decision |
 | `POST /v1/sellers/:id/active` | Whether this seller is currently one of the tenant's. Status only, no payout effect — takes an API key |
-| `GET /v1/sellers/:id/destinations` | §5.1's preferred destination and verified backup |
-| `POST /v1/sellers/:id/destinations` | Move where a seller is paid, or give them a backup. The new row is unverified and inside §5.1's security hold — payouts pause until it is checked, and no parameter skips that |
-| `POST /v1/sellers/:id/destinations/:id/end-hold` | §5.1's step-up: somebody confirmed the change with the seller, so the hold ends early. **Refuses an API key** — a client that could end its own holds has deleted the defence rather than satisfied it. Does not verify the destination |
-| `POST /v1/sellers/:id/destinations/:id/promote` | Move back to a destination already checked, without the second hold a re-registration would serve. Refused for an unverified destination and for one still inside its hold, so it reaches nothing new |
+| `GET /v1/sellers/:id/destinations` | The seller's one live destination (§29.17), as a list of one or none. `?include=archived` adds the ones it replaced, with `archived_at` |
+| `POST /v1/sellers/:id/destinations` | Replace where a seller is paid. The current destination is archived, never deleted; the new one is unverified and inside §5.1's security hold — payouts pause until it is checked, and no parameter skips that. `role` other than `primary` is **400 `backup_destination_removed`** |
+| `POST /v1/sellers/:id/destinations/:id/end-hold` | §5.1's step-up: somebody confirmed the change with the seller, so the hold ends early. **Refuses an API key** — a client that could end its own holds has deleted the defence rather than satisfied it. Does not verify the destination. A replaced destination is **409 `destination_archived`**, and so is `…/verify` on one |
 | `GET /v1/sellers/:id/balance` | This seller's wallet — ledger buckets, plus what a withdrawal would move and every reason something is stuck |
 | `GET /v1/sellers/wallets` | Every seller's wallet in one query |
-| `POST /v1/sellers/:id/withdraw` | Ask for the cleared money. Stamps and dispatches; screens, routes and books exactly as the cron does |
+| `POST /v1/sellers/:id/withdraw` | Ask for the cleared money. Stamps and dispatches; screens, routes and books exactly as the cron does. `destination_id` is optional; named, it must be the live destination or it is **400 `destination_not_live`** |
 | `GET /v1/balance` | held / pending clearance / available / paid out |
 | `GET /v1/ledger` | the entries those buckets are made of. Append-only; there is no writer |
 | `GET /v1/audit-log` | who did what, including everything that moved no money |
@@ -662,15 +659,15 @@ and re-arms `next_attempt_at`; `dispatchPayout` then runs the same frozen-tenant
 check, the same eligibility gate and the same routing decision it runs for the
 cron. A withdrawal path that called a provider itself would be a second way to
 pay a seller nobody verified, which is exactly what §12 forbids. It does not
-reset `attempts` — `route_payout` reads that to decide whether the backup
-destination may be used — and it does not touch `held_for_review`, because a
+reset `attempts` — the retry budget reads it — and it does not touch `held_for_review`, because a
 payout a rule or a person stopped is waiting on a named person (invariant 11).
 
-**"Any card" means any card they already registered and had verified.** A
-withdrawal may name a `destination_id`, and it must be one of the seller's own
-`seller_destinations` rows, verified and out of its security hold — checked at
-request time and re-checked in `route_payout` under the payout's lock, because
-a verification can be withdrawn in between. A withdrawal that could name a
+**A withdrawal goes to the seller's one destination.** It may name a
+`destination_id`, and since §29.17 that must be the seller's live destination —
+anything else is `destination_not_live` — verified and out of its security hold,
+checked at request time and re-checked in `route_payout` under the payout's
+lock, because a verification can be withdrawn in between. Leaving it out is the
+same request, and is what AutoHire sends. A withdrawal that could name a
 *fresh* destination is the shape an account takeover uses, and §5.1's change
 protection exists to catch it.
 
@@ -711,18 +708,21 @@ its own holds would be the second step granting itself the third. It ends the
 hold and nothing else — the destination is still unverified afterwards, which is
 a separate attestation and a separate stop.
 
-**`add_seller_destination` always inserts, and moving back needed something
-narrower.** A seller whose new destination turns out to be unroutable — a card
-in a market Stripe cannot pay into, which is the case that found this — could
-only get their old line back by re-registering it, which minted a second token
-and served a second hold for a destination already tokenized, verified and held
-once. `promote_seller_destination` (`20260809000003`) is the move back: it swaps
-which row is primary and writes no new row. It is a **narrower** door than
-ending a hold, not a wider one — refused for an unverified destination and for
-one still inside its hold, so it can only pick between destinations a person has
-already attested to. A takeover's freshly added row fails both guards.
+**A seller has one payout destination, and adding one replaces it** (§29.17,
+migration `20260911000003`). `add_seller_destination` used to demote the primary
+and insert beside it forever, so a host who re-saved their number four times
+showed five destinations, and `promote_seller_destination` existed to move back
+between them. Both are gone. The add archives the live row (`archived_at`,
+`replaced_by`) under the seller's lock and inserts the new one as primary, with
+exactly the verification, hold and auto-verify behaviour it always had, and
+`seller_destinations_one_live` makes two live rows impossible. **Rows are
+archived, never deleted** — payouts and routing decisions reference them, and
+`dispatchPayout` throws when a routed decision's row is gone. An archived row
+cannot be verified or have its hold ended (409 `destination_archived`), cannot be
+withdrawn to (400 `destination_not_live`), and is never routed to. Returning to a
+destination used before is adding it again, with a new hold.
 
-That change also made one hold read as one. `seller_capabilities` and
+`20260809000002` made one hold read as one. `seller_capabilities` and
 `route_payout` read `seller_destinations.security_hold_until`; `screen_payout`
 re-derived its own window from `sellers.destination_changed_at` and the current
 `destination_hold_hours`, and nothing kept the three in step — so a seller could
@@ -731,13 +731,13 @@ wins wherever it exists, with the old derivation kept as the fallback for a
 primary seeded at registration, which carries no stamp and would otherwise lose
 the protection entirely.
 
-**Destinations live in `seller_destinations`** (§5.1: a preferred destination
-and a verified backup, which one pair of columns cannot express).
-`sellers.beneficiary_token` and `masked_destination` remain as the primary's
-copy, kept in step by a trigger with exactly one writer. The payout path no
-longer reads them — `dispatchPayout` takes the beneficiary token from the
-destination the routing decision chose, because a seller now has more than one
-and only the decision knows which was picked.
+**Destinations live in `seller_destinations`**, one live row per seller and the
+archived ones it replaced. `sellers.beneficiary_token` and `masked_destination`
+remain as the live primary's copy, kept in step by a trigger with exactly one
+writer. The payout path does not read them — `dispatchPayout` takes the
+beneficiary token from the destination the routing decision chose, because only
+the decision knows which row was picked, and that row may since have been
+replaced while the payout was in flight.
 
 ## Disputes: the Resolution Center (spec §8)
 
@@ -867,11 +867,10 @@ every pass would bury the row that explains something.
 is that funds are never silently redirected to another destination, and a
 destination is a token minted by one provider for one rail — so "the
 highest-ranked eligible fallback" cannot mean a different rail for the same
-destination. It means the seller's **backup destination**, and all four
-conditions are checked before the backup row is even read: the payout has
-failed, it has failed `payout_primary_attempts` times, the tenant has
-`payout_backup_enabled` on, and the backup is verified and out of its security
-hold. Using it emits `payout.route_changed`, once.
+destination. It meant the seller's backup destination, and since §29.17 there
+is none: a seller has one destination, and a payout that cannot reach it keeps
+its amount, says why, and waits for a route or a new destination.
+`payout.route_changed` is no longer emitted.
 
 **A refused payout is retried on a ladder, and then it stops** (§13). 1m, 5m,
 30m, 2h and capped — the same shape the webhook dispatcher uses, because two
@@ -884,12 +883,9 @@ meaning "blocked, but really blocked". §5.1's no-route `blocked` keeps its cloc
 and is re-asked every pass, because that answer can change with nobody doing
 anything; a rail that refused us five times is not that.
 
-The automatic retry is also what makes the backup destination reachable without
-a person: the third condition above — a payout that has failed
-`payout_primary_attempts` times — is now something a cron pass arrives at on its
-own. A person pressing retry gets **one** more attempt rather than a fresh
-series, because the attempt counter is what the backup gate reads and zeroing it
-would send the next attempt back to the primary that has been failing.
+A person pressing retry gets **one** more attempt rather than a fresh series,
+because the attempt counter is the retry budget and zeroing it would hand a rail
+that keeps refusing a fresh run of automatic attempts.
 
 **Five rails are declared and disabled** — PayPal, Venmo, Cash App Pay, Alipay,
 WeChat Pay. They exist so a seller who picks one gets a specific sentence
@@ -957,7 +953,8 @@ only proven against the real project (PGlite shims `auth.uid()`), so this is
 where that check lives.
 
 V2 adds four paths: a partial refund at each of §7.1's four positions, a routing
-failure that falls back to a verified backup destination, a payout to an
+failure that keeps the money and reroutes nothing (§29.17 — this was a fallback
+to a verified backup destination), a payout to an
 unverified seller that must be refused, and a country closed in data that
 disappears from checkout with no redeploy.
 

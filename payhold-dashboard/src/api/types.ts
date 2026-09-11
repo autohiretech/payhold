@@ -832,8 +832,9 @@ export interface LaunchSignOff {
 }
 
 /**
- * §5.1: a seller has a preferred destination and may have a verified backup,
- * which one pair of columns on `sellers` could not express.
+ * §29.17: a seller has one live payout destination. Adding one replaces it,
+ * and the one it replaced is archived — kept, because payouts still say where
+ * they went — and readable with `includeArchived`.
  *
  * `Seller.beneficiary_token` and `masked_destination` remain as the primary's
  * copy, kept in step by the backend's trigger; this table is the record.
@@ -849,12 +850,16 @@ export interface SellerDestination {
   beneficiary_token: string
   masked_destination: string
   is_primary: boolean
-  /** Used only after a failed primary payout and an explicit policy check. */
+  /** Always false: backup destinations were removed (§29.17). */
   is_backup: boolean
   /** Null means ownership has not been confirmed. */
   verified_at: Timestamp | null
   /** §5.1's change protection: a newly added destination waits. */
   security_hold_until: Timestamp | null
+  /** Null on the live destination; when it was replaced, on an archived one. */
+  archived_at: Timestamp | null
+  /** The destination that replaced this one, when one did. */
+  replaced_by: string | null
   created_at: Timestamp
 }
 
@@ -1361,14 +1366,6 @@ export interface TenantSettings {
    */
   risk_review_threshold_usd: Money
   /**
-   * §5.1's routing policy for the backup destination. It may be used "only
-   * after a failed primary payout and an explicit routing-policy check" — this
-   * pair is that check, and neither half is a default the engine assumes.
-   */
-  payout_backup_enabled?: boolean
-  /** How many refusals from the primary before the backup is considered. */
-  payout_primary_attempts?: number
-  /**
    * §13. How many attempts a payout gets before it stops being retried by
    * anything automatic and waits for a person. Default 5, floor 1 — a budget of
    * zero would block every payout on the first transient error a rail has.
@@ -1549,7 +1546,10 @@ export const WEBHOOK_EVENTS = [
   /** §5.1's no-route behaviour: keep the amount, and say so. */
   'payout.blocked',
   'payout.needs_verification',
-  /** §5.1: the backup destination was used, and the seller must be told. */
+  /**
+   * Sent when a backup destination was used. Backup destinations were removed
+   * (§29.17), so nothing emits it now; it stays so an old delivery still types.
+   */
   'payout.route_changed',
   'deposit.captured',
   'deposit.released',
@@ -2000,6 +2000,10 @@ export type PayHoldErrorCode =
   | 'invalid_request'
   | 'dispute_relay_off'
   | 'dispute_already_resolved'
+  // §29.17: one live payout destination per seller.
+  | 'backup_destination_removed'
+  | 'destination_not_live'
+  | 'destination_archived'
 
 /** Every failure the API can return, as a typed error. */
 export class PayHoldError extends Error {

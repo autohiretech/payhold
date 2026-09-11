@@ -459,12 +459,9 @@ describe('seller capabilities — §10.1', () => {
 })
 
 describe('§5.1 — verifying one destination', () => {
-  // The deadlock this function exists to break. `verify_seller` stamps
-  // `where is_primary`, and `promote_seller_destination` refuses a row whose
-  // `verified_at is null` — so a **backup**, which is never primary by
-  // definition, could be neither verified nor promoted into being verifiable.
-  // That also put §5.1's failover permanently out of reach for it, since
-  // `route_payout` will only use a verified backup.
+  // `verify_seller` stamps the primary as part of one identity review, and only
+  // the primary that existed when it ran. A destination added afterwards — the
+  // seller's one live destination, since §29.17 — is verified on its own.
   async function tenantOf(seller: string): Promise<string> {
     const { rows } = await h.db.query<{ tenant_id: string }>(
       `select tenant_id from sellers where id = $1`, [seller],
@@ -472,17 +469,13 @@ describe('§5.1 — verifying one destination', () => {
     return rows[0].tenant_id
   }
 
-  async function addBackup(seller: string, tenant: string): Promise<string> {
-    await h.db.query(
-      `select add_seller_destination($1, $2, 'RW', 'RWF', 'flutterwave_momo',
-                                     'tok_backup', 'MTN •••• 4242', 'Backup',
-                                     'backup', 'grace@autohire.rw')`,
-      [seller, tenant],
-    )
+  /** A destination added after the review: it replaces the seeded one. */
+  async function addLater(seller: string, tenant: string): Promise<string> {
     const { rows } = await h.db.query<{ id: string }>(
-      `select id from seller_destinations
-        where seller_id = $1 and not is_primary order by created_at desc limit 1`,
-      [seller],
+      `select id from add_seller_destination($1, $2, 'RW', 'RWF', 'flutterwave_momo',
+                                             'tok_later', 'MTN •••• 4242', 'Later',
+                                             'primary', 'grace@autohire.rw')`,
+      [seller, tenant],
     )
     return rows[0].id
   }
@@ -496,35 +489,34 @@ describe('§5.1 — verifying one destination', () => {
     return rows[0].verified_at
   }
 
-  test('a backup can be verified, which verify_seller cannot reach', async () => {
-    const seller = await newSeller('Backup verifier')
+  test('a destination added after the review is verified on its own', async () => {
+    const seller = await newSeller('Added after review')
     const tenant = await tenantOf(seller)
-    const backup = await addBackup(seller, tenant)
-
-    // Proving the gap rather than asserting it: the seller-level attestation
-    // stamps the primary and leaves the backup exactly as it was.
     await h.db.query(`select verify_seller($1, 'compliance@payhold')`, [seller])
-    expect(await verifiedAt(backup)).toBeNull()
+    const later = await addLater(seller, tenant)
+
+    // The review stamped the destination that existed then, not this one.
+    expect(await verifiedAt(later)).toBeNull()
 
     await h.db.query(
       `select verify_seller_destination($1, $2, 'grace@autohire.rw')`,
-      [backup, tenant],
+      [later, tenant],
     )
-    expect(await verifiedAt(backup)).not.toBeNull()
+    expect(await verifiedAt(later)).not.toBeNull()
   })
 
   test('it does not end the security hold, and refuses a blank actor', async () => {
     const seller = await newSeller('Two stops')
     const tenant = await tenantOf(seller)
-    const backup = await addBackup(seller, tenant)
+    const later = await addLater(seller, tenant)
 
     await expect(
-      h.db.query(`select verify_seller_destination($1, $2, '   ')`, [backup, tenant]),
+      h.db.query(`select verify_seller_destination($1, $2, '   ')`, [later, tenant]),
     ).rejects.toThrow(/policy_violation/)
 
     await h.db.query(
       `select verify_seller_destination($1, $2, 'grace@autohire.rw')`,
-      [backup, tenant],
+      [later, tenant],
     )
 
     // Each stops a payout on its own and §5.1 wants both, so verifying must
@@ -532,7 +524,7 @@ describe('§5.1 — verifying one destination', () => {
     const { rows } = await h.db.query<{ held: boolean }>(
       `select security_hold_until > now() as held
          from seller_destinations where id = $1`,
-      [backup],
+      [later],
     )
     expect(rows[0].held).toBe(true)
   })
@@ -540,31 +532,31 @@ describe('§5.1 — verifying one destination', () => {
   test('a second call writes no second audit row, and withdrawing reverses it', async () => {
     const seller = await newSeller('Idempotent')
     const tenant = await tenantOf(seller)
-    const backup = await addBackup(seller, tenant)
+    const later = await addLater(seller, tenant)
 
     await h.db.query(
-      `select verify_seller_destination($1, $2, 'grace@autohire.rw')`, [backup, tenant],
+      `select verify_seller_destination($1, $2, 'grace@autohire.rw')`, [later, tenant],
     )
-    const first = await verifiedAt(backup)
+    const first = await verifiedAt(later)
     await h.db.query(
       `select verify_seller_destination($1, $2, 'someone.else@autohire.rw')`,
-      [backup, tenant],
+      [later, tenant],
     )
     // Unchanged stamp, and no second name against a decision the first made.
-    expect(await verifiedAt(backup)).toEqual(first)
+    expect(await verifiedAt(later)).toEqual(first)
     const { rows: a } = await h.db.query<{ n: string }>(
       `select count(*) as n from audit_log
         where action = 'seller.destination_verified'
           and details->>'destination_id' = $1`,
-      [backup],
+      [later],
     )
     expect(Number(a[0].n)).toBe(1)
 
     await h.db.query(
       `select verify_seller_destination($1, $2, 'grace@autohire.rw', false)`,
-      [backup, tenant],
+      [later, tenant],
     )
-    expect(await verifiedAt(backup)).toBeNull()
+    expect(await verifiedAt(later)).toBeNull()
   })
 })
 
@@ -630,7 +622,7 @@ describe('§5.1 change protection', () => {
     expect(s.masked).toBe('Airtel •••• 1111')
   })
 
-  test('a seller cannot have two primaries or two backups', async () => {
+  test('a seller cannot have two primaries', async () => {
     const seller = await newSeller('Two destinations')
     await rejects(
       () => h.db.query(
@@ -640,33 +632,32 @@ describe('§5.1 change protection', () => {
          values ($1, $2, 'RW', 'RWF', 'flutterwave_momo', 'tok_2', 'MTN •••• 2', true)`,
         [tenant, seller],
       ),
-      /seller_destinations_one_primary/,
+      // Either index refuses it — the row is primary and live — and Postgres
+      // does not promise which it checks first.
+      /seller_destinations_one_(primary|live)/,
     )
   })
 
-  test('a backup can be registered alongside the primary', async () => {
+  test('a backup cannot be registered at all', async () => {
+    // §29.17: one live destination per seller, and the backup role is gone. The
+    // constraint refuses it before the one-live index would.
     const seller = await newSeller('With backup')
-    await h.db.query(
-      `insert into seller_destinations (tenant_id, seller_id, label, country,
-                                        payout_currency, payout_provider,
-                                        beneficiary_token, masked_destination, is_backup)
-       values ($1, $2, 'Backup', 'RW', 'RWF', 'flutterwave_bank',
-               'tok_backup', 'BK •••• 0073', true)`,
-      [tenant, seller],
+    await rejects(
+      () => h.db.query(
+        `insert into seller_destinations (tenant_id, seller_id, label, country,
+                                          payout_currency, payout_provider,
+                                          beneficiary_token, masked_destination, is_backup)
+         values ($1, $2, 'Backup', 'RW', 'RWF', 'flutterwave_bank',
+                 'tok_backup', 'BK •••• 0073', true)`,
+        [tenant, seller],
+      ),
+      /seller_destinations_no_backup/,
     )
 
     const { rows } = await h.db.query<{ n: number }>(
       `select count(*)::int as n from seller_destinations where seller_id = $1`, [seller],
     )
-    expect(rows[0].n).toBe(2)
-
-    // Registering it does not make it the one that gets used — §5.1 says the
-    // backup is reached only after a failed primary payout and an explicit
-    // routing check, which is Phase 5.
-    const { rows: [s] } = await h.db.query<{ token: string }>(
-      `select beneficiary_token as token from sellers where id = $1`, [seller],
-    )
-    expect(s.token).not.toBe('tok_backup')
+    expect(rows[0].n).toBe(1)
   })
 
   test('a destination in its security hold blocks the payout', async () => {
@@ -706,7 +697,7 @@ describe('§5.1 moving a destination', () => {
       ],
     )
 
-  test('the new destination becomes primary and the old one steps down', async () => {
+  test('the new destination becomes primary and the old one is archived, not deleted', async () => {
     const seller = await newSeller('Moving house')
     const { rows: [before] } = await h.db.query<{ id: string }>(
       `select id from seller_destinations where seller_id = $1 and is_primary`, [seller],
@@ -715,15 +706,25 @@ describe('§5.1 moving a destination', () => {
     const { rows: [added] } = await add(seller, 'tok_new_bank')
     expect(added.is_primary).toBe(true)
 
-    // Demoted, not deleted: a paid payout still has to be able to say where it
-    // went, and a seller moving back finds it already verified.
-    const { rows } = await h.db.query<{ id: string; is_primary: boolean }>(
-      `select id, is_primary from seller_destinations where seller_id = $1
+    // Archived, not deleted: a paid payout still has to be able to say where it
+    // went. It says what replaced it, and it is no longer live.
+    const { rows } = await h.db.query<{
+      id: string
+      is_primary: boolean
+      archived: boolean
+      replaced_by: string | null
+    }>(
+      `select id, is_primary, archived_at is not null as archived, replaced_by
+         from seller_destinations where seller_id = $1
         order by created_at`,
       [seller],
     )
     expect(rows).toHaveLength(2)
-    expect(rows.find((r) => r.id === before.id)!.is_primary).toBe(false)
+    const old = rows.find((r) => r.id === before.id)!
+    expect(old.is_primary).toBe(false)
+    expect(old.archived).toBe(true)
+    expect(old.replaced_by).toBe(added.id)
+    expect(rows.filter((r) => !r.archived).map((r) => r.id)).toEqual([added.id])
 
     // The seller row follows, through the same trigger that seeds it.
     const { rows: [s] } = await h.db.query<{ token: string }>(
@@ -748,47 +749,46 @@ describe('§5.1 moving a destination', () => {
     expect(await screen(await payoutFor(seller))).toBe(true)
   })
 
-  test('a backup leaves the primary where it is', async () => {
+  test('a backup is refused, and nothing moves', async () => {
     const seller = await newSeller('Adding a backup')
     const { rows: [s0] } = await h.db.query<{ token: string }>(
       `select beneficiary_token as token from sellers where id = $1`, [seller],
     )
 
-    const { rows: [added] } = await add(seller, 'tok_backup', { role: 'backup' })
-    expect(added.is_backup).toBe(true)
+    await rejects(
+      () => add(seller, 'tok_backup', { role: 'backup' }),
+      /backup_destination_removed: A seller has one payout destination; adding one replaces the current one\./,
+    )
 
     const { rows: [s1] } = await h.db.query<{ token: string }>(
       `select beneficiary_token as token from sellers where id = $1`, [seller],
     )
     expect(s1.token).toBe(s0.token)
-  })
-
-  test('a second backup replaces the first rather than colliding with it', async () => {
-    // `seller_destinations_one_backup` would refuse the overlap, and a caller
-    // reading an index name is a caller who cannot tell a conflict from a bug.
-    const seller = await newSeller('Two backups')
-    await add(seller, 'tok_backup_1', { role: 'backup' })
-    await add(seller, 'tok_backup_2', { role: 'backup' })
-
-    const { rows } = await h.db.query<{ token: string }>(
-      `select beneficiary_token as token from seller_destinations
-        where seller_id = $1 and is_backup`,
+    const { rows } = await h.db.query<{ n: number }>(
+      `select count(*)::int as n from seller_destinations
+        where seller_id = $1 and archived_at is null`,
       [seller],
     )
-    expect(rows).toHaveLength(1)
-    expect(rows[0].token).toBe('tok_backup_2')
+    expect(rows[0].n).toBe(1)
   })
 
   test('the change is on the audit log, as a mask', async () => {
     const seller = await newSeller('Audited move')
     await add(seller, 'tok_audited', { masked: 'BK •••• 4444' })
 
-    const { rows: [entry] } = await h.db.query<{ details: Record<string, string> }>(
+    const { rows: [before] } = await h.db.query<{ id: string }>(
+      `select id from seller_destinations
+        where seller_id = $1 and archived_at is not null`,
+      [seller],
+    )
+    const { rows: [entry] } = await h.db.query<{ details: Record<string, unknown> }>(
       `select details from audit_log
         where action = 'seller.destination_added' and details ->> 'seller_id' = $1`,
       [seller],
     )
     expect(entry.details.destination).toBe('BK •••• 4444')
+    // What it replaced is named, so the history reads without a join.
+    expect(entry.details.archived_destination_ids).toEqual([before.id])
     // §19: the token is the thing money moves against, and an audit log is
     // where one would survive longest.
     expect(JSON.stringify(entry.details)).not.toContain('tok_audited')
@@ -810,9 +810,12 @@ describe('§5.1 moving a destination', () => {
     )
   })
 
-  test('a role that is not a role is refused', async () => {
+  test('a role that is not primary is refused', async () => {
     const seller = await newSeller('Bad role')
-    await rejects(() => add(seller, 'tok_bad_role', { role: 'preferred' }), /primary or backup/)
+    await rejects(
+      () => add(seller, 'tok_bad_role', { role: 'preferred' }),
+      /backup_destination_removed/,
+    )
   })
 })
 
@@ -1136,161 +1139,46 @@ describe('§5.1 ending a security hold', () => {
 // ---------------------------------------------------------------------------
 
 /**
- * §5.1's missing move: back to a destination already checked.
- *
- * `add_seller_destination` always inserts, so the only way back to a demoted
- * destination was a new row with a new hold — for something already tokenized,
- * verified and held once. The header of `20260809000001` said that should not
- * happen and nothing implemented it.
- *
- * The two refusals below are what stop this being a way around the hold.
+ * §5.1's move back is gone with §29.17. There is one live destination, so there
+ * is nothing to move back *to*: returning to a destination used before is adding
+ * it again, with a new row and a new hold, like any other destination.
  */
-describe('§5.1 moving back to a checked destination', () => {
-  const promote = (destination: string, actor = 'ops@payhold.test') =>
-    h.db.query(`select * from promote_seller_destination($1, $2, $3)`,
-      [destination, tenant, actor])
+describe('§29.17 nothing moves back', () => {
+  test('promote_seller_destination no longer exists', async () => {
+    const { rows } = await h.db.query<{ n: number }>(
+      `select count(*)::int as n from pg_proc where proname = 'promote_seller_destination'`,
+    )
+    expect(rows[0].n).toBe(0)
+  })
 
-  /** A seller whose primary has been moved away, leaving a verified one behind. */
-  async function movedAway(name: string) {
-    const seller = await newSeller(name)
+  test('adding a destination used before is a new row inside a new hold', async () => {
+    const seller = await newSeller('Back to mobile money')
     await h.db.query(`select verify_seller($1, 'ops@payhold.test', true)`, [seller])
-
-    const { rows: [old] } = await h.db.query<{ id: string }>(
-      `select id from seller_destinations where seller_id = $1 and is_primary`, [seller],
+    const { rows: [old] } = await h.db.query<{ token: string; masked: string }>(
+      `select beneficiary_token as token, masked_destination as masked
+         from seller_destinations where seller_id = $1 and is_primary`,
+      [seller],
     )
-    // The move that demoted it — a card destination, as in the real case. The
-    // endpoint now refuses this pairing (`stripe_connect` cannot pay RW; see
-    // `sellers/rail-adapter.ts` and `seller-destination-rail.test.ts`), and the
-    // SQL function deliberately does not: it is the writer, not the policy, and
-    // this row is exactly the shape the moving-back path was built to recover
-    // from.
-    const { rows: [fresh] } = await h.db.query<{ id: string }>(
-      `select id from add_seller_destination($1, $2, 'RW', 'RWF', 'stripe_connect',
-                                             'tok_card', 'Card •••• 5757', 'Card',
-                                             'primary', 'api')`,
-      [seller, tenant],
-    )
-    return { seller, old: old.id, fresh: fresh.id }
-  }
 
-  /**
-   * A destination that is neither primary nor checked — the row a takeover
-   * adds. The guards are only reachable from here: promoting the row that is
-   * already primary returns early, which is what the last test asserts.
-   */
-  async function addUnchecked(seller: string) {
-    const { rows: [b] } = await h.db.query<{ id: string }>(
-      `select id from add_seller_destination($1, $2, 'RW', 'RWF', 'flutterwave_momo',
-                                             'tok_theirs', 'MTN •••• 9999', 'Theirs',
-                                             'backup', 'api')`,
-      [seller, tenant],
-    )
-    return b.id
-  }
-
-  test('it refuses an unverified destination', async () => {
-    const { seller } = await movedAway('Cannot promote an unchecked one')
-    const theirs = await addUnchecked(seller)
-
-    // Refused before the hold is even considered: promotion picks between
-    // destinations a person has already attested to, and reaches nothing new.
-    await rejects(() => promote(theirs), /only a verified destination/)
-  })
-
-  test('it refuses one still inside its security hold', async () => {
-    const { seller } = await movedAway('Verified but still held')
-    const theirs = await addUnchecked(seller)
-    // Verified, and still held. The second guard has to stand on its own, or
-    // verifying a destination would be enough to skip its hold.
     await h.db.query(
-      `update seller_destinations set verified_at = now() where id = $1`, [theirs],
+      `select add_seller_destination($1, $2, 'RW', 'RWF', 'flutterwave_bank',
+                                     'tok_bank', 'BK •••• 5757', null, 'primary', 'api')`,
+      [seller, tenant],
+    )
+    const { rows: [back] } = await h.db.query<{ id: string; verified: boolean; held: boolean }>(
+      `select id, verified_at is not null as verified, security_hold_until > now() as held
+         from add_seller_destination($1, $2, 'RW', 'RWF', 'flutterwave_momo', $3, $4,
+                                     null, 'primary', 'api')`,
+      [seller, tenant, old.token, old.masked],
     )
 
-    await rejects(() => promote(theirs), /still inside its security hold/)
-
-    // And nothing moved on the way out.
-    const { rows: [p] } = await h.db.query<{ masked: string }>(
-      `select masked_destination as masked from sellers where id = $1`, [seller],
+    expect(back.verified).toBe(false)
+    expect(back.held).toBe(true)
+    const { rows } = await h.db.query<{ n: number; live: number }>(
+      `select count(*)::int as n, count(*) filter (where archived_at is null)::int as live
+         from seller_destinations where seller_id = $1`,
+      [seller],
     )
-    expect(p.masked).toBe('Card •••• 5757')
-  })
-
-  test('it moves back without serving a second hold', async () => {
-    const { seller, old } = await movedAway('Back to mobile money')
-
-    await promote(old)
-
-    const { rows: [d] } = await h.db.query<{ primary: boolean; lapsed: boolean }>(
-      `select is_primary as primary,
-              security_hold_until <= now() as lapsed
-         from seller_destinations where id = $1`, [old],
-    )
-    expect(d.primary).toBe(true)
-    // The seeded row carried no stamp; it acquires a lapsed one here so the
-    // trigger's fresh `destination_changed_at` cannot arm a hold behind it.
-    expect(d.lapsed).toBe(true)
-
-    // Which is the whole point: the payout is not held for a destination this
-    // system already checked.
-    const c = await capabilities(seller)
-    expect(c.reasons).toEqual([])
-    expect(await screen(await payoutFor(seller))).toBe(false)
-  })
-
-  test('the old primary is demoted, not deleted', async () => {
-    const { seller, old, fresh } = await movedAway('Both rows survive')
-    await promote(old)
-
-    // A paid payout still has to be able to say where it went.
-    const { rows } = await h.db.query<{ id: string; is_primary: boolean }>(
-      `select id, is_primary from seller_destinations where seller_id = $1`, [seller],
-    )
-    expect(rows).toHaveLength(2)
-    expect(rows.find((r) => r.id === fresh)!.is_primary).toBe(false)
-    expect(rows.find((r) => r.id === old)!.is_primary).toBe(true)
-  })
-
-  test('it records who moved it, and between which destinations', async () => {
-    const { old } = await movedAway('Named move')
-    await promote(old, 'ops@payhold.test')
-
-    const { rows: [log] } = await h.db.query<{ actor: string; details: Record<string, unknown> }>(
-      `select actor, details from audit_log
-        where action = 'seller.destination_promoted'
-          and details ->> 'destination_id' = $1`, [old],
-    )
-    expect(log.actor).toBe('ops@payhold.test')
-    expect(log.details.moved_from).toBe('Card •••• 5757')
-    expect(log.details.moved_to).toBe('MTN •••• 4821')
-  })
-
-  test('promoting the destination that is already primary changes nothing', async () => {
-    const seller = await newSeller('Already there')
-    const { rows: [d] } = await h.db.query<{ id: string }>(
-      `select id from seller_destinations where seller_id = $1 and is_primary`, [seller],
-    )
-
-    await promote(d.id)
-
-    // Idempotent, and silent: nobody moved anything, so no row says they did.
-    const { rows: [n] } = await h.db.query<{ n: number }>(
-      `select count(*)::int as n from audit_log
-        where action = 'seller.destination_promoted'
-          and details ->> 'destination_id' = $1`, [d.id],
-    )
-    expect(n.n).toBe(0)
-  })
-
-  test('it refuses to move a destination without a name', async () => {
-    const { old } = await movedAway('Nameless move')
-    await rejects(() => promote(old, '  '), /must record who moved it/)
-  })
-
-  test('the AI role cannot move a payout destination', async () => {
-    const { rows } = await h.db.query<{ allowed: boolean }>(
-      `select bool_or(has_function_privilege('payhold_ai', p.oid, 'execute')) as allowed
-         from pg_proc p where p.proname = 'promote_seller_destination'`,
-    )
-    expect(rows[0].allowed).toBe(false)
+    expect(rows[0]).toEqual({ n: 3, live: 1 })
   })
 })

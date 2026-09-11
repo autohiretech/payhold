@@ -33,8 +33,8 @@ export const keys = {
   sellers: ['sellers'] as const,
   payoutOptions: (country: Country, currency?: Currency) =>
     ['payout-options', country, currency ?? 'market-default'] as const,
-  sellerDestinations: (sellerId?: string) =>
-    ['seller-destinations', sellerId ?? 'all'] as const,
+  sellerDestinations: (sellerId: string, includeArchived = false) =>
+    ['seller-destinations', sellerId, includeArchived ? 'with-archived' : 'live'] as const,
   sellerCapabilities: (sellerId: string) =>
     ['seller-capabilities', sellerId] as const,
   settings: ['settings'] as const,
@@ -124,10 +124,11 @@ export const usePayoutOptions = (country: Country, currency?: Currency) =>
     queryFn: () => api.getPayoutOptions(country, currency),
   })
 
-export const useSellerDestinations = (sellerId?: string) =>
+/** The seller's one live destination; `includeArchived` adds what it replaced. */
+export const useSellerDestinations = (sellerId: string, includeArchived = false) =>
   useQuery({
-    queryKey: keys.sellerDestinations(sellerId),
-    queryFn: () => api.listSellerDestinations(sellerId),
+    queryKey: keys.sellerDestinations(sellerId, includeArchived),
+    queryFn: () => api.listSellerDestinations(sellerId, { includeArchived }),
   })
 
 /** §12's onboarding read: every reason at once, so nothing is fixed serially. */

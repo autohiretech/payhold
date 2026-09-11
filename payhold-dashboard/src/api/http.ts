@@ -532,10 +532,9 @@ export class HttpClient implements PayHoldClient {
 
   /**
    * A person's retry. **One more attempt, not a fresh series** — the endpoint
-   * re-arms the clock and deliberately leaves `attempts` alone, because
-   * `route_payout` reads that counter to decide whether the seller's verified
-   * backup destination may be used, and zeroing it would send the next attempt
-   * back to the primary that has been failing.
+   * re-arms the clock and deliberately leaves `attempts` alone, because the
+   * retry budget reads that counter, and zeroing it would hand a rail that keeps
+   * refusing a fresh series of automatic attempts.
    */
   async retryPayout(id: string): Promise<Payout> {
     const { payout } = await this.#post<{ payout: Payout }>(`/payouts/${id}/retry`)
@@ -645,7 +644,10 @@ export class HttpClient implements PayHoldClient {
     )
   }
 
-  async listSellerDestinations(sellerId?: string): Promise<SellerDestination[]> {
+  async listSellerDestinations(
+    sellerId: string,
+    options: { includeArchived?: boolean } = {},
+  ): Promise<SellerDestination[]> {
     if (!sellerId) {
       // §5.1's destinations hang off a seller and there is no account-wide
       // list. Returning [] would read as "this account has none".
@@ -657,7 +659,10 @@ export class HttpClient implements PayHoldClient {
 
     const { destinations } = await this.#call<{
       destinations: SellerDestination[]
-    }>(`/sellers/${sellerId}/destinations`)
+    }>(
+      `/sellers/${sellerId}/destinations` +
+        (options.includeArchived ? '?include=archived' : ''),
+    )
     return destinations
   }
 
@@ -679,8 +684,9 @@ export class HttpClient implements PayHoldClient {
    * §5.1's step-up. Same shape as `verifySeller` and for the same reasons: the
    * actor comes from the session and the endpoint refuses an API key.
    *
-   * The destination is named as well as the seller, because a seller may have
-   * several and only one of them is the one somebody just confirmed.
+   * The destination is named as well as the seller, so a confirmation made
+   * against a destination that has since been replaced is refused rather than
+   * landing on its successor.
    */
   async endDestinationHold(
     sellerId: string,
@@ -688,17 +694,6 @@ export class HttpClient implements PayHoldClient {
   ): Promise<SellerDestination> {
     return await this.#post<SellerDestination>(
       `/sellers/${sellerId}/destinations/${destinationId}/end-hold`,
-      {},
-    )
-  }
-
-  /** §5.1's move back. Same shape, same session-derived actor. */
-  async promoteSellerDestination(
-    sellerId: string,
-    destinationId: string,
-  ): Promise<SellerDestination> {
-    return await this.#post<SellerDestination>(
-      `/sellers/${sellerId}/destinations/${destinationId}/promote`,
       {},
     )
   }

@@ -212,14 +212,23 @@ Then: two refunds summing past what the buyer paid must be refused, and the
 deal's status must **not** become `partially_refunded` — §29.8. Check
 `deal_amounts.refunded` instead.
 
-### 4.2 A routing failure that falls back to a verified backup
+### 4.2 A routing failure keeps the money, and nothing reroutes it
 
-Register a backup destination, verify it, and let its security hold expire.
-Force the primary to fail `payout_primary_attempts` times. Only then may the
-backup be used, and using it emits `payout.route_changed` exactly once.
+Spec §29.17 removed backup destinations, which is what this part used to
+exercise. Switch the seller's destination rail off for the tenant (a
+`payout_routes` row with that tenant's id and `enabled = false`). The payout goes
+`blocked` with the rail's sentence and its amount unchanged, no
+`payout.route_changed` is emitted, and switching the rail back on lets the next
+pass route it with nobody approving anything.
 
-Confirm the negative too: a payout with **one** failure does not move, and a
-tenant with `payout_backup_enabled = false` never does.
+Then add a second destination for the seller. The first moves under **Previous
+destinations** on the seller page and stays the `destination_id` of anything
+already paid to it; the new one is the only live one, unverified and inside its
+hold, and the payout waits on both. `POST …/destinations/<old id>/verify` and
+`…/end-hold` on the old one answer 409 `destination_archived`.
+
+`walkthrough_v2_paths`' description (migration `20260807000015`) still names the
+backup fallback; sign it against this section as written.
 
 ### 4.3 A payout to an unverified seller is refused
 
