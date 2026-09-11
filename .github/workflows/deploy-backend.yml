@@ -161,7 +161,24 @@ jobs:
           SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
         run: |
           supabase link --project-ref "${{ secrets.SUPABASE_PROJECT_REF }}"
-          pending=$(supabase migration list -o json | jq -r '.migrations[] | select((.remote // "") == "") | .local')
+          # The CLI's output format is not stable: plain `migration list` has
+          # printed JSON and `-o json` a table in the same version. Read both,
+          # and fail closed if no rows can be read at all — a guard that cannot
+          # see the list must not wave functions through.
+          out=$(supabase migration list 2>/dev/null || true)
+          if printf '%s\n' "$out" | grep -q '"migrations"'; then
+            json=$(printf '%s\n' "$out" | sed -n '/^[[:space:]]*{/,$p')
+            rows=$(printf '%s' "$json" | python3 -c 'import sys,json;print(len(json.load(sys.stdin)["migrations"]))' 2>/dev/null || echo 0)
+            pending=$(printf '%s' "$json" | python3 -c 'import sys,json;[print(m["local"]) for m in json.load(sys.stdin)["migrations"] if (m.get("local") or "") and not (m.get("remote") or "")]' 2>/dev/null || true)
+          else
+            rows=$(printf '%s\n' "$out" | awk -F'|' 'NF>=3 { l=$1; gsub(/[ `]/,"",l); if (l ~ /^[0-9]+$/) n++ } END { print n+0 }')
+            pending=$(printf '%s\n' "$out" | awk -F'|' 'NF>=3 { l=$1; r=$2; gsub(/[ `]/,"",l); gsub(/[ `]/,"",r); if (l ~ /^[0-9]+$/ && r == "") print l }')
+          fi
+          if [ "${rows:-0}" -eq 0 ]; then
+            echo "::error::Could not read the migration list, so pending migrations could not be ruled out and the Edge Functions were NOT deployed."
+            printf '%s\n' "$out"
+            exit 1
+          fi
           if [ -n "$pending" ]; then
             echo "::error::These migrations are not applied to the live database yet, so the Edge Functions were NOT deployed:"
             echo "$pending"
