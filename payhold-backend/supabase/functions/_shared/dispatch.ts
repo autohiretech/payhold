@@ -44,11 +44,14 @@
 
 import type { SupabaseClient } from 'npm:@supabase/supabase-js@2'
 import { amountLeaving } from './figures.ts'
+import { atLockedRate } from './fx.ts'
 import { loadProvider } from './load-provider.ts'
 import { railFunding, shortfallReason } from './payout-funding.ts'
+import { liveRate } from './rates.ts'
 import { loadSettings } from './settings.ts'
 import {
   type Country,
+  type Currency,
   type Deal,
   PayHoldError,
   type Payout,
@@ -168,8 +171,86 @@ async function askRailForFunding(
   }
 }
 
+/**
+ * Restate a payout into the currency its seller is now paid in.
+ *
+ * Returns the payout unchanged when the destination already matches, which is
+ * the ordinary case and costs one small read. `no_rate` is the one refusal:
+ * `liveRate` quotes the corridor from the tenant's own rail and will not fall
+ * back to the indicative table, so a corridor nobody can quote leaves the
+ * payout exactly as it was rather than restating it against a guess.
+ *
+ * The conversion happens here rather than in SQL for the reason every other
+ * figure does — there is one FX table in this system and it is not in the
+ * database. `redenominate_payout` takes the result, the rate and the rate's
+ * source, and owns the row lock and the audit row.
+ */
+async function followDestination(
+  db: SupabaseClient,
+  payout: Payout,
+): Promise<
+  | { outcome: 'ok'; payout: Payout }
+  | { outcome: 'no_rate'; message: string }
+> {
+  // The seller's own live destination, not the routing decision's — this runs
+  // before routing, and it is the destination that decides what currency the
+  // question should be asked in.
+  const { data: dest } = await db
+    .from('seller_destinations')
+    .select('payout_currency')
+    .eq('seller_id', payout.seller_id)
+    .is('archived_at', null)
+    .eq('is_primary', true)
+    .maybeSingle()
+
+  const target = (dest as { payout_currency?: string } | null)?.payout_currency
+
+  if (!target || target === payout.currency) return { outcome: 'ok', payout }
+
+  let rate: { rate: number; source: string }
+  try {
+    rate = await liveRate(
+      db,
+      payout.tenant_id,
+      payout.currency as Currency,
+      target as Currency,
+    )
+  } catch (err) {
+    return {
+      outcome: 'no_rate',
+      message: err instanceof Error ? err.message : String(err),
+    }
+  }
+
+  // `atLockedRate`'s parameters are named for a deal's settlement/presentment
+  // pair, and the arithmetic is the one wanted here: a major-unit rate of
+  // `target` per unit of `payout.currency`, with the toMajor/toMinor step that
+  // crossing a zero-decimal boundary needs. RWF and USD are on opposite sides
+  // of that boundary, which is exactly why this is not a multiplication.
+  const amount = atLockedRate(
+    payout.amount,
+    rate.rate,
+    payout.currency as Currency,
+    target as Currency,
+    'settlement_to_presentment',
+  )
+
+  const { data, error } = await db.rpc('redenominate_payout', {
+    p_payout_id: payout.id,
+    p_amount: amount,
+    p_currency: target,
+    p_rate: rate.rate,
+    p_rate_source: rate.source,
+  })
+  if (error) throw new Error(`redenominate_payout failed: ${error.message}`)
+
+  return { outcome: 'ok', payout: data as unknown as Payout }
+}
+
 export async function dispatchPayout(
   db: SupabaseClient,
+  // Reassigned when `followDestination` restates it — see there.
+  // deno-lint-ignore prefer-const
   payout: Payout,
 ): Promise<DispatchOutcome> {
   // `name` is read here as well because it is the sender on a transfer: some
@@ -267,6 +348,43 @@ export async function dispatchPayout(
         ? 'blocked'
         : 'held_for_review'
     }
+
+    // A seller who has moved is paid where they are now.
+    //
+    // `releaseFigures` read `sellers.payout_currency` at release and stamped it
+    // on the payout, which is right and is not the whole story: the answer can
+    // change afterwards. A host who released in Rwanda and then moved to a US
+    // PayPal account kept a payout denominated RWF, and `route_evaluation`
+    // answered `currency_not_supported` for every rail — both of the two that
+    // reach the United States send USD, neither sends RWF. Their money, a
+    // verified destination out of its hold, and nothing able to carry it.
+    //
+    // So the payout is restated into the currency they are paid in *before*
+    // routing is asked, because routing's answer depends on it. Widening the
+    // corridor table instead would have turned an honest refusal into a
+    // transfer that fails at the rail with the buyer's money already
+    // collected.
+    const followed = await followDestination(db, payout)
+
+    if (followed.outcome === 'no_rate') {
+      // No live quote, so there is no honest figure to restate this to — and
+      // `rates.ts` refuses rather than reaching for the indicative table, which
+      // is the behaviour to preserve rather than work around. `failed` is the
+      // right shelf: it is on §13's ladder, so a rail having a bad minute is
+      // retried, and the operator reads the rail's own sentence rather than the
+      // `currency_not_supported` that routing would otherwise report for a
+      // cause that is not the real one.
+      const { error } = await db.rpc('fail_payout', {
+        p_payout_id: payout.id,
+        p_reason: `Not sent: ${followed.message}`,
+      })
+      if (error) throw new Error(`fail_payout failed: ${error.message}`)
+      return 'failed'
+    }
+
+    // Every later read — routing, the funding preflight, the transfer itself —
+    // must see the restated figure, and the row really did change.
+    payout = followed.payout
 
     // §5.1's routing engine. Deterministic, and it records what it decided
     // whether or not it found anything — `payout_decisions` is the audit.
