@@ -1165,6 +1165,11 @@ export interface RailLiveBalance {
   as_of: Timestamp
   stale: boolean
   error: string | null
+  /**
+   * Which account answered. A rail connected in `test` mode reports its
+   * SANDBOX balance — not money. `null` when nothing answered.
+   */
+  mode: 'test' | 'live' | null
 }
 
 // ---------------------------------------------------------------------------

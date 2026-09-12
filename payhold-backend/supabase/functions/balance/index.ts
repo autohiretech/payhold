@@ -108,6 +108,15 @@ interface AtRailBalance {
   as_of: string | null
   stale: boolean
   error: string | null
+  /**
+   * Which account answered. A rail connected in `test` mode returns its
+   * SANDBOX balance, and sandbox money is not money — showing it beside a
+   * ledger figure without saying so is the one way this endpoint could lie
+   * while every number in it is technically what the provider reported.
+   * `null` when no live call was made and the stored reading did not record
+   * a mode.
+   */
+  mode: 'test' | 'live' | null
 }
 
 /**
@@ -186,7 +195,7 @@ async function atRailForRail(
   knownCurrencies: Currency[],
 ): Promise<AtRailBalance[]> {
   try {
-    const { provider } = await loadProvider(db, tenantId, rail)
+    const { provider, mode } = await loadProvider(db, tenantId, rail)
     const live = await withTimeout(provider.balances(), LIVE_CALL_TIMEOUT_MS, `${rail} balances()`)
     const now = new Date().toISOString()
     return live.map((b) => ({
@@ -196,6 +205,7 @@ async function atRailForRail(
       as_of: now,
       stale: false,
       error: null,
+      mode,
     }))
   } catch (err) {
     // A rail this tenant has never connected — or disconnected between the
@@ -217,6 +227,9 @@ async function atRailForRail(
         as_of: found?.as_of ?? null,
         stale: true,
         error: reason,
+        // The rail could not be reached, so nothing answered and there is no
+        // account to attribute the stored figure to.
+        mode: null,
       }
     })
   }

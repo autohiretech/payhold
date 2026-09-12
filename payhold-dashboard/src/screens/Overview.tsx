@@ -337,6 +337,11 @@ function RailReality({
   const reachable = mine.filter((r) => r.amount !== null && !r.error)
   const unreachable = mine.filter((r) => r.amount === null || r.error)
   const stale = mine.some((r) => r.stale)
+  // Sandbox money is not money. A rail connected in test mode answers with a
+  // test balance, and putting that beside the ledger without a word is the one
+  // way this card could mislead while every figure on it is exactly what the
+  // provider reported.
+  const sandbox = mine.some((r) => r.mode === 'test')
   const allUnreachable = unreachable.length === mine.length
 
   const railSum = reachable.reduce((sum, r) => sum + (r.amount ?? 0), 0)
@@ -358,6 +363,15 @@ function RailReality({
         <span className="text-xs font-semibold tracking-[0.06em] text-fg-muted uppercase">
           At the rail
         </span>
+        {sandbox && (
+          <Badge
+            meta={{
+              label: 'Sandbox',
+              tone: 'pending',
+              hint: 'This rail is connected in test mode, so the figure is its sandbox balance — not real money.',
+            }}
+          />
+        )}
         {stale && (
           <Badge
             meta={{
