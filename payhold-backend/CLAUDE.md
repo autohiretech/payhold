@@ -887,11 +887,12 @@ Four shapes differ from Stripe, all in the file header and all load-bearing:
 typed as returning a promise that throws synchronously sails straight past a
 caller's `.catch()`. `paypal.test.ts` caught that.
 
-**`implemented` moved and `enabled` did not**, which is the whole reason the two
-columns are separate. The class exists; the signed agreement does not, and §16
-wants written payout confirmation per market before live money moves.
-`payout_routes_require_live_provider` reads `enabled`, so turning the rail on
-stays a row an operator changes deliberately.
+**`implemented` moved and `enabled` did not** — at first, which is the whole
+reason the two columns are separate. The class existed and nothing routed to
+it. Both are true now: `20260813000002` enabled collection and
+`20260910000005` the payout route, each a deliberate row with its reason in the
+migration header. `payout_routes_require_live_provider` reads `enabled`, which
+is what made the second one the switch rather than a formality.
 
 The other two stay unbuilt and their notes now say what each is actually waiting
 on — Cash App Pay is a method reached through Square or Stripe rather than an
@@ -985,11 +986,15 @@ app can lack while still taking and sending money perfectly well. Failing a
 connection on it would turn away a working account, so the balance read is
 attempted for its currency list and its failure is not fatal.
 
-**Connecting PayPal does not make PayPal work**, and the split is the point:
-`provider_capabilities.enabled` is still false, so `loadProvider` throws
-`paypal is switched off` for a stored, validated account. Turning it on is a row
-an operator changes deliberately, gated on a signed agreement and §16's written
-payout confirmation per market — a legal fact no code can check.
+**Connecting PayPal did not by itself make PayPal work**, and the split is
+the point: it was connectable while `provider_capabilities.enabled` was false,
+so `loadProvider` threw `paypal is switched off` for a stored, validated
+account. Turning it on was a row an operator changed deliberately —
+`20260813000002` for collection, once `rails.ts` emitted a wallet rail for
+anything to route to, and `20260910000005` for payouts, lifting §16's gate at
+the account holder's instruction. **Both are now on.** The mechanism is what to
+carry forward, not the state: a rail is switched by a row, and that row is
+where the reason is written down.
 
 ## Outbound webhooks are queued by triggers, not by the money functions
 
@@ -2409,10 +2414,11 @@ violated by one row, and Postgres does not promise which it reports.
   enum values, capability rows and payout routes, and no classes. `loadProvider`
   throws for them by name, because a deal routed to an adapter that silently
   collected nothing would be worse than a loud failure — which is the argument
-  §29.19 then applied to the demo rail itself. **PayPal has a class as of `20260808000003`** and is connectable
-  — see below — but its capability row stays `enabled = false`, so
-  `loadProvider` throws for it too, by the *second* of those two branches. That
-  is the distinction `implemented`/`enabled` was split to draw.
+  §29.19 then applied to the demo rail itself. **PayPal is neither** — it has a
+  class as of `20260808000003` and is switched on, for collection by
+  `20260813000002` and for payouts by `20260910000005`. It spent a month
+  `implemented = true, enabled = false`, which is the distinction those two
+  columns were split to draw and the state to picture when reading them.
 - Seed: AutoHire as tenant #1.
 - **Invitations.** `POST /account/signup` creates a company and its owner;
   there is no path for a second person to join one that exists. `tenant_users`

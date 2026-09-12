@@ -310,9 +310,14 @@ charge.
   **webhook verification is a network call** rather than an HMAC we can compute
   — which is the rail `verifySignature`'s promise-returning shape was designed
   for. An unreachable PayPal means *unverified*, never verified; invariant 2 has
-  no degraded mode. **Built is not enabled**: no signed agreement, and §16 wants
-  written payout confirmation per market, so the capability row stays off and
-  `payout_routes_require_live_provider` keeps its routes refused.
+  no degraded mode. **Built, and since switched on.** It shipped
+  `implemented = true, enabled = false` — the split those two columns exist to
+  draw — and stayed there while `rails.ts` emitted no `wallet` rail for
+  anything to route to. `20260813000002` enabled it for **collection** once the
+  rail existed, and `20260910000005` lifted §16's payout gate at the account
+  holder's own instruction, recorded in that migration's header. Venmo and Cash
+  App Pay stay refused for payouts on §17 grounds, which is a rule about the
+  instruments rather than a gate anybody may lift.
 - **Cash App Pay rides Stripe, and is deliberately not an adapter.** It has no
   API of its own — Square or Stripe — and Square would mean a fourth set of
   credentials, a fourth webhook function and a fourth balance for `reconcile`
@@ -915,11 +920,13 @@ A person pressing retry gets **one** more attempt rather than a fresh series,
 because the attempt counter is the retry budget and zeroing it would hand a rail
 that keeps refusing a fresh run of automatic attempts.
 
-**Five rails are declared and disabled** — PayPal, Venmo, Cash App Pay, Alipay,
+**Four rails are declared and disabled** — Venmo, Cash App Pay, Alipay,
 WeChat Pay. They exist so a seller who picks one gets a specific sentence
 instead of "unknown destination type", and their rows carry no `provider`, which
 a check constraint turns into "cannot be enabled". §29.3, enforced by the
-database rather than by review.
+database rather than by review. **PayPal is no longer among them**: its payout
+route was switched on by `20260910000005`, at the account holder's instruction
+and recorded there.
 
 **Two new payout statuses, and the difference is who ends them.**
 `held_for_review` ends when a named person approves. `needs_verification` (§12)
