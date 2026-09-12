@@ -15,14 +15,24 @@
  *      may do nothing else
  *   3. the routing engine picks a destination and a rail, or blocks it (§5.1).
  *      It may also do nothing else
- *   4. the provider is called
- *   5. only then is it booked
+ *   4. the rail is asked whether the amount is withdrawable, and the payout is
+ *      blocked rather than attempted if it plainly is not (`payout-funding.ts`)
+ *   5. the provider is called
+ *   6. only then is it booked
  *
- * Step 4 before step 5 is deliberate and is the direction to fail in. If the
+ * Step 5 before step 6 is deliberate and is the direction to fail in. If the
  * transfer succeeds and the booking does not, the next pass re-sends with the
  * same `idempotency_key`, the provider returns the same transfer, and it books
  * then. The reverse — booking a transfer that never left — would report a
  * seller paid who was not.
+ *
+ * Step 4 is the one step that may be skipped, and skipping it is the safe
+ * direction. It asks the rail a question the rail may decline to answer, and
+ * an unanswered question proceeds to step 5 exactly as before — a preflight
+ * that blocked on silence would stop every payout on every rail that does not
+ * report a withdrawable figure. It never fails a payout either: what it does
+ * is `blocked`, which keeps §13's clock and is re-asked next pass, because
+ * nothing refused us here and the condition comes good on its own.
  *
  * Step 2 before step 3 also matters, and is a dependency rather than a
  * preference: `screen_payout` is what blocks a payout whose deal is disputed,
@@ -35,6 +45,7 @@
 import type { SupabaseClient } from 'npm:@supabase/supabase-js@2'
 import { amountLeaving } from './figures.ts'
 import { loadProvider } from './load-provider.ts'
+import { railFunding, shortfallReason } from './payout-funding.ts'
 import { loadSettings } from './settings.ts'
 import {
   type Country,
@@ -113,6 +124,48 @@ interface RouteDecision {
   provider: Provider | null
   reason_code: string
   is_fallback: boolean
+}
+
+/**
+ * The rail's own answer on whether this payout is withdrawable today.
+ *
+ * Returns `null` for every case that is not a plain, reported shortfall — a
+ * rail with no adapter, a rail that cannot be loaded, a `balances()` call that
+ * threw, a currency it said nothing about, a rail that reports no withdrawable
+ * figure at all. All of those mean "we did not learn anything", and the caller
+ * proceeds to the transfer exactly as it did before this check existed.
+ *
+ * Swallowing the failures is the point rather than an oversight: the transfer
+ * is the next thing that would have failed anyway, and it fails with the
+ * rail's own sentence recorded against the payout, which is more use to an
+ * operator than our guess about why we could not ask.
+ */
+async function askRailForFunding(
+  db: SupabaseClient,
+  payout: Payout,
+  rail: Provider | null,
+): Promise<
+  (Extract<ReturnType<typeof railFunding>, { verdict: 'short' }> & {
+    rail: string
+    mode: 'test' | 'live'
+  }) | null
+> {
+  if (!rail) return null
+
+  try {
+    const { provider, mode } = await loadProvider(db, payout.tenant_id, rail)
+    const verdict = railFunding(await provider.balances(), payout.currency, payout.amount)
+
+    return verdict.verdict === 'short' ? { ...verdict, rail, mode } : null
+  } catch (err) {
+    console.error('payout funding preflight skipped', {
+      payout_id: payout.id,
+      tenant_id: payout.tenant_id,
+      rail,
+      message: err instanceof Error ? err.message : String(err),
+    })
+    return null
+  }
 }
 
 export async function dispatchPayout(
@@ -299,6 +352,29 @@ export async function dispatchPayout(
       p_reason: `Not sent: ${fundedError.message}`,
     })
     return 'failed'
+  }
+
+  // Step 4: ask the rail before asking it to send.
+  //
+  // Its own error domain, deliberately outside the `try` below, and loading the
+  // provider a second time to get it. That costs a row read and a decrypt per
+  // payout and buys the one property that matters: a preflight cannot fail a
+  // payout. Inside that block every throw becomes `fail_payout`, which spends
+  // §13's retry budget — and a question we could not ask must never cost a
+  // seller one of their five attempts.
+  //
+  // `unknown` proceeds. See `payout-funding.ts` for why silence from a rail is
+  // not a balance of zero, and why this asks about `available` rather than the
+  // total the reconciliation pass compares.
+  const funding = await askRailForFunding(db, payout, decision.provider)
+
+  if (funding?.verdict === 'short') {
+    const { error } = await db.rpc('hold_payout_unfunded', {
+      p_payout_id: payout.id,
+      p_reason: shortfallReason(funding, funding.rail, funding.mode),
+    })
+    if (error) throw new Error(`hold_payout_unfunded failed: ${error.message}`)
+    return 'blocked'
   }
 
   // The rail comes from the decision, not from the seller's country: which
