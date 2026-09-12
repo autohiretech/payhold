@@ -109,7 +109,7 @@ export function BalancesTable({
             {empty.length > 0 && (
               <>
                 <tr>
-                  <Td colSpan={6} className="bg-surface-2/40 py-2.5">
+                  <Td colSpan={7} className="bg-surface-2/40 py-2.5">
                     <button
                       type="button"
                       onClick={() => setShowEmpty((v) => !v)}
@@ -477,13 +477,16 @@ function CurrencyRow({
 
         <Td responsive>
           <RevenueCell balance={balance} currency={currency} />
+        </Td>
+
+        <Td responsive>
           <LedgerCell balance={balance} currency={currency} diff={diff} />
         </Td>
       </tr>
 
       {expanded && hasDetail && (
         <tr>
-          <Td colSpan={6} className="bg-surface-2/40">
+          <Td colSpan={7} className="bg-surface-2/40">
             <RowDetail item={item} s={s} expected={expected} diff={diff} serviceFeeRate={serviceFeeRate} />
           </Td>
         </tr>
@@ -664,14 +667,17 @@ function UnreachableNote() {
  * and usually is not a shortfall either: the fee is struck when a deal is
  * RELEASED, so money sitting in `held` against open deals has earned nothing
  * yet. That is the difference worth showing, so a zero says which of the two
- * it is rather than leaving the reader to guess.
+ * it is rather than leaving the reader to guess — "nothing released yet"
+ * while a deal is open and holding money, "nothing to earn yet" when there
+ * isn't even that.
  */
 function RevenueCell({ balance, currency }: { balance: Balance | null; currency: Currency }) {
   if (!balance) {
     return <span className="text-fg-subtle">—</span>
   }
   const earned = balance.fees_retained
-  const awaiting = balance.held > 0 && earned === 0
+  const awaitingRelease = earned === 0 && balance.held > 0
+  const nothingToEarn = earned === 0 && balance.held <= 0
   return (
     <div>
       <span className="tabular font-medium">{formatMoneyShort(earned, currency)}</span>
@@ -679,7 +685,11 @@ function RevenueCell({ balance, currency }: { balance: Balance | null; currency:
         className="mt-0.5 text-[11px] text-fg-subtle"
         title="Your service fee plus any tax collected, bundled — no per-currency read splits them. Struck when a deal is released, and still sitting at the provider: nothing sweeps it out."
       >
-        {awaiting ? 'nothing released yet' : 'fee + tax, at the provider'}
+        {awaitingRelease
+          ? 'nothing released yet'
+          : nothingToEarn
+            ? 'nothing to earn yet'
+            : 'fee + tax, at the provider'}
       </div>
     </div>
   )
