@@ -46,14 +46,37 @@ create extension if not exists pg_net;
 -- The times are staggered rather than aligned, and the order is the safety
 -- argument:
 --
---   :00  reconcile        drift freezes a tenant's payouts
---   :10  auto-release     timers fire, queueing payouts with a clearance date
---   :20  payout-dispatch  sends whatever has cleared
+--   :00        reconcile        drift freezes a tenant's payouts
+--   :10        auto-release     timers fire, queueing payouts with a clearance date
+--   :05–:55/5  payout-dispatch  sends whatever has cleared
 --
 -- Reconciliation goes first because a dispatch that ran before it would send
 -- money out of a balance we already know we cannot explain. Auto-release goes
 -- before dispatch only so a deal whose timer fires this hour is not waiting a
 -- full clearance window plus an hour; nothing breaks if that order slips.
+--
+-- **Dispatch went from hourly to every five minutes (2026-09-12), and the
+-- offset is what keeps the ordering above true.** A tenant on
+-- `clearance_days = 0` has payouts due the instant a deal releases, and on the
+-- old `20 * * * *` a host who finished a trip at :21 waited fifty-nine minutes
+-- for money the engine already considered payable. `5-59/5` fixes that without
+-- giving up the argument: it never fires at :00, so it cannot race
+-- reconciliation's own pass, and reconcile keeps a five-minute head start
+-- before the first dispatch of the hour.
+--
+-- What that narrows rather than closes: drift arising at :01 is undetected
+-- until the next :00 whatever this schedule says, and a dispatch inside that
+-- window sends against a balance nobody has checked this hour. The structural
+-- guard is `dispatchPayout`'s own first act — it reads `tenants.status` and
+-- freezes the payout rather than sending — so the exposure is the single pass
+-- that overlaps a reconcile still in flight, not the hour. Twelve passes an
+-- hour means the freeze is observed within five minutes of being written
+-- instead of within sixty.
+--
+-- The one uneven gap is deliberate and worth knowing: :55 to :05 is ten
+-- minutes rather than five, because closing it means firing at :00 alongside
+-- reconcile. A ten-minute wait once an hour is the price of never dispatching
+-- while the pass that could freeze the account is running.
 --
 -- Webhook delivery runs every minute on its own, independent of all of it, and
 -- settlement every five, for the same reason: both are somebody waiting.
@@ -76,7 +99,7 @@ select cron.schedule('payhold-auto-release', '10 * * * *', $$
   );
 $$);
 
-select cron.schedule('payhold-payout-dispatch', '20 * * * *', $$
+select cron.schedule('payhold-payout-dispatch', '5-59/5 * * * *', $$
   select net.http_post(
     url := 'https://mwnbjjlilqrwdmwutbxr.supabase.co/functions/v1/payout-dispatch',
     headers := jsonb_build_object('x-cron-secret',

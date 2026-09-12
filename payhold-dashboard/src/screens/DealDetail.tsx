@@ -765,23 +765,49 @@ function Timeline({ deal, now }: { deal: Deal; now: Date }) {
     {
       label: 'Clearing',
       tone: stage(3),
+      // "clears 2m ago" is what this produced for a deal already past its due
+      // time — `formatRelative` renders a past instant as "2m ago" and the
+      // verb in front of it then contradicts it. A window that has closed is
+      // described in the past tense.
       detail: deal.released_at
         ? `Released ${formatDateTime(deal.released_at)}${
             deal.payout_due_at && at === 3
-              ? ` · clears ${formatRelative(deal.payout_due_at, now)}`
+              ? new Date(deal.payout_due_at) <= now
+                ? ` · due ${formatRelative(deal.payout_due_at, now)}`
+                : ` · clears ${formatRelative(deal.payout_due_at, now)}`
               : ''
           }`
         : 'Needs both sides',
     },
     {
       label: 'Ready to pay out',
+      // The last branch used to be an unconditional 'Inside the clearance
+      // window', which is a claim about the clock decided purely by the stage
+      // — and it is false for every deal whose window has already closed
+      // while it waits to be promoted. A tenant on `clearance_days = 0` is out
+      // of its window from the instant it releases, so that sentence was wrong
+      // for the whole of `clearing` on such an account: the row above said
+      // "clears 2m ago" and this one said the money was still inside a window
+      // that had never had any length.
+      //
+      // What actually stands between a due deal and this step is
+      // `mature_clearing_deals()`, which runs in the payout-dispatch pass
+      // rather than on a timer of its own — so the honest answer names the
+      // wait instead of denying it. The cadence deliberately goes unstated:
+      // it is a line in `scripts/schedule-cron.sql` and it moved the same day
+      // this was written, so a sentence quoting it would be wrong by the
+      // afternoon. `payout_due_at` is the fact to read, not
+      // the status, for the reason §29.9 derives this pair from the deal's own
+      // window rather than storing them.
       tone: stage(4),
       detail:
         at === 4
           ? 'The window has passed and the payout has not gone. Check the Payouts screen.'
           : at > 4
             ? 'Cleared'
-            : 'Inside the clearance window',
+            : deal.payout_due_at && new Date(deal.payout_due_at) <= now
+              ? 'Due now, and waiting on the next payout run to promote it.'
+              : 'Inside the clearance window',
     },
     {
       label: 'Paid out to seller',
