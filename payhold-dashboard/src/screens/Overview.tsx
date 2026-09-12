@@ -94,12 +94,16 @@ export function OverviewPage() {
     return Math.abs(ledgerTotal) + railTotal
   }
 
-  // Currencies with real money in them — in the ledger, at a rail, or both —
-  // lead; anything sitting at exactly zero everywhere sinks to the bottom
+  // Currencies PayHold actually has books for lead, whatever the amounts:
+  // this is the only money the product is accounting for, and sorting on size
+  // alone buried it — a sandbox rail holding RWF 4.9M of test float outranked
+  // the one currency with a real deal in it. Within each group, size still
+  // decides, and a currency sitting at zero everywhere sinks to the bottom
   // rather than pushing the account's actual balances below the fold.
-  const sortedCurrencies = [...currencies].sort(
-    (a, b) => activityWeight(b) - activityWeight(a) || a.localeCompare(b),
-  )
+  const sortedCurrencies = [...currencies].sort((a, b) => {
+    const booked = Number(ledgerByCurrency.has(b)) - Number(ledgerByCurrency.has(a))
+    return booked || activityWeight(b) - activityWeight(a) || a.localeCompare(b)
+  })
 
   const railStatus: 'pending' | 'error' | 'success' = atRail.isPending
     ? 'pending'
@@ -130,7 +134,7 @@ export function OverviewPage() {
     <>
       <PageHeader
         title="Overview"
-        subtitle="Where every shilling currently sits, and what needs attention."
+        subtitle="Where the money is, whose it is, and what needs attention."
       />
 
       {/* Balances, one row per currency — a tenant can hold more than one,

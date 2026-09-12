@@ -231,6 +231,19 @@ export function AdminPage() {
             </tbody>
           </Table>
         )}
+
+        {/* A refusal here has to be readable, and until now it was not: the
+            endpoint declines an unfreeze while any reconciliation case on the
+            account is open — the same condition the run sign-off enforces — and
+            nothing rendered it. The button greyed for an instant and the row
+            stayed frozen, which reads as a broken control rather than a rule and
+            sends somebody hunting for a bug instead of to the run that raised the
+            case. The refusal already names where to go; it had nowhere to say it. */}
+        {(unfreeze.isError || freeze.isError) && (
+          <div className="px-6 pb-5">
+            <ErrorNote message={(unfreeze.error ?? freeze.error)!.message} />
+          </div>
+        )}
       </Card>
 
       {/* This used to be the blunt instrument: it closed an account's open

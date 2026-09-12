@@ -1101,7 +1101,7 @@ The three-way distinction is the thing to hold on to:
 | `reserve` | no — carved out of the pool | yes, as `reserved` |
 | `cross_rail_offset` | no — it is on the rail that collected it | yes, as `tenant_funds` |
 | `cross_rail_payout` | **yes** — from the rail that paid the seller | yes, as `tenant_funds` (negative) |
-| `external_transfer` | either way, and no deal behind it | yes, as `tenant_funds` |
+| `external_transfer` | either way, and no deal behind it | yes, as `tenant_funds` (no writer since 2026-09-12) |
 | `provider_fee` | **yes** — the rail took it | no |
 
 ### The seventh bucket — `20260817000003` / `20260817000004`
@@ -1146,15 +1146,34 @@ pool. That is also why `seller_wallet_rows` needed no change — they fall to it
 a wallet is the ledger less everything that stopped being a seller's, which is
 now `fees_retained` **and** `tenant_funds`.
 
-**Top-ups are recorded by a person.** Under bring-your-own-keys PayHold never
-moves money between a tenant's own provider accounts; they top Flutterwave up
-from their Stripe payouts through their bank, over days, entirely outside
-anything this system observes. `record_external_transfer` /
-`POST /v1/balance/external-transfers` is where that enters the ledger, and it
-**refuses an API key and requires a reference** for
-`paid_needs_a_provider_reference`'s reason. Reconciling Flutterwave on a delta
-basis was the alternative and was rejected: it would have silenced real drift
-along with this.
+**Top-ups were recorded by a person, and that door is closed** (2026-09-12).
+Under bring-your-own-keys PayHold never moves money between a tenant's own
+provider accounts; they top Flutterwave up from their Stripe payouts through
+their bank, over days, entirely outside anything this system observes.
+`POST /v1/balance/external-transfers` was where that entered the ledger,
+API-key-refused and reference-required for `paid_needs_a_provider_reference`'s
+reason.
+
+What it never checked was the money. `record_external_transfer` validated the
+actor, the reference and a non-zero amount and asked the rail registry nothing,
+so the only two entries ever filed on the linked project included a GHS balance
+on PayPal — a currency that rail cannot hold. `tenant_funds` is in
+`expected()`, so such a claim is not a display bug: it is a payout freeze
+waiting for the next reconciliation pass, which is the outcome the feature
+existed to prevent. Migration `20260912000002` reverses those two entries with
+mirrors rather than deleting them.
+
+**`record_external_transfer` itself is still here**, revoked as it always was,
+with its tests — the ledger keeps the `external_transfer` entry type,
+`rail_balances` still reads it, and `cross_rail_offset` / `cross_rail_payout`
+share the bucket. Only the endpoint and the dashboard card are gone. Bringing
+it back means validating `(provider, currency)` against the rail registry
+inside the function, before the insert.
+
+Reconciling Flutterwave on a delta basis was the original alternative and was
+rejected because it would have silenced real drift along with this; that
+tradeoff is unchanged and is what a tenant doing genuine cross-rail top-ups
+will run into.
 
 `amountLeaving` in `_shared/figures.ts` has a matching list, `POOL_ENTRY_TYPES`,
 and **the two must agree** — there was a third copy in the dashboard mock, and

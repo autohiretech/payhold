@@ -95,13 +95,29 @@ an offsetting pair (`cross_rail_offset` on the collecting rail,
 it actually still is. Without it the ledger reported drift on *both* rails at
 once on every cross-border deal, and drift freezes payouts automatically.
 
-The other thing in that bucket is the tenant's own top-ups. Under
+The other thing that lands in that bucket is the tenant's own top-ups, and
+**there is no longer a way to record one** (2026-09-12). Under
 bring-your-own-keys nothing moves money between their Stripe and Flutterwave
 accounts — they do it through their bank, over days, where PayHold cannot see
-it — so `POST /v1/balance/external-transfers` is where a person records one,
-with a reference. Person-only, for `paid_needs_a_provider_reference`'s reason:
-a claim that money moved somewhere we cannot check is how a difference gets
-papered over rather than explained.
+it — so `POST /v1/balance/external-transfers` let a person state that it had
+happened, person-only and with a reference.
+
+It was removed because of what it did not check. `record_external_transfer`
+validated the actor, the reference and a non-zero amount and nothing about the
+money: not whether the rail can hold that currency, not whether the account
+exists. The only two entries ever filed included a **GHS balance on PayPal**, a
+rail that carries USD and EUR alone — and since `tenant_funds` is inside
+`reconciliation.ts`'s `expected()`, a mistyped claim does not merely mislead a
+screen, it freezes the account's payouts at the next pass. A feature whose
+failure mode is the thing it exists to prevent is worse than its absence.
+
+**The gap it leaves is real and unaddressed**: a tenant who genuinely tops one
+rail up from another now has no way to explain the balance, and reconciliation
+will read that top-up as drift. Nobody has needed it yet — no tenant has ever
+funded a cross-rail deal — so the honest state is "closed until it validates
+the money", which means `(provider, currency)` checked against the rail
+registry, and the form converting with `toMinorUnits` rather than a hardcoded
+x100 that was wrong for every zero-decimal currency it offered.
 
 `fees_retained` exists because of a bug it is worth not reintroducing. Our
 commission is a debit in the clearing pool, but **nothing sweeps it out of the
