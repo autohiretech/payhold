@@ -41,13 +41,31 @@ export function toMinorUnits(major: number, currency: Currency): Money {
 
 export function formatMoney(amount: Money, currency: Currency): string {
   const zeroDecimal = ZERO_DECIMAL_CURRENCIES.includes(currency)
-  return new Intl.NumberFormat('en-GB', {
-    style: 'currency',
-    currency,
-    currencyDisplay: 'code',
-    minimumFractionDigits: zeroDecimal ? 0 : 2,
-    maximumFractionDigits: zeroDecimal ? 0 : 2,
-  }).format(toMajorUnits(amount, currency))
+  const major = toMajorUnits(amount, currency)
+  try {
+    return new Intl.NumberFormat('en-GB', {
+      style: 'currency',
+      currency,
+      currencyDisplay: 'code',
+      minimumFractionDigits: zeroDecimal ? 0 : 2,
+      maximumFractionDigits: zeroDecimal ? 0 : 2,
+    }).format(major)
+  } catch {
+    // `Intl` accepts ISO 4217 and throws a RangeError on anything else, which
+    // takes the whole screen down with it. A rail can and does report codes
+    // that are not ISO — Flutterwave answers with `eNGN` for the eNaira
+    // wallet — and the moment this screen started listing every currency a
+    // provider holds rather than only the ones PayHold has deals in, one of
+    // those reached the formatter and blanked the page.
+    //
+    // A balance we cannot format is still a balance, and refusing to render
+    // it is strictly worse than rendering it plainly. The grouping separator
+    // is the only thing lost.
+    return `${currency} ${major.toLocaleString('en-GB', {
+      minimumFractionDigits: zeroDecimal ? 0 : 2,
+      maximumFractionDigits: zeroDecimal ? 0 : 2,
+    })}`
+  }
 }
 
 /** Compact form for stat tiles, where the exact centime is noise. */
