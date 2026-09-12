@@ -45,6 +45,12 @@ export function SettingsPage() {
   // SQL and in settings.ts (§29.18).
   const [ownsVerification, setOwnsVerification] = useState(true)
   const [holdHours, setHoldHours] = useState('')
+  // `'auto'` for an account that never saved it, matching `settings.ts`'s own
+  // fallback and `due_payouts`'s `setting_text(..., 'auto')`. Save writes every
+  // field on this form, so a wrong starting value here would switch a tenant's
+  // payouts to pull-only the first time they saved anything at all — the trap
+  // the dispute-relay and verification-ownership comments above both describe.
+  const [payoutMode, setPayoutMode] = useState<'auto' | 'wallet'>('auto')
   const [saved, setSaved] = useState(false)
 
   // Seed the form once the real values arrive, then leave it alone so typing
@@ -66,6 +72,7 @@ export function SettingsPage() {
     setRelayDisputes(settings.data.dispute_decision_relay ?? false)
     setOwnsVerification(settings.data.platform_owns_verification ?? true)
     setHoldHours((settings.data.destination_hold_hours ?? 24).toString())
+    setPayoutMode(settings.data.payout_mode ?? 'auto')
   }, [settings.data])
 
   const save = useMoneyAction(() =>
@@ -88,6 +95,7 @@ export function SettingsPage() {
       dispute_decision_relay: relayDisputes,
       platform_owns_verification: ownsVerification,
       destination_hold_hours: Number(holdHours),
+      payout_mode: payoutMode,
     }),
   )
 
@@ -436,6 +444,41 @@ export function SettingsPage() {
                       Only the account owner can change this.
                     </span>
                   )}
+                </span>
+              </label>
+            </div>
+          </Card>
+
+          {/* When money moves, which is a different question from whether a
+              rule stops it — hence its own card rather than a line in the one
+              below. */}
+          <Card>
+            <CardHeader
+              title="Sending payouts"
+              subtitle="Cleared money still clears on the same window either way. This is only about who starts the transfer."
+            />
+            <div className="space-y-5 px-6 py-5">
+              <label className="flex items-start gap-3">
+                <input
+                  type="checkbox"
+                  checked={payoutMode === 'wallet'}
+                  onChange={(e) => setPayoutMode(e.target.checked ? 'wallet' : 'auto')}
+                  className="mt-0.5 size-4 rounded border-line-strong text-brand focus:ring-brand/30"
+                />
+                <span>
+                  <span className="block text-sm font-semibold text-fg">
+                    Only send a payout when a seller asks for it
+                  </span>
+                  <span className="mt-1 block text-xs leading-relaxed text-fg-muted">
+                    On, the scheduled pass sends nothing on its own — money
+                    clears, lands in the seller's available balance, and waits
+                    for them to ask. Off, a cleared payout goes out on the next
+                    pass without anybody pressing anything. Either way a
+                    request still goes through every check: the eligibility
+                    gate, the risk rules and the routing engine all run exactly
+                    as they do for the scheduled pass, so this changes when
+                    money moves and never whether it may.
+                  </span>
                 </span>
               </label>
             </div>
