@@ -196,7 +196,14 @@ describe('API key boundaries', () => {
       'settings router',
       'payouts approveReview',
       'payouts hold',
-      'balance recordExternalTransfer',
+      // 'balance recordExternalTransfer' stood here until the handler was
+      // removed (2026-09-12). It was on this list because a claim that money
+      // moved somewhere PayHold cannot check is a person's statement, and a
+      // client's server filing them could have balanced its own books against
+      // us. The door is gone rather than guarded, which is the stronger form of
+      // the same protection — but only while it stays gone: if
+      // POST /balance/external-transfers ever comes back, put this line back
+      // with it.
       'account resetSandbox',
       'ai-decisions router',
     ]) {
