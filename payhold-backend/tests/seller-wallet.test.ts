@@ -326,14 +326,104 @@ describe('requesting a withdrawal', () => {
     expect(p.next_attempt_at).not.toBeNull()
   })
 
-  test('refuses when nothing has cleared', async () => {
+  test('can be asked again once a payout has failed', async () => {
+    // The gate used to be `withdrawal_requested_at is null`, and since that
+    // column is never cleared — it answers "was this pulled or did it go out
+    // on the clock" — the ask was once per payout for its whole life. A seller
+    // whose transfer then failed had no way to ask again. That was survivable
+    // while the scheduled pass picked failures up on its own, and is not in
+    // `payout_mode = 'wallet'`, where the ask is the only thing that sends.
+    const tenant = await seedTenant()
+    const seller = await seedSeller(tenant)
+    const deal = await seedFundedDeal(tenant, seller)
+    await release(deal)
+    await mature(deal)
+
+    await h.db.query(`select * from request_withdrawal($1, 'seller-app')`, [seller])
+
+    const { rows: [first] } = await h.db.query<{ withdrawal_requested_at: Date }>(
+      `select withdrawal_requested_at from payouts where deal_id = $1`, [deal],
+    )
+
+    // The rail refused it, and the clock was cleared the way a spent budget
+    // clears it.
+    await h.db.query(
+      `update payouts set status = 'failed', failure_reason = 'rail said no',
+              next_attempt_at = null
+        where deal_id = $1`,
+      [deal],
+    )
+
+    await h.db.query(`select * from request_withdrawal($1, 'seller-app')`, [seller])
+
+    const { rows: [again] } = await h.db.query<{
+      withdrawal_requested_at: Date
+      next_attempt_at: Date | null
+      attempts: number
+    }>(
+      `select withdrawal_requested_at, next_attempt_at, attempts
+         from payouts where deal_id = $1`,
+      [deal],
+    )
+
+    // Re-armed, so the next pass picks it up rather than waiting out a backoff.
+    expect(again.next_attempt_at).not.toBeNull()
+    // The first ask is still the one recorded: that column answers whether
+    // this was pulled, and the audit log carries one row per press.
+    expect(again.withdrawal_requested_at).toEqual(first.withdrawal_requested_at)
+    // A person asking again gets one more attempt, never a fresh series.
+    expect(again.attempts).toBe(0)
+  })
+
+  test('a second press on a scheduled payout still stamps nothing', async () => {
+    // The protection the original filter was written for: two taps on a slow
+    // connection. Only a finished attempt reopens the ask, so a payout still
+    // waiting its turn is not re-armed by an impatient second press.
+    const tenant = await seedTenant()
+    const seller = await seedSeller(tenant)
+    const deal = await seedFundedDeal(tenant, seller)
+    await release(deal)
+    await mature(deal)
+
+    await h.db.query(`select * from request_withdrawal($1, 'seller-app')`, [seller])
+
+    await rejects(
+      () => h.db.query(`select * from request_withdrawal($1, 'seller-app')`, [seller]),
+      /already been asked for/,
+    )
+  })
+
+  test('a payout held for review is not askable, and says so', async () => {
+    // Invariant 11: a rule or a person stopped it, and a seller pressing a
+    // button in their own app is not the named person who clears that.
+    const tenant = await seedTenant()
+    const seller = await seedSeller(tenant)
+    const deal = await seedFundedDeal(tenant, seller)
+    await release(deal)
+    await mature(deal)
+    await h.db.query(
+      `update payouts set status = 'held_for_review' where deal_id = $1`, [deal],
+    )
+
+    await rejects(
+      () => h.db.query(`select * from request_withdrawal($1, 'seller-app')`, [seller]),
+      /waiting on a review/,
+    )
+  })
+
+  test('refuses when nothing has cleared, and says which case it is', async () => {
+    // The refusal used to be one sentence — "has nothing cleared to withdraw"
+    // — for every case, and AutoHire puts our message straight into a toast.
+    // A host looking at money they can see, told they have nothing, reads that
+    // as an accusation. It now names the case; a funded, unreleased deal is
+    // genuinely "nothing to withdraw yet".
     const tenant = await seedTenant()
     const seller = await seedSeller(tenant)
     await seedFundedDeal(tenant, seller)
 
     await rejects(
       () => h.db.query(`select * from request_withdrawal($1, 'seller-app')`, [seller]),
-      /nothing cleared to withdraw/,
+      /nothing to withdraw yet/,
     )
   })
 
