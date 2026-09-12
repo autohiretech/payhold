@@ -1299,7 +1299,7 @@ Deno.test('a beneficiary name splits on the first space, and a single word fills
 // balances() — the clearing split
 // ---------------------------------------------------------------------------
 
-Deno.test('balances sums the Collection and Payout wallets into amount; the Collection wallet is reported, not a derived gap', async () => {
+Deno.test('balances reports the rail total, with the withdrawable subset and the rest', async () => {
   const { restore } = intercept({
     status: 'success',
     data: [{
@@ -1312,21 +1312,20 @@ Deno.test('balances sums the Collection and Payout wallets into amount; the Coll
   try {
     const p = new FlutterwaveProvider(CREDS, '', 'live')
     const [usd] = await p.balances()
-    // `amount` is the two wallets summed: 100 Collection + 60 Payout, not
+    // `amount` is the rail's TOTAL — `ledger_balance` — not
     // `ledger_balance` re-labelled and not either one alone. This is the
     // figure `reconciliation.ts` compares against everything still owed —
     // reading only Collection would under-report the moment Payout holds
     // real money.
-    assertEquals(usd.amount, 16_000)
+    assertEquals(usd.amount, 10_000)
     // `available` is still exactly the Payout wallet — what a disbursement
     // pre-flight check should read before attempting a transfer.
     assertEquals(usd.available, 6_000)
     // No settlement-lag figure exists between two independent wallets, so
     // this is never the Collection/Payout gap re-labelled as "clearing".
-    // The Collection wallet, reported as itself — not `amount - available`,
-    // and not null. It is money at the rail that cannot fund a payout today,
-    // which is what the screen's "not yet available" column means.
-    assertEquals(usd.pending, 10_000)
+    // The part of the total that cannot move yet: 100 total less 60
+    // withdrawable.
+    assertEquals(usd.pending, 4_000)
     assertEquals(usd.reserved, 500)
     // Flutterwave's `/balances` names no clearing date.
     assertEquals(usd.available_on, null)
@@ -1351,10 +1350,9 @@ Deno.test('balances reports available and reserved as null when the rail does no
     // Never zero, never derived from the ledger figure — the rail simply did
     // not send an `available_balance` for this currency.
     assertEquals(rwf.available, null)
-    // The Collection wallet is present on this row and RWF is zero-decimal,
-    // so it reports 1000 unchanged — the same figure `amount` carries here,
-    // because the Payout wallet term is absent.
-    assertEquals(rwf.pending, 1000)
+    // No `available_balance` on this row, so there is no subset to subtract
+    // and no honest figure for what cannot move — null, never zero.
+    assertEquals(rwf.pending, null)
     assertEquals(rwf.reserved, null)
     assertEquals(rwf.available_on, null)
   } finally {
@@ -1362,7 +1360,7 @@ Deno.test('balances reports available and reserved as null when the rail does no
   }
 })
 
-Deno.test('balances sums both wallets even when Payout exceeds Collection', async () => {
+Deno.test('a withdrawable subset larger than the total never yields a negative remainder', async () => {
   // Two independent wallets, not a settlement-lag pair — `available_balance`
   // (Payout) is under no constraint to stay below `ledger_balance`
   // (Collection): a direct bank top-up straight into Payout, bypassing
@@ -1375,11 +1373,10 @@ Deno.test('balances sums both wallets even when Payout exceeds Collection', asyn
   try {
     const p = new FlutterwaveProvider(CREDS, '', 'live')
     const [usd] = await p.balances()
-    assertEquals(usd.amount, 13_000)
-    // Collection is reported as itself even when it is the smaller wallet —
-    // there is no clamping and no subtraction, so a Payout-heavy account
-    // still shows exactly what sits on each side.
-    assertEquals(usd.pending, 5_000)
+    // The total stands as reported; the remainder floors at zero rather than
+    // going negative, which is the one case a subtraction has to guard.
+    assertEquals(usd.amount, 5_000)
+    assertEquals(usd.pending, 0)
   } finally {
     restore()
   }

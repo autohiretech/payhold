@@ -1478,27 +1478,34 @@ export class FlutterwaveProvider implements PaymentProvider {
       // response) still gets exactly that figure, via the `?? 0` on the other
       // term — this changes nothing for a currency that has never held a
       // Payout balance, and only stops under-reporting once one does.
-      amount: toMinor((b.ledger_balance ?? 0) + (b.available_balance ?? 0), b.currency),
+      // `ledger_balance` is the TOTAL this rail holds in the currency, and
+      // `available_balance` is the withdrawable SUBSET of it — not a second
+      // wallet to add on top.
+      //
+      // This was briefly summed, on the reading that Flutterwave's dashboard
+      // "Collection balance" and "Payout balance" were two independent pots.
+      // The arithmetic settles it and the sum was wrong: at 13:00 the rail
+      // reported ledger 5,966,457 with available 0, matching the ledger's
+      // expected 5,966,457 exactly. Money then became withdrawable and the
+      // rail reported ledger 5,966,457 STILL, with available 5,956,457 — the
+      // total unchanged, a subset of it now movable. Summing them claimed
+      // 11,922,914 at the rail, manufactured a 5,956,457 surplus out of
+      // nothing, and would have re-frozen payouts on the next pass for a
+      // discrepancy that does not exist.
+      amount: toMinor(b.ledger_balance ?? b.available_balance ?? 0, b.currency),
       // `available_balance` — the Payout wallet: what Flutterwave says can be
       // sent out right now, via Transfers, with no further action. This is
       // the figure a pre-flight check ahead of a disbursement should read.
       available: b.available_balance != null ? toMinor(b.available_balance, b.currency) : null,
-      // The Collection wallet — `ledger_balance` — carried under the field the
-      // dashboard renders as "Not yet available", which is exactly what it is:
-      // money at the rail that cannot fund a payout today.
-      //
-      // It is NOT a settlement lag, and nothing here should imply one. Stripe's
-      // `pending[]` becomes available by itself given time; Collection money
-      // becomes Payout money only through the settlement-destination
-      // preference or a manual transfer, and `available_on` stays null for
-      // this rail precisely because no such date exists. The dashboard labels
-      // this cell "Flutterwave: collection wallet" and its schedule cell "no
-      // schedule — moves on request" for that reason.
-      //
-      // Reporting it as null instead — briefly the case — was worse than the
-      // name: it deleted 59,664.57 NGN and 4,871,091 RWF from the owner's
-      // screen, which is the money he opened the page to find.
-      pending: b.ledger_balance != null ? toMinor(b.ledger_balance, b.currency) : null,
+      // What the rail holds but will not let move yet: the total less the
+      // withdrawable subset, floored at zero. Not a settlement lag the way
+      // Stripe's `pending[]` is — nothing here becomes available by waiting,
+      // which is why `available_on` stays null and the dashboard says "no
+      // schedule — moves on request" rather than naming a date.
+      pending:
+        b.ledger_balance != null && b.available_balance != null
+          ? Math.max(0, toMinor(b.ledger_balance - b.available_balance, b.currency))
+          : null,
       // Flutterwave's `/balances` names no date this clears by, and no other
       // documented endpoint gives one per wallet — never guessed.
       available_on: null,
