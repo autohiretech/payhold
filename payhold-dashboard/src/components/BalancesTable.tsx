@@ -85,6 +85,7 @@ export function BalancesTable({
               >
                 Schedule
               </Th>
+              <Th responsive>Your revenue</Th>
               <Th responsive>PayHold's allocation</Th>
             </tr>
           </thead>
@@ -475,6 +476,7 @@ function CurrencyRow({
         </Td>
 
         <Td responsive>
+          <RevenueCell balance={balance} currency={currency} />
           <LedgerCell balance={balance} currency={currency} diff={diff} />
         </Td>
       </tr>
@@ -653,6 +655,36 @@ function UnreachableNote() {
  * against the rail rides along here as a small colored note, and is never
  * shown while any rail for this currency failed to answer.
  */
+/**
+ * What this account has earned, in its own column rather than buried in a
+ * row's expansion — the owner asked to see it without hunting for it.
+ *
+ * It is `fees_retained`: the service fee plus any tax collected, bundled,
+ * because no per-currency read splits the two. A zero here is not an error
+ * and usually is not a shortfall either: the fee is struck when a deal is
+ * RELEASED, so money sitting in `held` against open deals has earned nothing
+ * yet. That is the difference worth showing, so a zero says which of the two
+ * it is rather than leaving the reader to guess.
+ */
+function RevenueCell({ balance, currency }: { balance: Balance | null; currency: Currency }) {
+  if (!balance) {
+    return <span className="text-fg-subtle">—</span>
+  }
+  const earned = balance.fees_retained
+  const awaiting = balance.held > 0 && earned === 0
+  return (
+    <div>
+      <span className="tabular font-medium">{formatMoneyShort(earned, currency)}</span>
+      <div
+        className="mt-0.5 text-[11px] text-fg-subtle"
+        title="Your service fee plus any tax collected, bundled — no per-currency read splits them. Struck when a deal is released, and still sitting at the provider: nothing sweeps it out."
+      >
+        {awaiting ? 'nothing released yet' : 'fee + tax, at the provider'}
+      </div>
+    </div>
+  )
+}
+
 function LedgerCell({
   balance,
   currency,
