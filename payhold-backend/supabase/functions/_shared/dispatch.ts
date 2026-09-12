@@ -561,11 +561,28 @@ export async function dispatchPayout(
     // A payout with no reference never reached a rail at all, and that is the
     // one case still sent — which is what keeps §13's ladder meaningful for a
     // transfer that genuinely never started.
-    if (payout.provider_ref && !provider.transferStatus) {
+    // Read from the row rather than trusted from the caller, because the
+    // caller may not have selected it — and on 2026-09-12 two of them did not.
+    // `sellers/index.ts` and `admin/index.ts` both hand-maintain a column list
+    // for their own screens and both omitted `provider_ref`, so a manual
+    // "Send it now" arrived here with the field undefined, took the send
+    // branch on a transfer PayPal already held, and was refused as a duplicate
+    // — burning an attempt every press. The field that decides between asking
+    // and sending is the one field this must not take on trust.
+    const { data: ref } = await db
+      .from('payouts')
+      .select('provider_ref')
+      .eq('id', payout.id)
+      .maybeSingle()
+
+    const providerRef = (ref as { provider_ref?: string | null } | null)?.provider_ref ??
+      payout.provider_ref ?? null
+
+    if (providerRef && !provider.transferStatus) {
       console.error('payout cannot be polled on this rail', {
         payout_id: payout.id,
         rail: decision.provider,
-        provider_ref: payout.provider_ref,
+        provider_ref: providerRef,
         message:
           'This rail reported the transfer as pending and implements no transferStatus, ' +
           'so it can be neither confirmed nor safely re-sent. Left as processing.',
@@ -573,8 +590,8 @@ export async function dispatchPayout(
       return 'processing'
     }
 
-    if (payout.provider_ref && provider.transferStatus) {
-      const settled = await provider.transferStatus(payout.provider_ref)
+    if (providerRef && provider.transferStatus) {
+      const settled = await provider.transferStatus(providerRef)
 
       if (settled.status === 'pending') {
         // Still with the rail. Nothing to book, and nothing has gone wrong —
@@ -591,7 +608,7 @@ export async function dispatchPayout(
       }
 
       outcome = {
-        provider_ref: payout.provider_ref,
+        provider_ref: providerRef,
         status: 'paid',
         amount: settled.amount,
         currency: settled.currency,

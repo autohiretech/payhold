@@ -981,10 +981,15 @@ async function withdraw(
   const results: { payout_id: string; outcome: string }[] = []
 
   for (const payout of requested) {
+    // Every column, deliberately. This list used to be hand-maintained and
+    // omitted `provider_ref`, so `dispatchPayout` could not tell a transfer
+    // the rail already held from one never sent, and a host pressing "Send it
+    // now" re-POSTed a PayPal payout that was refused as a duplicate. A row
+    // handed to the money path is the whole row; a subset is a bug waiting for
+    // the next field somebody needs.
     const { data: row } = await db
       .from('payouts')
-      .select('id, tenant_id, deal_id, seller_id, amount, currency, status, ' +
-        'scheduled_for, paid_at, failure_reason, attempts, next_attempt_at')
+      .select('*')
       .eq('id', payout.id)
       .single()
 

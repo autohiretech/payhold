@@ -59,9 +59,13 @@ const TENANT_COLUMNS = 'id, name, slug, status, created_at'
 const CRON_RUN_COLUMNS =
   'id, job, started_at, finished_at, status, counters, error'
 
+// Read for the console's own tables, and also handed to `dispatchPayout` by
+// the retry route below — which is why `provider_ref` is on it. Without that
+// field the money path cannot tell a transfer the rail already has from one
+// never sent, and re-sends it.
 const ADMIN_PAYOUT_COLUMNS =
   'id, tenant_id, deal_id, seller_id, amount, currency, status, scheduled_for, ' +
-  'paid_at, failure_reason, attempts, next_attempt_at, created_at'
+  'paid_at, failure_reason, attempts, next_attempt_at, provider_ref, created_at'
 
 const DELIVERY_COLUMNS =
   'id, tenant_id, endpoint_id, event, deal_id, status, attempts, status_code, ' +
