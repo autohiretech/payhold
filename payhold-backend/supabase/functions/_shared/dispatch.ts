@@ -312,7 +312,18 @@ export async function dispatchPayout(
   // collecting rail's vault, so a tenant who collects on Stripe and pays out on
   // Flutterwave has to keep the Flutterwave balance topped up themselves. The
   // ledger is right either way; the provider balance is theirs to manage.
-  let outcome: { provider_ref: string; status: 'pending' | 'paid' }
+  let outcome: {
+    provider_ref: string
+    status: 'pending' | 'paid'
+    /**
+     * What the rail's own response says, when it says so — never what
+     * `settle_payout` books. See `recordConfirmedPayoutFigures` below for why
+     * this stays a read, not a write.
+     */
+    amount?: number
+    currency?: string
+    fee?: number | null
+  }
 
   try {
     if (!decision.provider) {
@@ -338,12 +349,12 @@ export async function dispatchPayout(
     if (payout.status === 'processing' && payout.provider_ref && provider.transferStatus) {
       const settled = await provider.transferStatus(payout.provider_ref)
 
-      if (settled === 'pending') {
+      if (settled.status === 'pending') {
         // Still with the rail. Nothing to book, and nothing has gone wrong —
         // this is not an outcome the caller should count as an attempt.
         return 'processing'
       }
-      if (settled === 'failed') {
+      if (settled.status === 'failed') {
         const { error } = await db.rpc('fail_payout', {
           p_payout_id: payout.id,
           p_reason: 'The rail reported this transfer as failed',
@@ -352,7 +363,13 @@ export async function dispatchPayout(
         return 'failed'
       }
 
-      outcome = { provider_ref: payout.provider_ref, status: 'paid' }
+      outcome = {
+        provider_ref: payout.provider_ref,
+        status: 'paid',
+        amount: settled.amount,
+        currency: settled.currency,
+        fee: settled.fee,
+      }
     } else {
       outcome = await provider.release({
         payout_id: payout.id,
@@ -390,6 +407,19 @@ export async function dispatchPayout(
     return 'failed'
   }
 
+  // Visible, never booked. `settle_payout(p_payout_id, p_leaving,
+  // p_provider_ref, p_rail)` has no parameter for a confirmed transfer
+  // amount or fee — it books `p_leaving` (the deal's own clearing pool,
+  // computed above) and reads `payouts.amount` (fixed by `release_deal`,
+  // adjusted only by `refund_deal` under the payout's row lock) for
+  // everything else. Writing a confirmed figure into `payouts.amount` from
+  // here, outside that lock and its invariants, is exactly the kind of write
+  // CLAUDE.md reserves for a security-definer SQL function — and whether a
+  // discrepancy comes out of the seller's net or the platform's own margin is
+  // a policy decision, not a plumbing one. See this change's accompanying
+  // report for what booking it safely would need.
+  await recordConfirmedPayoutFigures(db, payout, decision.provider, outcome)
+
   if (outcome.status === 'pending') {
     const { error } = await db.rpc('mark_payout_processing', {
       p_payout_id: payout.id,
@@ -412,4 +442,76 @@ export async function dispatchPayout(
   if (error) throw new Error(`settle_payout failed: ${error.message}`)
 
   return 'paid'
+}
+
+/**
+ * Makes a rail's confirmed transfer figures visible without booking them.
+ *
+ * `payouts.amount` is fixed by `release_deal` and is the only figure this
+ * money engine has ever sent a rail or shown a seller — it is asked for, not
+ * confirmed. `PaymentProvider.release`/`transferStatus` now read the rail's
+ * own answer, and asking is not evidence the answer matches: this is the
+ * write that keeps a difference from disappearing silently into whichever
+ * number `settle_payout` happens to book.
+ *
+ * Deliberately audit-only. Two separate reasons stack here, not one:
+ *   - `settle_payout` has no parameter to receive a confirmed amount, and
+ *     `payouts.amount` is written only under that function's own row lock
+ *     (`release_deal`, and later `refund_deal` when a partial refund shrinks
+ *     it) — writing it from here would be exactly the kind of read-decide-write
+ *     over several round trips CLAUDE.md warns is a race, on a row this
+ *     function does not hold locked.
+ *   - Whether a rail's transfer fee comes out of the seller's net or the
+ *     platform's own margin is a policy decision this plumbing change does
+ *     not make. Recording it is what lets a person make that call instead of
+ *     it being made by accident, silently, inside an adapter.
+ */
+async function recordConfirmedPayoutFigures(
+  db: SupabaseClient,
+  payout: Payout,
+  rail: Provider | null,
+  outcome: { provider_ref: string; amount?: number; currency?: string; fee?: number | null },
+): Promise<void> {
+  if (outcome.amount === undefined && outcome.fee == null) return
+
+  const amountMismatch = outcome.amount !== undefined && outcome.amount !== payout.amount
+  const currencyMismatch = outcome.currency !== undefined && outcome.currency !== payout.currency
+
+  if (amountMismatch || currencyMismatch) {
+    await db.rpc('write_audit', {
+      p_tenant: payout.tenant_id,
+      p_deal: payout.deal_id,
+      p_actor: 'system',
+      p_action: 'payout.provider_amount_mismatch',
+      p_details: {
+        payout_id: payout.id,
+        booked_amount: payout.amount,
+        booked_currency: payout.currency,
+        confirmed_amount: outcome.amount,
+        confirmed_currency: outcome.currency ?? payout.currency,
+        rail,
+        provider_ref: outcome.provider_ref,
+        note: 'The rail reported a different figure for this transfer than ' +
+          'payouts.amount records. Not re-booked — see recordConfirmedPayoutFigures.',
+      },
+    })
+  }
+
+  if (outcome.fee != null) {
+    await db.rpc('write_audit', {
+      p_tenant: payout.tenant_id,
+      p_deal: payout.deal_id,
+      p_actor: 'system',
+      p_action: 'payout.provider_fee',
+      p_details: {
+        payout_id: payout.id,
+        fee: outcome.fee,
+        currency: outcome.currency ?? payout.currency,
+        rail,
+        provider_ref: outcome.provider_ref,
+        note: 'What the rail charged to send this transfer. Not booked to ' +
+          "the ledger and not netted against the seller's payout.",
+      },
+    })
+  }
 }

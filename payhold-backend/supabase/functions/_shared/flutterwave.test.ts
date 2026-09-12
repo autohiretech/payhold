@@ -730,6 +730,59 @@ Deno.test('a settlement that lands late is still preferred over app_fee', async 
 })
 
 // ---------------------------------------------------------------------------
+// Refunds
+// ---------------------------------------------------------------------------
+
+Deno.test('refund reports the confirmed amount_refunded, in the original transaction currency', async () => {
+  const { seen, restore } = interceptMany([
+    // GET /transactions/verify_by_reference — the original charge, read for
+    // its own currency the same way `capture` already trusts it.
+    { status: 'success', data: { id: 555, currency: 'RWF' } },
+    // POST /transactions/:id/refund
+    { status: 'success', data: { id: 777, amount_refunded: 5000 } },
+  ])
+  try {
+    const p = new FlutterwaveProvider(CREDS, '', 'test')
+    const result = await p.refund({
+      provider_ref: 'tx-ref-1',
+      amount: 5000,
+      currency: 'RWF',
+      idempotency_key: 'idem-refund-1',
+    })
+
+    assertEquals(result.provider_ref, '777')
+    // RWF is zero-decimal on this rail — 5000 major units is 5000 minor.
+    assertEquals(result.amount, 5000)
+    assertEquals(result.currency, 'RWF')
+    assertEquals(seen[1].method, 'POST')
+    assert(seen[1].url.endsWith('/transactions/555/refund'))
+  } finally {
+    restore()
+  }
+})
+
+Deno.test('refund with no amount_refunded confirms nothing, rather than guessing', async () => {
+  const { restore } = interceptMany([
+    { status: 'success', data: { id: 555, currency: 'RWF' } },
+    { status: 'success', data: { id: 778 } },
+  ])
+  try {
+    const p = new FlutterwaveProvider(CREDS, '', 'test')
+    const result = await p.refund({
+      provider_ref: 'tx-ref-2',
+      amount: 5000,
+      currency: 'RWF',
+      idempotency_key: 'idem-refund-2',
+    })
+
+    assertEquals(result.amount, undefined)
+    assertEquals(result.currency, undefined)
+  } finally {
+    restore()
+  }
+})
+
+// ---------------------------------------------------------------------------
 // Tokenizing a destination, and asking what became of a transfer
 // ---------------------------------------------------------------------------
 //
@@ -822,11 +875,67 @@ Deno.test('transferStatus: only SUCCESSFUL and FAILED are answers', async () => 
     const { seen, restore } = intercept({ status: 'success', data: { status: reported } })
     try {
       const p = new FlutterwaveProvider(CREDS, '', 'test')
-      assertEquals(await p.transferStatus('12345'), expected, reported)
+      const result = await p.transferStatus('12345')
+      assertEquals(result.status, expected, reported)
       assert(seen.url!.endsWith('/transfers/12345'))
     } finally {
       restore()
     }
+  }
+})
+
+Deno.test('transferStatus reads the confirmed amount and fee off the transfer', async () => {
+  // USD, not RWF — Flutterwave's own `ZERO_DECIMAL` set means a Rwandan franc
+  // does not multiply by 100 on the way to minor units, and a currency this
+  // test does not exercise elsewhere is what keeps that distinction visible.
+  const { restore } = intercept({
+    status: 'success',
+    data: { status: 'SUCCESSFUL', amount: 100, fee: 2.5, currency: 'USD' },
+  })
+  try {
+    const p = new FlutterwaveProvider(CREDS, '', 'test')
+    const result = await p.transferStatus('12345')
+    assertEquals(result.status, 'paid')
+    assertEquals(result.amount, 10_000)
+    assertEquals(result.currency, 'USD')
+    assertEquals(result.fee, 250)
+  } finally {
+    restore()
+  }
+})
+
+Deno.test('transferStatus reports no fee as null, never zero, when the rail names none', async () => {
+  const { restore } = intercept({
+    status: 'success',
+    data: { status: 'SUCCESSFUL', amount: 100, currency: 'USD' },
+  })
+  try {
+    const p = new FlutterwaveProvider(CREDS, '', 'test')
+    const result = await p.transferStatus('12345')
+    assertEquals(result.fee, null)
+  } finally {
+    restore()
+  }
+})
+
+Deno.test('release reads amount and fee straight off the create-transfer response, when given', async () => {
+  const { restore } = intercept({
+    status: 'success',
+    data: { id: 9099, status: 'SUCCESSFUL', amount: 100, fee: 1.5, currency: 'USD' },
+  })
+  try {
+    const result = await new FlutterwaveProvider(CREDS, '', 'test').release({
+      payout_id: 'payout-fee-1',
+      beneficiary_token: '4242',
+      amount: 10_000,
+      currency: 'USD',
+      idempotency_key: 'idem-fee-1',
+    })
+    assertEquals(result.amount, 10_000)
+    assertEquals(result.currency, 'USD')
+    assertEquals(result.fee, 150)
+  } finally {
+    restore()
   }
 })
 
@@ -860,7 +969,15 @@ Deno.test('a test-mode transfer carries the sandbox settle marker', async () => 
     // The id is still the leading part, so the webhook can find the payout.
     assert(body.reference.startsWith(PAYOUT_ID))
     assertEquals(seen.idempotencyKey, `payout:${PAYOUT_ID}`)
-    assertEquals(result, { provider_ref: '9001', status: 'pending' })
+    // No `amount`/`currency`/`fee` on this mocked response — undefined and
+    // null rather than a guessed figure.
+    assertEquals(result, {
+      provider_ref: '9001',
+      status: 'pending',
+      amount: undefined,
+      currency: undefined,
+      fee: null,
+    })
   } finally {
     restore()
   }
@@ -1047,7 +1164,13 @@ Deno.test('a KES wallet transfer carries the five M-Pesa meta fields, read off t
       first_name: 'Akinyi',
       last_name: 'Kimwei',
     }])
-    assertEquals(result, { provider_ref: '9010', status: 'pending' })
+    assertEquals(result, {
+      provider_ref: '9010',
+      status: 'pending',
+      amount: undefined,
+      currency: undefined,
+      fee: null,
+    })
   } finally {
     restore()
   }

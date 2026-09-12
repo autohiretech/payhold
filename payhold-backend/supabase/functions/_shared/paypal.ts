@@ -54,6 +54,7 @@ import type {
   PreauthRequest,
   ProviderCapabilities,
   RefundRequest,
+  RefundResult,
   TokenizeRequest,
   TokenizeResult,
   VerifiedTransaction,
@@ -138,6 +139,26 @@ interface CaptureShape {
   seller_receivable_breakdown?: {
     paypal_fee?: AmountShape
     gross_amount?: AmountShape
+  }
+}
+
+/**
+ * The Refund resource `/v2/payments/captures/:id/refund` hands back.
+ *
+ * `seller_payable_breakdown` is that response's counterpart to a capture's
+ * `seller_receivable_breakdown` — **money leaving** rather than arriving, so
+ * PayPal's own naming splits receivable from payable rather than reusing one
+ * shape for both. **Unverified against a live refund**: nothing in this
+ * adapter's test suite reaches the network, the same caveat every field read
+ * here for the first time carries until a real refund confirms it.
+ */
+interface RefundShape {
+  id: string
+  status?: string
+  amount?: AmountShape
+  seller_payable_breakdown?: {
+    paypal_fee?: AmountShape
+    net_amount?: AmountShape
   }
 }
 
@@ -568,8 +589,8 @@ export class PayPalProvider implements PaymentProvider {
    * a retried refund: the same key returns the same refund rather than issuing
    * a second one.
    */
-  async refund(req: RefundRequest): Promise<{ provider_ref: string }> {
-    const refunded = await this.call<{ id: string }>(
+  async refund(req: RefundRequest): Promise<RefundResult> {
+    const refunded = await this.call<RefundShape>(
       `/v2/payments/captures/${req.provider_ref}/refund`,
       {
         method: 'POST',
@@ -583,7 +604,20 @@ export class PayPalProvider implements PaymentProvider {
       },
     )
 
-    return { provider_ref: refunded.id }
+    // `amount` is what PayPal actually refunded, confirmed rather than
+    // assumed — the same distinction `verify`'s own `amount` draws against a
+    // request. `seller_payable_breakdown.paypal_fee` is their fee for sending
+    // it back, read the same way `verify` reads `seller_receivable_breakdown`
+    // for a capture's.
+    const amount = refunded.amount
+    const feeShape = refunded.seller_payable_breakdown?.paypal_fee
+
+    return {
+      provider_ref: refunded.id,
+      amount: amount ? fromValue(amount.value, amount.currency_code) : undefined,
+      currency: amount?.currency_code,
+      fee: feeShape ? fromValue(feeShape.value, feeShape.currency_code) : null,
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -642,6 +676,48 @@ export class PayPalProvider implements PaymentProvider {
     return {
       provider_ref: id,
       status: batch.batch_header?.batch_status === 'SUCCESS' ? 'paid' : 'pending',
+      // Recorded, not booked — see `PayoutResult.amount`'s own comment.
+      ...(await this.payoutItemFigures(id)),
+    }
+  }
+
+  /**
+   * The one item's confirmed amount and fee, read back off the batch —
+   * `payout_item.amount` and `payout_item_fee`, documented on
+   * `GET /v1/payments/payouts/:id` (developer.paypal.com, read 2026-09-12).
+   * **Unverified against a live payout**, the same caveat every unexercised
+   * field in this file carries.
+   *
+   * Best-effort and swallowed on failure. `release` above has already told
+   * PayPal to send the money by the time this runs, and PayPal prices a
+   * payout item only once it actually processes it — a freshly created batch
+   * reporting nothing here is the ordinary case, not a fault, and a lookup
+   * failure must not turn a successful dispatch into a failed one. `fee:
+   * undefined` on that path means "could not ask", which is a different fact
+   * from `null`'s "asked, and there is nothing to report".
+   */
+  private async payoutItemFigures(
+    batchId: string,
+  ): Promise<Pick<PayoutResult, 'amount' | 'currency' | 'fee'>> {
+    try {
+      const details = await this.call<{
+        items?: {
+          payout_item_fee?: AmountShape
+          payout_item?: { amount?: AmountShape }
+        }[]
+      }>(`/v1/payments/payouts/${batchId}`, { method: 'GET' })
+
+      const item = details.items?.[0]
+      const amount = item?.payout_item?.amount
+      const feeShape = item?.payout_item_fee
+
+      return {
+        amount: amount ? fromValue(amount.value, amount.currency_code) : undefined,
+        currency: amount?.currency_code,
+        fee: feeShape ? fromValue(feeShape.value, feeShape.currency_code) : null,
+      }
+    } catch {
+      return { amount: undefined, currency: undefined, fee: undefined }
     }
   }
 

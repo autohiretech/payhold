@@ -39,6 +39,7 @@ import type {
   PreauthRequest,
   ProviderCapabilities,
   RefundRequest,
+  RefundResult,
   TokenizeRequest,
   TokenizeResult,
   VerifiedTransaction,
@@ -561,7 +562,19 @@ export class StripeProvider implements PaymentProvider {
    * account, which is theirs and not ours to report.
    */
   async release(req: PayoutRequest): Promise<PayoutResult> {
-    const transfer = await this.call<{ id: string }>('/transfers', {
+    // `expand[]=balance_transaction`, the same shape `resolveProviderFee`
+    // already trusts for a collection's fee: the Transfer's own balance
+    // transaction is the only place Stripe states what moving this money
+    // cost. `amount`/`currency` on the Transfer object are what Stripe
+    // actually recorded — confirmed against their Transfers API reference
+    // (docs.stripe.com, read 2026-09-12) — as against `req.amount`, which is
+    // only what we asked for.
+    const transfer = await this.call<{
+      id: string
+      amount?: number
+      currency?: string
+      balance_transaction?: { fee?: number } | string | null
+    }>('/transfers?expand[]=balance_transaction', {
       method: 'POST',
       idempotencyKey: req.idempotency_key,
       body: {
@@ -574,10 +587,38 @@ export class StripeProvider implements PaymentProvider {
       },
     })
 
-    return { provider_ref: transfer.id, status: 'paid' }
+    return {
+      provider_ref: transfer.id,
+      status: 'paid',
+      // Recorded, not booked — see `PayoutResult.amount`'s own comment.
+      amount: transfer.amount,
+      currency: transfer.currency ? (transfer.currency.toUpperCase() as Currency) : undefined,
+      fee: await this.resolveTransferFee(transfer.balance_transaction),
+    }
   }
 
-  async refund(req: RefundRequest): Promise<{ provider_ref: string }> {
+  /**
+   * The fee side of a Connect transfer's balance transaction — same read as
+   * `resolveProviderFee`, without that function's retry loop: the lag it
+   * guards against is a documented incident on a *charge* landing before its
+   * balance transaction is attached, and nothing here has shown the same
+   * behaviour for a transfer. `null` when the expansion comes back with
+   * nothing to read, which for a same-currency transfer is the ordinary case
+   * — Stripe's own transfers between balances are not usually fee-bearing at
+   * all, and this must not turn that silence into a guessed zero.
+   */
+  private async resolveTransferFee(
+    bt: { fee?: number } | string | null | undefined,
+  ): Promise<Money | null> {
+    if (bt && typeof bt === 'object') return bt.fee ?? null
+    if (typeof bt === 'string') {
+      const txn = await this.call<{ fee?: number }>(`/balance_transactions/${bt}`)
+      return txn?.fee ?? null
+    }
+    return null
+  }
+
+  async refund(req: RefundRequest): Promise<RefundResult> {
     const intent = req.provider_ref.startsWith('cs_')
       ? (await this.intentForSession(req.provider_ref))?.id
       : req.provider_ref
@@ -589,17 +630,29 @@ export class StripeProvider implements PaymentProvider {
       )
     }
 
-    const refund = await this.call<{ id: string }>('/refunds', {
-      method: 'POST',
-      idempotencyKey: req.idempotency_key,
-      body: {
-        payment_intent: intent,
-        amount: req.amount,
-        metadata: { currency: req.currency },
+    // `amount`/`currency` on the Refund object are what Stripe actually
+    // refunded — confirmed against their Refunds API reference
+    // (docs.stripe.com, read 2026-09-12). No `fee` field is documented on a
+    // Refund: Stripe does not charge extra to reverse a charge, and does not
+    // return the original collection fee here either, so none is read.
+    const refund = await this.call<{ id: string; amount?: number; currency?: string }>(
+      '/refunds',
+      {
+        method: 'POST',
+        idempotencyKey: req.idempotency_key,
+        body: {
+          payment_intent: intent,
+          amount: req.amount,
+          metadata: { currency: req.currency },
+        },
       },
-    })
+    )
 
-    return { provider_ref: refund.id }
+    return {
+      provider_ref: refund.id,
+      amount: refund.amount,
+      currency: refund.currency ? (refund.currency.toUpperCase() as Currency) : undefined,
+    }
   }
 
   // -------------------------------------------------------------------------

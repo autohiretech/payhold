@@ -294,6 +294,77 @@ Deno.test('a refund is issued against the capture, never the order', async () =>
   }
 })
 
+Deno.test('refund reports the confirmed amount and fee, not the requested one', async () => {
+  // 24.44 refunded, 0.56 kept as PayPal's own fee for sending it back — a
+  // different number from the 25.00 requested, the way a real partial-fee
+  // refund would look.
+  const { restore } = intercept([{
+    id: 'REFUND-2',
+    status: 'COMPLETED',
+    amount: { currency_code: 'USD', value: '24.44' },
+    seller_payable_breakdown: {
+      paypal_fee: { currency_code: 'USD', value: '0.56' },
+      net_amount: { currency_code: 'USD', value: '24.44' },
+    },
+  }])
+  try {
+    const pp = new PayPalProvider(CREDS, 'https://pay.example')
+    const result = await pp.refund({
+      provider_ref: 'CAPTURE-7',
+      amount: 2_500,
+      currency: 'USD',
+      idempotency_key: 'idem-r2',
+    })
+
+    assertEquals(result.provider_ref, 'REFUND-2')
+    assertEquals(result.amount, 2_444)
+    assertEquals(result.currency, 'USD')
+    assertEquals(result.fee, 56)
+  } finally {
+    restore()
+  }
+})
+
+Deno.test('refund reports no fee as null, never zero, when the breakdown carries none', async () => {
+  const { restore } = intercept([{
+    id: 'REFUND-3',
+    status: 'COMPLETED',
+    amount: { currency_code: 'USD', value: '25.00' },
+  }])
+  try {
+    const pp = new PayPalProvider(CREDS, 'https://pay.example')
+    const result = await pp.refund({
+      provider_ref: 'CAPTURE-7',
+      amount: 2_500,
+      currency: 'USD',
+      idempotency_key: 'idem-r3',
+    })
+
+    assertEquals(result.amount, 2_500)
+    assertEquals(result.fee, null)
+  } finally {
+    restore()
+  }
+})
+
+Deno.test('refund with no amount in the response confirms nothing, rather than guessing', async () => {
+  const { restore } = intercept([{ id: 'REFUND-4', status: 'COMPLETED' }])
+  try {
+    const pp = new PayPalProvider(CREDS, 'https://pay.example')
+    const result = await pp.refund({
+      provider_ref: 'CAPTURE-7',
+      amount: 2_500,
+      currency: 'USD',
+      idempotency_key: 'idem-r4',
+    })
+
+    assertEquals(result.amount, undefined)
+    assertEquals(result.currency, undefined)
+  } finally {
+    restore()
+  }
+})
+
 Deno.test('verify reads the capture, and reports their fee separately', async () => {
   const { restore } = intercept([
     {
@@ -535,6 +606,105 @@ Deno.test('a payer id payout goes as PAYPAL_ID, not as an email', async () => {
     assertEquals(out.status, 'paid')
   } finally {
     restore()
+  }
+})
+
+Deno.test('a payout reports the confirmed amount and fee once the batch names them', async () => {
+  const { seen, restore } = intercept([
+    { batch_header: { payout_batch_id: 'BATCH-3', batch_status: 'PENDING' } },
+    {
+      items: [{
+        payout_item_fee: { currency_code: 'USD', value: '0.25' },
+        payout_item: { amount: { currency_code: 'USD', value: '900.00' } },
+      }],
+    },
+  ])
+  try {
+    const pp = new PayPalProvider(CREDS, 'https://pay.example')
+    const out = await pp.release({
+      payout_id: 'payout-3',
+      beneficiary_token: 'seller@example.com',
+      amount: 90_000,
+      currency: 'USD',
+      idempotency_key: 'idem-p3',
+    })
+
+    assertEquals(out.amount, 90_000)
+    assertEquals(out.currency, 'USD')
+    assertEquals(out.fee, 25)
+    // The lookup follows the batch creation call, GET against its id.
+    assert(calls(seen)[1].url?.endsWith('/v1/payments/payouts/BATCH-3'))
+  } finally {
+    restore()
+  }
+})
+
+Deno.test('a payout item not yet priced reports undefined, not a guessed zero', async () => {
+  // The ordinary case: a batch just created has not been processed, so the
+  // item lookup carries no `payout_item_fee` yet.
+  const { restore } = intercept([
+    { batch_header: { payout_batch_id: 'BATCH-4', batch_status: 'PENDING' } },
+    { items: [{}] },
+  ])
+  try {
+    const pp = new PayPalProvider(CREDS, 'https://pay.example')
+    const out = await pp.release({
+      payout_id: 'payout-4',
+      beneficiary_token: 'seller@example.com',
+      amount: 90_000,
+      currency: 'USD',
+      idempotency_key: 'idem-p4',
+    })
+
+    assertEquals(out.amount, undefined)
+    assertEquals(out.currency, undefined)
+    assertEquals(out.fee, null)
+  } finally {
+    restore()
+  }
+})
+
+Deno.test('a failed item lookup does not fail a payout that already went', async () => {
+  const original = globalThis.fetch
+  let call = 0
+  globalThis.fetch = ((url: string | URL | Request) => {
+    const target = String(url)
+    if (target.endsWith('/v1/oauth2/token')) {
+      return Promise.resolve(
+        new Response(JSON.stringify({ access_token: 'tok-1', expires_in: 32400 }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }),
+      )
+    }
+    call++
+    if (call === 1) {
+      return Promise.resolve(
+        new Response(
+          JSON.stringify({ batch_header: { payout_batch_id: 'BATCH-5', batch_status: 'PENDING' } }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        ),
+      )
+    }
+    // The follow-up lookup fails outright.
+    return Promise.resolve(new Response('{}', { status: 500 }))
+  }) as typeof fetch
+
+  try {
+    const pp = new PayPalProvider(CREDS, 'https://pay.example')
+    const out = await pp.release({
+      payout_id: 'payout-5',
+      beneficiary_token: 'seller@example.com',
+      amount: 90_000,
+      currency: 'USD',
+      idempotency_key: 'idem-p5',
+    })
+
+    assertEquals(out.provider_ref, 'BATCH-5')
+    assertEquals(out.status, 'pending')
+    assertEquals(out.fee, undefined)
+  } finally {
+    globalThis.fetch = original
   }
 })
 

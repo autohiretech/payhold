@@ -357,6 +357,32 @@ export interface PayoutResult {
   provider_ref: string
   /** Some rails settle asynchronously; the transfer webhook confirms later. */
   status: 'pending' | 'paid'
+  /**
+   * What the provider's own response says it actually sent, when it says so.
+   *
+   * `PayoutRequest.amount` is what PayHold *asked* the rail to send — the
+   * figure `settle_payout` books today, because that is all this shape ever
+   * carried back. Asking is not evidence sending happened for that exact
+   * number: Flutterwave's create-transfer response and its `GET
+   * /transfers/:id` both report their own `amount`, and Stripe's Transfer
+   * object reports its own too. Optional because a caller reading only
+   * `provider_ref`/`status` (every one until this field existed) must keep
+   * compiling, and because a rail whose response this adapter has not yet
+   * been taught to read from must not fabricate one.
+   */
+  amount?: Money
+  /** The currency the confirmed `amount` above is denominated in, when known. */
+  currency?: Currency
+  /**
+   * What the rail charged to send this transfer, when it says so.
+   *
+   * `null` means "asked, and the rail's own response carries no fee field to
+   * read" — never a computed guess, and never `0` standing in for "unknown".
+   * Undefined means this adapter has not been taught to look at all.
+   * Recording this is new; nothing yet nets it against what a seller is told
+   * they will receive — see the call sites for why.
+   */
+  fee?: Money | null
 }
 
 export interface RefundRequest {
@@ -364,6 +390,158 @@ export interface RefundRequest {
   amount: Money
   currency: Currency
   idempotency_key: string
+}
+
+/**
+ * What a refund call actually returns.
+ *
+ * A refund's own response is the only place a *confirmed* refunded amount
+ * comes from — `RefundRequest.amount` is what PayHold asked for, which is
+ * exactly the number `deals/index.ts` used to treat as fact once the call did
+ * not throw. Stripe's Refund object carries `amount` and `currency`; PayPal's
+ * refund resource carries an `amount` block in its own major-unit shape;
+ * Flutterwave's refund response is read alongside the transaction it refunds.
+ * Optional for the same reason `PayoutResult.amount` is: a caller that only
+ * ever read `provider_ref` must keep compiling, and an adapter that cannot
+ * find the figure in the provider's response must not invent one.
+ */
+export interface RefundResult {
+  provider_ref: string
+  amount?: Money
+  currency?: Currency
+  /**
+   * What the rail charged for the refund itself, when it says so. `null`
+   * means the response carries no such field; `undefined` means this adapter
+   * has not been taught to look. Never a guess, and never the original
+   * collection fee restated.
+   */
+  fee?: Money | null
+}
+
+/** What `transferStatus` reports back — `PayoutResult`'s confirmed figures, without re-sending anything. */
+export interface TransferStatusResult {
+  status: PayoutResult['status'] | 'failed'
+  amount?: Money
+  currency?: Currency
+  fee?: Money | null
+}
+
+/** One `audit_log` row this decision calls for, or none. */
+export interface RefundAuditEntry {
+  action: string
+  details: Record<string, unknown>
+}
+
+export interface RefundBookingDecision {
+  /**
+   * What `deals/index.ts` should pass as `refund_deal`'s `p_amount`.
+   *
+   * `null` preserves today's behaviour exactly: `refund_deal` recomputes
+   * "everything still refundable, net of the provider's own fee" itself,
+   * under its own row lock — which is safer than trusting a figure computed
+   * a few round trips earlier, because a concurrent refund could have moved
+   * the ceiling in between. This function only ever overrides that with an
+   * explicit number when the provider's own answer disagrees with what was
+   * asked for; agreement is the ordinary case and is left alone.
+   */
+  amount: number | null
+  /** Every audit row this decision calls for — usually none. */
+  audit: RefundAuditEntry[]
+}
+
+/**
+ * Decides what a refund actually books, once the provider has answered.
+ *
+ * Pure and provider-agnostic on purpose: `deals/index.ts` is the only caller,
+ * and this is what makes the "confirmed differs from requested" case provable
+ * without a live provider, a database, or a fake standing in for either — the
+ * `RefundResult` shapes each adapter's own tests already pin are the only
+ * input this needs.
+ *
+ * Follows the precedent `fund_deal` sets for a webhook's re-verified amount
+ * (root CLAUDE.md: "mismatch → disputed, never funded_held" — the money is
+ * booked either way, because it genuinely moved, and what differs is whether
+ * anyone is told). A refund has no lifecycle state to fall into the way a
+ * mismatched charge does, so a discrepancy here becomes an audit row instead
+ * of a status change — visible to an operator rather than silently absorbed
+ * into whichever number was merely asked for.
+ */
+export function decideRefundBooking(input: {
+  /** What PayHold asked the provider to refund — never what was confirmed. */
+  requestedAmount: Money
+  presentmentCurrency: Currency
+  /** The request body's own `amount`, or null to let `refund_deal` compute its default. */
+  callerAmount: number | null
+  result: RefundResult
+  provider: Provider
+  providerRef: string
+}): RefundBookingDecision {
+  const { requestedAmount, presentmentCurrency, callerAmount, result, provider, providerRef } =
+    input
+  const audit: RefundAuditEntry[] = []
+  let amount = callerAmount
+
+  const confirmedAmount = result.amount
+  const confirmedCurrency = result.currency
+  // `refund_deal` always writes the deal's own `presentment_currency` — it has
+  // no parameter to book a different one — so a rail reporting a different
+  // currency is a fact this can surface but not correct on its own.
+  const currencyMismatch = confirmedCurrency !== undefined &&
+    confirmedCurrency !== presentmentCurrency
+
+  if (confirmedAmount === undefined) {
+    audit.push({
+      action: 'refund.amount_unconfirmed',
+      details: {
+        assumed_amount: requestedAmount,
+        assumed_currency: presentmentCurrency,
+        provider,
+        provider_ref: providerRef,
+        note: "The provider's refund response reported no confirmed amount; " +
+          'booking the requested figure.',
+      },
+    })
+  } else if (currencyMismatch) {
+    audit.push({
+      action: 'refund.provider_currency_mismatch',
+      details: {
+        requested_amount: requestedAmount,
+        requested_currency: presentmentCurrency,
+        confirmed_amount: confirmedAmount,
+        confirmed_currency: confirmedCurrency,
+        provider,
+        provider_ref: providerRef,
+        note: 'Booked the requested figure. The provider reported a different ' +
+          'currency, which refund_deal has no parameter to record.',
+      },
+    })
+  } else if (confirmedAmount !== requestedAmount) {
+    amount = confirmedAmount
+    audit.push({
+      action: 'refund.provider_amount_mismatch',
+      details: {
+        requested_amount: requestedAmount,
+        confirmed_amount: confirmedAmount,
+        currency: presentmentCurrency,
+        provider,
+        provider_ref: providerRef,
+      },
+    })
+  }
+
+  if (result.fee != null) {
+    audit.push({
+      action: 'refund.provider_fee',
+      details: {
+        fee: result.fee,
+        currency: confirmedCurrency ?? presentmentCurrency,
+        provider,
+        provider_ref: providerRef,
+      },
+    })
+  }
+
+  return { amount, audit }
 }
 
 export interface PreauthRequest {
@@ -493,7 +671,7 @@ export interface PaymentProvider {
   release(req: PayoutRequest): Promise<PayoutResult>
 
   /** Return the buyer's money. Safe to call twice. */
-  refund(req: RefundRequest): Promise<{ provider_ref: string }>
+  refund(req: RefundRequest): Promise<RefundResult>
 
   /** Hold a card deposit without taking it. */
   preauth(req: PreauthRequest): Promise<ChargeResult>
@@ -529,8 +707,13 @@ export interface PaymentProvider {
    *
    * Optional because a synchronous rail has nothing to add: it already told
    * us `paid` in the call that sent the money.
+   *
+   * Carries the same confirmed `amount`/`currency`/`fee` `PayoutResult` does,
+   * for the same reason: Flutterwave's `GET /transfers/:id` reports the
+   * transfer's own amount and fee, and a caller asking only "is this done yet"
+   * used to throw both away.
    */
-  transferStatus?(providerRef: string): Promise<PayoutResult['status'] | 'failed'>
+  transferStatus?(providerRef: string): Promise<TransferStatusResult>
 
   /**
    * What this rail will convert a corridor at, right now.

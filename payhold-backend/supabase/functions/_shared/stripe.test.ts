@@ -10,7 +10,7 @@
  * provider and nothing should.
  */
 
-import { assertEquals, assertRejects } from 'jsr:@std/assert@1'
+import { assert, assertEquals, assertRejects } from 'jsr:@std/assert@1'
 import { StripeProvider, type StripeCredentials } from './stripe.ts'
 import { PayHoldError } from './types.ts'
 
@@ -350,6 +350,144 @@ Deno.test('a connected account that cannot be paid is refused before it is store
     )
   } finally {
     restore()
+  }
+})
+
+Deno.test('release reports the confirmed transfer amount and fee, not the requested one', async () => {
+  // A same-currency transfer with a fee-bearing balance transaction returned
+  // inline — `expand[]=balance_transaction` on the create call itself, so a
+  // single response carries everything this reads.
+  const { seen, restore } = intercept({
+    id: 'tr_1',
+    amount: 45_000,
+    currency: 'usd',
+    balance_transaction: { fee: 130 },
+  })
+
+  try {
+    const out = await new StripeProvider(CREDS, '').release({
+      payout_id: 'payout-1',
+      beneficiary_token: 'acct_1',
+      amount: 45_000,
+      currency: 'USD',
+      idempotency_key: 'idem-p1',
+    })
+
+    assert(
+      seen.url?.includes('expand%5B%5D=balance_transaction') ||
+        seen.url?.includes('expand[]=balance_transaction'),
+    )
+    assertEquals(out.provider_ref, 'tr_1')
+    assertEquals(out.status, 'paid')
+    assertEquals(out.amount, 45_000)
+    assertEquals(out.currency, 'USD')
+    assertEquals(out.fee, 130)
+  } finally {
+    restore()
+  }
+})
+
+Deno.test('release resolves the fee by id when the expansion is not inline', async () => {
+  const original = globalThis.fetch
+  globalThis.fetch = ((url: string | URL | Request) => {
+    const u = String(url)
+    if (u.includes('/transfers')) {
+      return Promise.resolve(new Response(JSON.stringify({
+        id: 'tr_2',
+        amount: 10_000,
+        currency: 'usd',
+        balance_transaction: 'txn_1',
+      }), { status: 200, headers: { 'content-type': 'application/json' } }))
+    }
+    if (u.includes('/balance_transactions/txn_1')) {
+      return Promise.resolve(new Response(JSON.stringify({ fee: 42 }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }))
+    }
+    return Promise.resolve(new Response('{}', { status: 404 }))
+  }) as typeof fetch
+
+  try {
+    const out = await new StripeProvider(CREDS, '').release({
+      payout_id: 'payout-2',
+      beneficiary_token: 'acct_2',
+      amount: 10_000,
+      currency: 'USD',
+      idempotency_key: 'idem-p2',
+    })
+    assertEquals(out.fee, 42)
+  } finally {
+    globalThis.fetch = original
+  }
+})
+
+Deno.test('release reports no fee as null, never zero, when nothing is left to read', async () => {
+  const { restore } = intercept({ id: 'tr_3', amount: 10_000, currency: 'usd' })
+
+  try {
+    const out = await new StripeProvider(CREDS, '').release({
+      payout_id: 'payout-3',
+      beneficiary_token: 'acct_3',
+      amount: 10_000,
+      currency: 'USD',
+      idempotency_key: 'idem-p3',
+    })
+    assertEquals(out.fee, null)
+  } finally {
+    restore()
+  }
+})
+
+Deno.test('refund reports the confirmed amount, not the requested one', async () => {
+  const { restore } = intercept({ id: 're_1', amount: 4_400, currency: 'usd' })
+
+  try {
+    const out = await new StripeProvider(CREDS, '').refund({
+      provider_ref: 'pi_1',
+      amount: 5_000,
+      currency: 'USD',
+      idempotency_key: 'idem-r1',
+    })
+    assertEquals(out.provider_ref, 're_1')
+    assertEquals(out.amount, 4_400)
+    assertEquals(out.currency, 'USD')
+  } finally {
+    restore()
+  }
+})
+
+Deno.test('refund against a checkout session still resolves the underlying intent first', async () => {
+  const original = globalThis.fetch
+  globalThis.fetch = ((url: string | URL | Request) => {
+    const u = String(url)
+    if (u.includes('/checkout/sessions/cs_1')) {
+      return Promise.resolve(new Response(JSON.stringify({
+        id: 'cs_1',
+        payment_intent: { id: 'pi_9' },
+      }), { status: 200, headers: { 'content-type': 'application/json' } }))
+    }
+    if (u.includes('/refunds')) {
+      return Promise.resolve(new Response(JSON.stringify({
+        id: 're_2',
+        amount: 5_000,
+        currency: 'usd',
+      }), { status: 200, headers: { 'content-type': 'application/json' } }))
+    }
+    return Promise.resolve(new Response('{}', { status: 404 }))
+  }) as typeof fetch
+
+  try {
+    const out = await new StripeProvider(CREDS, '').refund({
+      provider_ref: 'cs_1',
+      amount: 5_000,
+      currency: 'USD',
+      idempotency_key: 'idem-r2',
+    })
+    assertEquals(out.amount, 5_000)
+    assertEquals(out.currency, 'USD')
+  } finally {
+    globalThis.fetch = original
   }
 })
 

@@ -33,6 +33,7 @@ import { canConvert, convertOrThrow, presentmentCurrencyFor } from '../_shared/f
 import { handler, json, readJson, required } from '../_shared/http.ts'
 import { startCharge } from '../_shared/checkout.ts'
 import { loadProvider } from '../_shared/load-provider.ts'
+import { decideRefundBooking } from '../_shared/provider.ts'
 import { payContext, recordContext } from '../_shared/request-context.ts'
 import {
   countryInfo,
@@ -636,6 +637,15 @@ async function refund(
     }
   }
 
+  // What actually gets booked below. Starts as "whatever the caller asked
+  // for, or null to let refund_deal compute its own default under the lock" —
+  // exactly today's behaviour — and is only overridden when the provider's
+  // own response says something else genuinely happened. Never overridden
+  // just because a provider call was made: the two agreeing is the ordinary
+  // case, and forcing an explicit figure there would give up refund_deal's
+  // own re-check of what is still refundable for no reason.
+  let bookAmount = body.amount ?? null
+
   // Return the buyer's money at the provider FIRST. A ledger that says
   // "refunded" while the provider still holds the funds is the one direction
   // this must never fail in — the reverse is recoverable by re-running.
@@ -681,7 +691,7 @@ async function refund(
     // `refund_deal` still closes the deal out below with a zero-amount
     // refund; there is no rail call left to make for it.
     if (amount > 0) {
-      await provider.refund({
+      const result = await provider.refund({
         provider_ref: deal.provider_ref,
         amount,
         currency: deal.presentment_currency,
@@ -690,6 +700,33 @@ async function refund(
         // provider-side refund.
         idempotency_key: `refund:${deal.id}:${body.amount ?? 'full'}`,
       })
+
+      // `amount` above is only what PayHold asked the rail for. `result` is
+      // the rail's own answer to what actually happened — the same
+      // distinction `fund_deal` draws between a deal's expected amount and
+      // what its webhook verified (root CLAUDE.md's "mismatch → disputed,
+      // never funded_held"). `decideRefundBooking` is pure and lives in
+      // `_shared/provider.ts` precisely so this decision — including the
+      // confirmed-differs-from-requested case — is provable without a live
+      // provider or a database; `provider.test.ts` is where that is pinned.
+      const decision = decideRefundBooking({
+        requestedAmount: amount,
+        presentmentCurrency: deal.presentment_currency,
+        callerAmount: body.amount ?? null,
+        result,
+        provider: deal.provider,
+        providerRef: deal.provider_ref,
+      })
+      bookAmount = decision.amount
+      for (const entry of decision.audit) {
+        await db.rpc('write_audit', {
+          p_tenant: caller.tenant_id,
+          p_deal: deal.id,
+          p_actor: 'system',
+          p_action: entry.action,
+          p_details: entry.details,
+        })
+      }
     }
   }
 
@@ -697,7 +734,7 @@ async function refund(
     p_deal_id: deal.id,
     p_reason: body.reason ?? 'Refunded by the client',
     p_actor: caller.actor,
-    p_amount: body.amount ?? null,
+    p_amount: bookAmount,
     p_line_items: body.line_items ?? null,
   })
   if (error) throw rpcError(error, 'refund')

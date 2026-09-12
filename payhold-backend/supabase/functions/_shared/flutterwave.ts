@@ -23,7 +23,9 @@ import type {
   PreauthRequest,
   ProviderCapabilities,
   RefundRequest,
+  RefundResult,
   TokenizeRequest,
+  TransferStatusResult,
   ValidateChargeRequest,
   TokenizeResult,
   VerifiedTransaction,
@@ -988,7 +990,20 @@ export class FlutterwaveProvider implements PaymentProvider {
 
     // The beneficiary token stands in for the destination — PayHold never
     // holds the MoMo number itself.
-    const data = await this.call<{ id: number; status: string }>('/transfers', {
+    //
+    // `amount` and `fee` on the create-transfer response are the same fields
+    // `GET /transfers/:id` reports below — confirmed against Flutterwave's
+    // "Create a Transfer" reference (developer.flutterwave.com, read
+    // 2026-09-12). **Unverified against a live transfer**, the same caveat
+    // every unexercised call in this file carries: every test here runs
+    // against an intercepted `fetch`.
+    const data = await this.call<{
+      id: number
+      status: string
+      amount?: number
+      fee?: number
+      currency?: string
+    }>('/transfers', {
       method: 'POST',
       idempotencyKey: req.idempotency_key,
       body: JSON.stringify({
@@ -1007,12 +1022,26 @@ export class FlutterwaveProvider implements PaymentProvider {
       }),
     })
 
+    // The currency to read `amount`/`fee` in is theirs when they name one —
+    // Flutterwave echoes the transfer currency on this response — and ours
+    // when they do not, since we asked for exactly `req.currency`.
+    const currency = data.currency ?? req.currency
+
     return {
       provider_ref: String(data.id),
       // Transfers settle asynchronously. Anything not already terminal stays
       // pending until their transfer webhook confirms it — booking it as paid
       // here would credit a payout that can still fail.
       status: data.status === 'SUCCESSFUL' ? 'paid' : 'pending',
+      // Recorded, not booked: nothing here changes `payouts.amount` or what
+      // `settle_payout` writes. See `PayoutResult.amount`'s own comment.
+      amount: data.amount != null ? toMinor(data.amount, currency) : undefined,
+      currency: data.amount != null ? currency : undefined,
+      // `null` — not `0` — when their response carries no `fee` at all, which
+      // is the ordinary case on this synchronous half: Flutterwave's own
+      // documentation shows `fee` populated once the transfer completes, and
+      // a fresh transfer is still `NEW`.
+      fee: data.fee != null ? toMinor(data.fee, currency) : null,
     }
   }
 
@@ -1091,16 +1120,33 @@ export class FlutterwaveProvider implements PaymentProvider {
     }]
   }
 
-  async refund(req: RefundRequest): Promise<{ provider_ref: string }> {
-    const tx = await this.call<{ id: number }>(
+  async refund(req: RefundRequest): Promise<RefundResult> {
+    // `currency` here is the original transaction's, from the same lookup
+    // `capture` already trusts for the same reason — a refund is always in
+    // the currency the charge was made in, so this is a fact confirmed by
+    // Flutterwave's own record rather than an assumption.
+    const tx = await this.call<{ id: number; currency: string }>(
       `/transactions/verify_by_reference?tx_ref=${encodeURIComponent(req.provider_ref)}`,
     )
-    const data = await this.call<{ id: number }>(`/transactions/${tx.id}/refund`, {
-      method: 'POST',
-      idempotencyKey: req.idempotency_key,
-      body: JSON.stringify({ amount: toMajor(req.amount, req.currency) }),
-    })
-    return { provider_ref: String(data.id) }
+    // `amount_refunded` — confirmed against Flutterwave's "Refund a
+    // Transaction" reference (developer.flutterwave.com, read 2026-09-12).
+    // **Unverified against a live refund**, the same caveat every
+    // unexercised call in this file carries. No `fee` field is documented on
+    // this response at all, so none is read — a refund fee is not something
+    // Flutterwave reports here, not something this adapter forgot to ask for.
+    const data = await this.call<{ id: number; amount_refunded?: number }>(
+      `/transactions/${tx.id}/refund`,
+      {
+        method: 'POST',
+        idempotencyKey: req.idempotency_key,
+        body: JSON.stringify({ amount: toMajor(req.amount, req.currency) }),
+      },
+    )
+    return {
+      provider_ref: String(data.id),
+      amount: data.amount_refunded != null ? toMinor(data.amount_refunded, tx.currency) : undefined,
+      currency: data.amount_refunded != null ? tx.currency : undefined,
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -1254,16 +1300,39 @@ export class FlutterwaveProvider implements PaymentProvider {
    * A transfer we cannot read is **not** a failure — booking one would tell a
    * seller their money bounced because our request timed out.
    */
-  async transferStatus(providerRef: string): Promise<'paid' | 'pending' | 'failed'> {
-    const data = await this.call<{ status: string; complete_message?: string }>(
+  async transferStatus(providerRef: string): Promise<TransferStatusResult> {
+    // `amount`, `fee` and `currency` are the same three fields the
+    // create-transfer response carries — confirmed against Flutterwave's
+    // "Fetch a Transfer" reference (developer.flutterwave.com, read
+    // 2026-09-12), and previously read only for `status`. `fee` is
+    // specifically what this endpoint exists to learn: a transfer is `NEW`
+    // when created and Flutterwave settles it (and prices it) asynchronously,
+    // so the create response's own `fee` is routinely absent and this is
+    // where it actually shows up.
+    const data = await this.call<{
+      status: string
+      complete_message?: string
+      amount?: number
+      fee?: number
+      currency?: string
+    }>(
       `/transfers/${encodeURIComponent(providerRef)}`,
       { method: 'GET' },
     )
 
     const status = (data.status ?? '').toUpperCase()
-    if (status === 'SUCCESSFUL') return 'paid'
-    if (status === 'FAILED') return 'failed'
-    return 'pending'
+    const currency = data.currency
+    const confirmed: Pick<TransferStatusResult, 'amount' | 'currency' | 'fee'> = currency
+      ? {
+        amount: data.amount != null ? toMinor(data.amount, currency) : undefined,
+        currency: data.amount != null ? currency : undefined,
+        fee: data.fee != null ? toMinor(data.fee, currency) : null,
+      }
+      : { amount: undefined, currency: undefined, fee: null }
+
+    if (status === 'SUCCESSFUL') return { status: 'paid', ...confirmed }
+    if (status === 'FAILED') return { status: 'failed', ...confirmed }
+    return { status: 'pending', ...confirmed }
   }
 
   /**
