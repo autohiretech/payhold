@@ -1405,6 +1405,41 @@ export class FlutterwaveProvider implements PaymentProvider {
     return data.map((b) => ({ code: b.code, name: b.name }))
   }
 
+  /**
+   * `ledger_balance` and `available_balance` are **two separate wallets, not
+   * one wallet with a settlement lag** — found 2026-09-12, against the
+   * account holder's own live dashboard rather than from the field names.
+   * Flutterwave's dashboard shows a **Collection balance** ("how much you
+   * have received... stays here until it's settled into your bank account or
+   * your payout balance") and a **Payout balance** ("the money available to
+   * you for transfer purposes"), and moving money from the first into the
+   * second is either an account-level settlement-destination preference
+   * (dashboard: Settings → Business preferences → "How do you want to get
+   * your earnings?") or a one-off manual dashboard transfer — never
+   * automatic, and never triggered by a provider API call. `ledger_balance`
+   * matched the dashboard's Collection figure and `available_balance`
+   * matched Payout, for every currency checked, including two (NGN, RWF)
+   * where Payout sat at zero next to a non-zero Collection: proof the two do
+   * not net against each other the way one wallet's settled/unsettled split
+   * would.
+   *
+   * That matters here because `amount` is what the reconciliation cron
+   * compares against everything our own ledger expects the provider to be
+   * holding (`_shared/reconciliation.ts`'s `expected()`, `provider.ts`'s
+   * `balances()` doc comment) — and that expectation is money not yet paid
+   * out, full stop, wherever at Flutterwave it currently sits. Reading only
+   * `ledger_balance` (this file's previous behaviour) happened to agree with
+   * that total only because every tenant's Payout balance has so far been
+   * zero. The instant real money sits in Payout — a settlement preference
+   * flipped, or a manual top-up — `ledger_balance` alone under-reports the
+   * total by exactly that amount, `expected()` does not move, and
+   * `record_reconciliation` reads the gap as drift and freezes the tenant's
+   * payouts on the very money this fix is about making usable. `amount` below
+   * sums both wallets so that can't happen; see `stripe.ts`'s `balances()` for
+   * the same shape solving the same problem on a rail with a genuine
+   * settlement-lag pair (`available`/`pending`) instead of two independent
+   * wallets.
+   */
   async balances(): Promise<
     {
       currency: Currency
@@ -1415,11 +1450,11 @@ export class FlutterwaveProvider implements PaymentProvider {
       /**
        * Flutterwave's `reserved_balance` — a third figure this rail reports
        * alongside `ledger_balance`/`available_balance`, and neither the
-       * "can move now" nor the "still clearing" bucket: it is money the
-       * wallet is carrying that is not the settlement lag `pending`
-       * describes. Not part of `PaymentProvider.balances()`'s named shape,
-       * so `GET /balance?live=1` does not surface it — see this file's
-       * `balances()` for why it is kept here rather than folded into either.
+       * Collection nor the Payout wallet above: it is money the wallet is
+       * carrying that is not the settlement lag `pending` describes. Not part
+       * of `PaymentProvider.balances()`'s named shape, so `GET /balance?live=1`
+       * does not surface it — see this file's `balances()` for why it is kept
+       * here rather than folded into either.
        */
       reserved: Money | null
     }[]
@@ -1434,21 +1469,36 @@ export class FlutterwaveProvider implements PaymentProvider {
     >('/balances')
     return data.map((b) => ({
       currency: b.currency,
-      // Everything the wallet still holds, not only what is spendable this
-      // instant. Settled funds sit in `ledger_balance` until settlement moves
-      // them into `available_balance`, and the reconciliation cron compares
-      // against everything the ledger expects the provider to be holding.
-      // Reading `available_balance` alone reported a funded wallet as empty and
-      // froze its payouts on the first pass. Unchanged by the split below.
-      amount: toMinor(b.ledger_balance ?? b.available_balance ?? 0, b.currency),
-      // `available_balance` — what Flutterwave says can be withdrawn right now.
+      // Everything still with Flutterwave for this currency, not only what
+      // sits in one of the two wallets — the Collection wallet
+      // (`ledger_balance`) and the Payout wallet (`available_balance`) are
+      // independent pools, so this has to be their sum rather than either one
+      // alone or a fallback between them. A currency that only ever reports
+      // one of the two (the other field simply absent from the rail's
+      // response) still gets exactly that figure, via the `?? 0` on the other
+      // term — this changes nothing for a currency that has never held a
+      // Payout balance, and only stops under-reporting once one does.
+      amount: toMinor((b.ledger_balance ?? 0) + (b.available_balance ?? 0), b.currency),
+      // `available_balance` — the Payout wallet: what Flutterwave says can be
+      // sent out right now, via Transfers, with no further action. This is
+      // the figure a pre-flight check ahead of a disbursement should read.
       available: b.available_balance != null ? toMinor(b.available_balance, b.currency) : null,
-      // The difference against `ledger_balance` — everything still clearing
-      // that has not yet moved into `available_balance`. Only computable when
-      // both figures are present; never `ledger_balance` alone re-labelled.
-      pending: (b.ledger_balance != null && b.available_balance != null)
-        ? toMinor(Math.max(0, b.ledger_balance - b.available_balance), b.currency)
-        : null,
+      // The Collection wallet — `ledger_balance` — carried under the field the
+      // dashboard renders as "Not yet available", which is exactly what it is:
+      // money at the rail that cannot fund a payout today.
+      //
+      // It is NOT a settlement lag, and nothing here should imply one. Stripe's
+      // `pending[]` becomes available by itself given time; Collection money
+      // becomes Payout money only through the settlement-destination
+      // preference or a manual transfer, and `available_on` stays null for
+      // this rail precisely because no such date exists. The dashboard labels
+      // this cell "Flutterwave: collection wallet" and its schedule cell "no
+      // schedule — moves on request" for that reason.
+      //
+      // Reporting it as null instead — briefly the case — was worse than the
+      // name: it deleted 59,664.57 NGN and 4,871,091 RWF from the owner's
+      // screen, which is the money he opened the page to find.
+      pending: b.ledger_balance != null ? toMinor(b.ledger_balance, b.currency) : null,
       // Flutterwave's `/balances` names no date this clears by, and no other
       // documented endpoint gives one per wallet — never guessed.
       available_on: null,

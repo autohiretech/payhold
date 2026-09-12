@@ -1299,7 +1299,7 @@ Deno.test('a beneficiary name splits on the first space, and a single word fills
 // balances() — the clearing split
 // ---------------------------------------------------------------------------
 
-Deno.test('balances reports available and the ledger/available gap as pending, amount unchanged', async () => {
+Deno.test('balances sums the Collection and Payout wallets into amount; the Collection wallet is reported, not a derived gap', async () => {
   const { restore } = intercept({
     status: 'success',
     data: [{
@@ -1312,11 +1312,21 @@ Deno.test('balances reports available and the ledger/available gap as pending, a
   try {
     const p = new FlutterwaveProvider(CREDS, '', 'live')
     const [usd] = await p.balances()
-    // `amount` is untouched — still `ledger_balance` in minor units.
-    assertEquals(usd.amount, 10_000)
+    // `amount` is the two wallets summed: 100 Collection + 60 Payout, not
+    // `ledger_balance` re-labelled and not either one alone. This is the
+    // figure `reconciliation.ts` compares against everything still owed —
+    // reading only Collection would under-report the moment Payout holds
+    // real money.
+    assertEquals(usd.amount, 16_000)
+    // `available` is still exactly the Payout wallet — what a disbursement
+    // pre-flight check should read before attempting a transfer.
     assertEquals(usd.available, 6_000)
-    // The clearing gap: ledger minus available.
-    assertEquals(usd.pending, 4_000)
+    // No settlement-lag figure exists between two independent wallets, so
+    // this is never the Collection/Payout gap re-labelled as "clearing".
+    // The Collection wallet, reported as itself — not `amount - available`,
+    // and not null. It is money at the rail that cannot fund a payout today,
+    // which is what the screen's "not yet available" column means.
+    assertEquals(usd.pending, 10_000)
     assertEquals(usd.reserved, 500)
     // Flutterwave's `/balances` names no clearing date.
     assertEquals(usd.available_on, null)
@@ -1333,13 +1343,18 @@ Deno.test('balances reports available and reserved as null when the rail does no
   try {
     const p = new FlutterwaveProvider(CREDS, '', 'live')
     const [rwf] = await p.balances()
+    // Only the Collection wallet was reported; the Payout wallet term is 0 by
+    // the `?? 0` fallback, so amount is unchanged from reading `ledger_balance`
+    // alone — this is the case that was already correct before the fix, and
+    // must stay correct after it.
     assertEquals(rwf.amount, 1000)
     // Never zero, never derived from the ledger figure — the rail simply did
     // not send an `available_balance` for this currency.
     assertEquals(rwf.available, null)
-    // With no `available_balance` to diff against, there is nothing to call
-    // "pending" either.
-    assertEquals(rwf.pending, null)
+    // The Collection wallet is present on this row and RWF is zero-decimal,
+    // so it reports 1000 unchanged — the same figure `amount` carries here,
+    // because the Payout wallet term is absent.
+    assertEquals(rwf.pending, 1000)
     assertEquals(rwf.reserved, null)
     assertEquals(rwf.available_on, null)
   } finally {
@@ -1347,9 +1362,12 @@ Deno.test('balances reports available and reserved as null when the rail does no
   }
 })
 
-Deno.test('balances never reports a negative pending figure', async () => {
-  // available_balance ahead of ledger_balance should not happen, but a
-  // reporting quirk must not turn "clearing" into a negative number.
+Deno.test('balances sums both wallets even when Payout exceeds Collection', async () => {
+  // Two independent wallets, not a settlement-lag pair — `available_balance`
+  // (Payout) is under no constraint to stay below `ledger_balance`
+  // (Collection): a direct bank top-up straight into Payout, bypassing
+  // Collection entirely, would report exactly this shape and it is not a
+  // reporting quirk to guard against.
   const { restore } = intercept({
     status: 'success',
     data: [{ currency: 'USD', ledger_balance: 50, available_balance: 80 }],
@@ -1357,7 +1375,11 @@ Deno.test('balances never reports a negative pending figure', async () => {
   try {
     const p = new FlutterwaveProvider(CREDS, '', 'live')
     const [usd] = await p.balances()
-    assertEquals(usd.pending, 0)
+    assertEquals(usd.amount, 13_000)
+    // Collection is reported as itself even when it is the smaller wallet —
+    // there is no clamping and no subtraction, so a Payout-heavy account
+    // still shows exactly what sits on each side.
+    assertEquals(usd.pending, 5_000)
   } finally {
     restore()
   }
