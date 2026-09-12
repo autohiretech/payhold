@@ -283,10 +283,22 @@ export const COUNTRY_LABEL: Record<string, string> = Object.fromEntries(
   COUNTRIES.map((info) => [info.code, info.name]),
 )
 
-/** Regional-indicator flag emoji, derived from the ISO code. */
-export function countryFlag(code: Country): string {
+/**
+ * Regional-indicator flag emoji, derived from the ISO code.
+ *
+ * Answers with nothing rather than throwing when there is no code. A seller's
+ * country is nullable in the database and several rows in production have
+ * never had one, so a flag helper that assumes a string is a helper that takes
+ * a screen down — spreading `null` threw "e is not iterable" and the whole
+ * Sellers table went to the router's error page over a missing two-letter
+ * code. Anything that is not two ASCII letters gets the same treatment: an
+ * emoji built from arbitrary characters is a pair of unrelated glyphs, not a
+ * flag.
+ */
+export function countryFlag(code: Country | null | undefined): string {
+  if (typeof code !== 'string' || !/^[A-Za-z]{2}$/.test(code)) return ''
   return String.fromCodePoint(
-    ...[...code].map((ch) => 0x1f1e6 + ch.charCodeAt(0) - 65),
+    ...[...code.toUpperCase()].map((ch) => 0x1f1e6 + ch.charCodeAt(0) - 65),
   )
 }
 

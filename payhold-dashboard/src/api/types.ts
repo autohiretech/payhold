@@ -1089,7 +1089,12 @@ export interface Balance {
 export interface SellerWallet {
   seller_id: string
   seller_name: string
-  seller_country: Country
+  /**
+   * Nullable, because `sellers.country` is: a seller created through the API
+   * without one keeps none until somebody sets it. The type said otherwise
+   * until 2026-09-12, and the Sellers screen crashed on the first such row.
+   */
+  seller_country: Country | null
   currency: Currency
   /** Buyer money still in the hold on this seller's deals. Not yet theirs. */
   held: Money

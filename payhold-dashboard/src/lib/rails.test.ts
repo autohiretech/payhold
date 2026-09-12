@@ -95,6 +95,15 @@ describe('every country can pay — the coverage guarantee', () => {
     const flags = ALL.map(countryFlag)
     expect(new Set(flags).size).toBe(flags.length)
   })
+
+  // A seller's country is nullable in the database, and rows in production
+  // have none. This used to throw "e is not iterable" out of the spread and
+  // took the whole Sellers table to the router's error page.
+  it('answers with nothing where there is no country, instead of throwing', () => {
+    for (const missing of [null, undefined, '', 'R', 'RWA', '12']) {
+      expect(countryFlag(missing as never), String(missing)).toBe('')
+    }
+  })
 })
 
 describe('local rails appear only where they really exist', () => {

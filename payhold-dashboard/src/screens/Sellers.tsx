@@ -104,7 +104,9 @@ function WalletsCard() {
                     {w.seller_name}
                   </Link>
                   <div className="text-xs text-fg-muted">
-                    {countryFlag(w.seller_country)} {countryName(w.seller_country)}
+                    {w.seller_country
+                      ? `${countryFlag(w.seller_country)} ${countryName(w.seller_country)}`
+                      : 'No country on file'}
                   </div>
                 </Td>
                 <Td>

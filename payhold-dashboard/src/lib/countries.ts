@@ -392,7 +392,14 @@ export function countryInfo(code: Country): CountryInfo {
   return info
 }
 
-export function countryName(code: Country): string {
+/**
+ * The country's name, or a dash where a seller has never given one — the same
+ * nullability `countryFlag` handles, for the same reason: `Seller.country` is
+ * nullable and a screen that renders it must say so rather than crash or print
+ * "null".
+ */
+export function countryName(code: Country | null | undefined): string {
+  if (!code) return '—'
   return BY_CODE.get(code)?.name ?? code
 }
 

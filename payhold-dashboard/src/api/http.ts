@@ -493,7 +493,7 @@ export class HttpClient implements PayHoldClient {
         ...b,
         seller_id: sellerId,
         seller_name: seller?.name ?? '',
-        seller_country: seller?.country ?? 'RW',
+        seller_country: seller?.country ?? null,
       })) as SellerWallet[]
     }
 
