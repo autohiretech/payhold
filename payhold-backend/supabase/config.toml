@@ -227,6 +227,12 @@ enable_signup = true
 # addresses. If disabled, only the new email is required to confirm.
 double_confirm_changes = true
 # If enabled, users need to confirm their email address before signing in.
+#
+# **False, and it must stay false until a sender is proven** — see the
+# `[auth.email.smtp]` block below for the order. `functions/account/` confirms
+# every address on creation for this reason, which means a signed-up address is
+# currently unproven, and the launch checklist's `email_confirmation` item says
+# so rather than pretending otherwise.
 enable_confirmations = false
 # If enabled, users will need to reauthenticate or have logged in recently to change their password.
 secure_password_change = false
@@ -237,15 +243,39 @@ otp_length = 6
 # Number of seconds before the email OTP expires (defaults to 1 hour).
 otp_expiry = 3600
 
-# Use a production-ready SMTP server
-# [auth.email.smtp]
-# enabled = true
-# host = "smtp.sendgrid.net"
-# port = 587
-# user = "apikey"
-# pass = "env(SENDGRID_API_KEY)"
-# admin_email = "admin@email.com"
-# sender_name = "Admin"
+# A production sender, and the two-step it has to be turned on in.
+#
+# `email_confirmation` on the launch checklist is blocked by the absence of this
+# block, and the block alone does not clear it. The order matters because the
+# failure is one-way: `enable_confirmations = true` above with no working sender
+# locks every account it then creates out of its own email address, and there is
+# no password reset to recover with — GoTrue sends that by email too. So:
+#
+#   1. pick a sender (SendGrid, Resend, SES) and verify the from-address with
+#      them, or every message is silently dropped as unauthenticated;
+#   2. `npx supabase secrets set SMTP_HOST=… SMTP_PORT=… SMTP_USER=… \
+#         SMTP_PASS=… SMTP_ADMIN_EMAIL=…`;
+#   3. flip `enabled` below to true and push the config;
+#   4. send one real signup to an address you hold and confirm it arrives;
+#   5. only then set `enable_confirmations = true` above, and only then is the
+#      checklist item honestly signable.
+#
+# Values are read from the environment rather than written here: this file is
+# committed, and an SMTP password is a credential like any other. `env()` is the
+# CLI's own interpolation, the same shape the commented template used.
+#
+# `[auth.rate_limit].email_sent` is 2/hour and applies the moment this is
+# enabled. That is fine for confirmations and too low for anything bulk; raise
+# it deliberately if a reminder channel ever lands here (the reminders cron in
+# `../CLAUDE.md` is still undecided precisely because it has no channel).
+[auth.email.smtp]
+enabled = false
+host = "env(SMTP_HOST)"
+port = 587
+user = "env(SMTP_USER)"
+pass = "env(SMTP_PASS)"
+admin_email = "env(SMTP_ADMIN_EMAIL)"
+sender_name = "PayHold"
 
 # Uncomment to customize email template
 # [auth.email.template.invite]
