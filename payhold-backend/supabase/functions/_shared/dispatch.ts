@@ -538,8 +538,34 @@ export async function dispatchPayout(
     // gone — or sends the seller a second payment. `transferStatus` is the
     // question actually being asked.
     //
-    // A rail with no `transferStatus` is synchronous and never lands here:
-    // it answered `paid` in the call that sent the money.
+    // A rail with no `transferStatus` was assumed to be synchronous and never
+    // to land here, having answered `paid` in the call that sent the money.
+    // **PayPal disproved that on live money.** Its Payouts v1 call returns
+    // `paid` only for a batch already `SUCCESS`, and a fresh batch is
+    // `PENDING`, so the payout went to `processing` on a rail that could not
+    // be asked about — and fell through to the `else` below, which re-POSTs
+    // `release`. That is the exact shape the Flutterwave note above warns
+    // against, and it had a live transfer in front of it.
+    //
+    // So the assumption is now enforced instead of stated. A `processing`
+    // payout on a rail that cannot be polled is left alone: nothing is
+    // re-sent, no attempt is spent, and it waits for an adapter that can ask
+    // or for a person. Whatever the rail's duplicate handling does — PayPal
+    // anchors on `sender_batch_id` and refuses a repeat, which would have
+    // booked a failure against money that had gone — the answer is not to find
+    // out by trying.
+    if (payout.status === 'processing' && payout.provider_ref && !provider.transferStatus) {
+      console.error('payout cannot be polled on this rail', {
+        payout_id: payout.id,
+        rail: decision.provider,
+        provider_ref: payout.provider_ref,
+        message:
+          'This rail reported the transfer as pending and implements no transferStatus, ' +
+          'so it can be neither confirmed nor safely re-sent. Left as processing.',
+      })
+      return 'processing'
+    }
+
     if (payout.status === 'processing' && payout.provider_ref && provider.transferStatus) {
       const settled = await provider.transferStatus(payout.provider_ref)
 

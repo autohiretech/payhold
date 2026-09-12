@@ -919,3 +919,137 @@ Deno.test('balances reports available and pending as null when PayPal omits them
     restore()
   }
 })
+
+// ---------------------------------------------------------------------------
+// transferStatus — asking about a payout batch rather than re-sending it
+//
+// This adapter had none, and `dispatch.ts` read that absence as "synchronous
+// rail, already answered `paid`". PayPal is not: a fresh batch is `PENDING`,
+// so a live payout sat in `processing` on a rail nothing could ask about and
+// the dispatcher fell through to re-POSTing `release` — refused, because
+// `sender_batch_id` is the idempotency key, and booked as a failure against
+// money that had gone. These tests pin the mapping that replaced that.
+// ---------------------------------------------------------------------------
+
+const batch = (batch_status: string, transaction_status?: string) => ({
+  batch_header: { batch_status },
+  items: [{
+    ...(transaction_status ? { transaction_status } : {}),
+    payout_item: { amount: { value: '282.37', currency_code: 'USD' } },
+    payout_item_fee: { value: '1.63', currency_code: 'USD' },
+  }],
+})
+
+Deno.test('a batch and its item both SUCCESS is paid, with the confirmed figures', async () => {
+  const { restore } = intercept([batch('SUCCESS', 'SUCCESS')])
+  try {
+    const pp = new PayPalProvider(CREDS, 'https://pay.example')
+    const got = await pp.transferStatus!('RM2Z57VLX2BJ8')
+
+    assertEquals(got.status, 'paid')
+    assertEquals(got.amount, 28_237)
+    assertEquals(got.currency, 'USD')
+    assertEquals(got.fee, 163)
+  } finally {
+    restore()
+  }
+})
+
+Deno.test('a fresh PENDING batch is pending, not paid and not failed', async () => {
+  // The state the live payout was actually in, and the one that used to fall
+  // through to a re-POST.
+  const { restore } = intercept([batch('PENDING')])
+  try {
+    const pp = new PayPalProvider(CREDS, 'https://pay.example')
+    assertEquals((await pp.transferStatus!('RM2Z57VLX2BJ8')).status, 'pending')
+  } finally {
+    restore()
+  }
+})
+
+Deno.test('it asks, and does not send anything', async () => {
+  // The whole property. A GET and nothing else — no payout creation, ever.
+  const { seen, restore } = intercept([batch('PENDING')])
+  try {
+    const pp = new PayPalProvider(CREDS, 'https://pay.example')
+    await pp.transferStatus!('RM2Z57VLX2BJ8')
+
+    const asked = calls(seen)
+    assertEquals(asked[0]?.url?.endsWith('/v1/payments/payouts/RM2Z57VLX2BJ8'), true)
+    assertEquals(asked[0]?.body, undefined)
+    assertEquals(asked.length, 1)
+  } finally {
+    restore()
+  }
+})
+
+Deno.test('a SUCCESS batch whose item came back is failed, not paid', async () => {
+  // PayPal pays an email address, and an address nobody claims sends the money
+  // back. Trusting `batch_status` alone would report a seller paid whose money
+  // is on its way to us.
+  for (const txn of ['RETURNED', 'REVERSED', 'REFUNDED', 'BLOCKED', 'FAILED']) {
+    const { restore } = intercept([batch('SUCCESS', txn)])
+    try {
+      const pp = new PayPalProvider(CREDS, 'https://pay.example')
+      assertEquals(
+        (await pp.transferStatus!('RM2Z57VLX2BJ8')).status,
+        'failed',
+        `item ${txn} should not read as paid`,
+      )
+    } finally {
+      restore()
+    }
+  }
+})
+
+Deno.test('an unclaimed payout is still in flight, not a failure', async () => {
+  // PayPal holds an unclaimed payout for 30 days before returning it, and
+  // `RETURNED` is what it becomes if nobody ever claims it. Calling it failed
+  // now would tell a seller their money bounced while it is still waiting.
+  const { restore } = intercept([batch('SUCCESS', 'UNCLAIMED')])
+  try {
+    const pp = new PayPalProvider(CREDS, 'https://pay.example')
+    assertEquals((await pp.transferStatus!('RM2Z57VLX2BJ8')).status, 'pending')
+  } finally {
+    restore()
+  }
+})
+
+Deno.test('a refused batch is failed', async () => {
+  for (const b of ['DENIED', 'CANCELED']) {
+    const { restore } = intercept([batch(b, 'FAILED')])
+    try {
+      const pp = new PayPalProvider(CREDS, 'https://pay.example')
+      assertEquals((await pp.transferStatus!('RM2Z57VLX2BJ8')).status, 'failed')
+    } finally {
+      restore()
+    }
+  }
+})
+
+Deno.test('a status nobody recognises waits rather than failing', async () => {
+  // Flutterwave's rule, and it binds here for the same reason: a seller must
+  // never be told their money bounced because we misread a word.
+  const { restore } = intercept([batch('SOMETHING_NEW', 'ALSO_NEW')])
+  try {
+    const pp = new PayPalProvider(CREDS, 'https://pay.example')
+    assertEquals((await pp.transferStatus!('RM2Z57VLX2BJ8')).status, 'pending')
+  } finally {
+    restore()
+  }
+})
+
+Deno.test('a batch PayPal has not priced yet reports no figures rather than zeros', async () => {
+  const { restore } = intercept([{ batch_header: { batch_status: 'PENDING' }, items: [] }])
+  try {
+    const pp = new PayPalProvider(CREDS, 'https://pay.example')
+    const got = await pp.transferStatus!('RM2Z57VLX2BJ8')
+
+    assertEquals(got.status, 'pending')
+    assertEquals(got.amount, undefined)
+    assertEquals(got.currency, undefined)
+    assertEquals(got.fee, null)
+  } finally {
+    restore()
+  }
+})

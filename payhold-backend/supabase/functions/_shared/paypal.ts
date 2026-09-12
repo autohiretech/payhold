@@ -57,6 +57,7 @@ import type {
   RefundResult,
   TokenizeRequest,
   TokenizeResult,
+  TransferStatusResult,
   VerifiedTransaction,
 } from './provider.ts'
 
@@ -719,6 +720,85 @@ export class PayPalProvider implements PaymentProvider {
     } catch {
       return { amount: undefined, currency: undefined, fee: undefined }
     }
+  }
+
+  /**
+   * Ask PayPal about a payout batch it already has — never re-send it.
+   *
+   * This adapter had no `transferStatus`, and `dispatch.ts` read that absence
+   * as "this rail is synchronous and answers `paid` when it sends". PayPal is
+   * not: `release` reports `paid` only for a batch already `SUCCESS`, and a
+   * freshly created batch is `PENDING`, so a real payout went to `processing`
+   * on a rail nothing could ask about — and the dispatcher fell through to
+   * re-POSTing `release`. Since `sender_batch_id` is the idempotency key and
+   * PayPal anchors on it, that repeat is refused, and a refusal on the second
+   * attempt would have been booked as a failure against money already gone.
+   *
+   * So the question is asked properly, the same shape Flutterwave's is, and
+   * for the same reason its header gives: a transfer the rail already has is
+   * asked about, never re-sent.
+   *
+   * **Both levels are read, and the item is the one that decides.** A batch can
+   * be `SUCCESS` while its single item is `RETURNED`, `UNCLAIMED` or `BLOCKED`
+   * — PayPal pays into an email address, and an address nobody claims sends
+   * the money back. Trusting `batch_status` alone would report a seller paid
+   * whose money is on its way back to us.
+   *
+   * Only an explicitly terminal failure is reported as one. Anything
+   * unrecognised waits, which is Flutterwave's rule here too: a seller must
+   * never be told their money bounced because we misread a word.
+   *
+   * **Unverified against a live payout**, like every other unexercised call in
+   * this file.
+   */
+  async transferStatus(providerRef: string): Promise<TransferStatusResult> {
+    const details = await this.call<{
+      batch_header?: { batch_status?: string }
+      items?: {
+        transaction_status?: string
+        payout_item_fee?: AmountShape
+        payout_item?: { amount?: AmountShape }
+      }[]
+    }>(`/v1/payments/payouts/${encodeURIComponent(providerRef)}`, { method: 'GET' })
+
+    const item = details.items?.[0]
+    const amountShape = item?.payout_item?.amount
+    const feeShape = item?.payout_item_fee
+
+    const confirmed: Pick<TransferStatusResult, 'amount' | 'currency' | 'fee'> = {
+      amount: amountShape
+        ? fromValue(amountShape.value, amountShape.currency_code)
+        : undefined,
+      currency: amountShape?.currency_code,
+      fee: feeShape ? fromValue(feeShape.value, feeShape.currency_code) : null,
+    }
+
+    const batch = (details.batch_header?.batch_status ?? '').toUpperCase()
+    const txn = (item?.transaction_status ?? '').toUpperCase()
+
+    // The batch never reached the rails at all.
+    if (batch === 'DENIED' || batch === 'CANCELED') {
+      return { status: 'failed', ...confirmed }
+    }
+
+    // Sent, and came back or was stopped. `UNCLAIMED` is deliberately absent:
+    // PayPal holds an unclaimed payout for 30 days before returning it, so it
+    // is still in flight rather than finished, and `RETURNED` is what it
+    // becomes if nobody claims it.
+    if (
+      txn === 'FAILED' || txn === 'RETURNED' || txn === 'REVERSED' ||
+      txn === 'BLOCKED' || txn === 'REFUNDED'
+    ) {
+      return { status: 'failed', ...confirmed }
+    }
+
+    // Paid only when both levels agree. An item PayPal has not priced or
+    // labelled yet is not a payment we can confirm.
+    if (batch === 'SUCCESS' && txn === 'SUCCESS') {
+      return { status: 'paid', ...confirmed }
+    }
+
+    return { status: 'pending', ...confirmed }
   }
 
   /**
