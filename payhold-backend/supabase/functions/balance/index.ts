@@ -3,7 +3,6 @@
  *
  *   GET  /balance                     per currency
  *   GET  /balance?by=rail             per provider and currency
- *   POST /balance/external-transfers  record a move between your own accounts
  *
  * Every number here is derived from the ledger by `tenant_balances()` and
  * `rail_balances()`. There is no stored balance column anywhere in the system,
@@ -15,97 +14,46 @@
  * APIs, and only one of them can pay an African seller.
  */
 
-import { requireRole, resolveCaller, serviceClient } from '../_shared/auth.ts'
-import { handler, json, readJson, required } from '../_shared/http.ts'
+import { resolveCaller, serviceClient } from '../_shared/auth.ts'
+import { handler, json } from '../_shared/http.ts'
 import { PayHoldError } from '../_shared/types.ts'
 
-interface ExternalTransferBody {
-  provider: string
-  currency: string
-  /** Signed minor units: positive is money arriving on that rail. */
-  amount: number
-  reference: string
-}
-
 /**
- * Record money the tenant moved between their own provider accounts.
+ * `POST /balance/external-transfers` was removed 2026-09-12, at the account
+ * owner's request.
  *
- * Under bring-your-own-keys PayHold orchestrates and never custodies, so a
- * tenant who collects on Stripe and pays African sellers on Flutterwave tops
- * the second account up from the first themselves — through their bank, over
- * days, entirely outside anything this system can observe. The ledger still has
- * to be able to explain the Flutterwave balance, or the nightly pass reports
- * the top-up as drift and freezes their payouts.
+ * It let a person file a claim that they had moved money between their own
+ * provider accounts — a top-up PayHold cannot observe, since under
+ * bring-your-own-keys it orchestrates and never custodies. The intent was
+ * sound: `reconciliation.ts` adds `tenant_funds` into what it expects to find
+ * on a rail, so an unexplained top-up reads as drift and
+ * `record_reconciliation` freezes the tenant's payouts.
  *
- * **Person-only, and a reference is required.** Both for the same reason
- * `paid_needs_a_provider_reference` exists: this is a claim that money moved
- * somewhere we cannot check, and a claim with nothing to trace it by is how a
- * difference gets papered over instead of explained. A client's server that
- * could file these could balance its own books against us.
+ * What made it worse than the problem it solved is that `record_external_transfer`
+ * validated the actor, the reference and a non-zero amount — and nothing about
+ * the money. It never asked the rail registry whether that provider can hold
+ * that currency, so the only two entries ever filed included a **GHS balance on
+ * PayPal**, a rail that carries USD and EUR alone (`_shared/rails.ts`). A
+ * mistyped claim does not just mislead a tile: it lands in `expected()` and
+ * arms the same payout freeze the feature existed to prevent.
+ *
+ * If this comes back, it needs `(provider, currency)` checked against the rail
+ * registry before the insert, and the form needs `toMinorUnits(amount, currency)`
+ * rather than a hardcoded x100 — RWF is zero-decimal, so that multiply filed a
+ * 100x overstatement for the currency the form defaulted to.
+ *
+ * The ledger keeps `external_transfer` as an entry type: `rail_balances` still
+ * reads it, the two historical rows still exist (the ledger is append-only),
+ * and `cross_rail_offset` / `cross_rail_payout` — which the system writes for
+ * itself and can verify — are untouched.
  */
-async function recordExternalTransfer(
-  req: Request,
-  db: ReturnType<typeof serviceClient>,
-  caller: Awaited<ReturnType<typeof resolveCaller>>,
-): Promise<Response> {
-  if (caller.kind === 'api_key') {
-    throw new PayHoldError(
-      'policy_violation',
-      'Recording a transfer between your own accounts is a person\'s statement ' +
-        'and cannot be filed with an API key',
-    )
-  }
-  requireRole(caller, 'owner', 'staff')
-
-  const body = await readJson<ExternalTransferBody>(req)
-  required(
-    body as unknown as Record<string, unknown>,
-    'provider',
-    'currency',
-    'amount',
-    'reference',
-  )
-
-  if (!Number.isInteger(body.amount)) {
-    throw new PayHoldError(
-      'policy_violation',
-      'amount is in minor units and must be a whole number',
-    )
-  }
-
-  const { data, error } = await db.rpc('record_external_transfer', {
-    p_tenant: caller.tenant_id,
-    p_provider: body.provider,
-    p_currency: body.currency,
-    p_amount: body.amount,
-    p_reference: body.reference,
-    p_actor: caller.actor,
-  })
-
-  if (error) {
-    const message = error.message
-    for (const code of ['not_found', 'policy_violation'] as const) {
-      if (message.startsWith(code)) {
-        throw new PayHoldError(code, message.slice(code.length + 2).trim())
-      }
-    }
-    console.error('external transfer failed', { message })
-    throw new PayHoldError('policy_violation', 'Could not record that transfer')
-  }
-
-  return json(req, { entry: data }, 201)
-}
 
 Deno.serve(handler(async (req) => {
   const db = serviceClient()
   const caller = await resolveCaller(db, req)
-  const segments = new URL(req.url).pathname.split('/').filter(Boolean)
-  const action = segments[segments.indexOf('balance') + 1]
 
-  if (req.method === 'POST' && action === 'external-transfers') {
-    return await recordExternalTransfer(req, db, caller)
-  }
-
+  // Read-only again, now that the external-transfer POST is gone: there is no
+  // sub-path left to route on, so the method is the whole decision.
   if (req.method !== 'GET') {
     throw new PayHoldError('policy_violation', `${req.method} is not supported here`)
   }

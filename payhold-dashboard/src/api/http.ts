@@ -448,18 +448,6 @@ export class HttpClient implements PayHoldClient {
     return balances
   }
 
-  async recordExternalTransfer(input: {
-    provider: Provider
-    currency: Currency
-    amount: Money
-    reference: string
-  }): Promise<void> {
-    await this.#call('/balance/external-transfers', {
-      method: 'POST',
-      body: JSON.stringify(input),
-    })
-  }
-
   async listSellerWallets(sellerId?: string): Promise<SellerWallet[]> {
     if (sellerId) {
       const { balances } = await this.#call<{

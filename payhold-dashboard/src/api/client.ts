@@ -318,28 +318,6 @@ export interface PayHoldClient {
   /** The same buckets split by the rail holding the money. */
   getRailBalances(): Promise<RailBalance[]>
   /**
-   * Record money you moved between your own provider accounts.
-   *
-   * PayHold orchestrates and never custodies, so a company collecting on Stripe
-   * and paying African sellers on Flutterwave tops the second up from the first
-   * themselves — through their bank, over days, somewhere PayHold cannot see.
-   * The ledger still has to explain the resulting balance, or the nightly
-   * reconciliation reports the top-up as drift and freezes payouts.
-   *
-   * `amount` is signed minor units: positive is money arriving on that rail.
-   * The reference is required and is not decoration — it is the only thing a
-   * later reader can check this claim against.
-   *
-   * There is no API-key path to this deliberately, which is why this screen is
-   * the only way to file one.
-   */
-  recordExternalTransfer(input: {
-    provider: Provider
-    currency: Currency
-    amount: Money
-    reference: string
-  }): Promise<void>
-  /**
    * The same buckets split by *seller* — who PayHold is holding money for.
    *
    * Summed, these are `getBalance()` less `fees_retained`, which is ours and
