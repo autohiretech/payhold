@@ -454,13 +454,27 @@ export class HttpClient implements PayHoldClient {
    * right now, or why it could not answer. Defaulted to `[]` rather than left
    * undefined only in the case the endpoint omits the key entirely — every
    * row's own `amount`/`error` still carries whether *that* rail answered.
+   *
+   * `available` / `pending` / `available_on` are normalised to `null` here
+   * when the key is missing entirely, rather than left `undefined` — a rail
+   * that has not shipped the split yet must read exactly like a rail that
+   * reports the split as unavailable, never as a third, uncovered case a
+   * screen forgot to render.
    */
   async getBalanceWithRail(): Promise<{ balances: Balance[]; atRail: RailLiveBalance[] }> {
     const { balances, atRail } = await this.#call<{
       balances: Balance[]
       atRail: RailLiveBalance[]
     }>('/balance?live=1')
-    return { balances, atRail: atRail ?? [] }
+    return {
+      balances,
+      atRail: (atRail ?? []).map((row) => ({
+        ...row,
+        available: row.available ?? null,
+        pending: row.pending ?? null,
+        available_on: row.available_on ?? null,
+      })),
+    }
   }
 
   async listSellerWallets(sellerId?: string): Promise<SellerWallet[]> {

@@ -84,6 +84,50 @@ export function OverviewPage() {
                 {b.currency} balance
                 <span className="h-px flex-1 bg-line" />
               </h2>
+
+              {/* THE HEADLINE: what the provider itself says it holds, and
+                  its own split of that into what can move now versus what is
+                  still clearing. PayHold's own buckets follow below, visibly
+                  secondary — they answer "who is this owed to", which no
+                  provider can, but no provider stood behind those numbers
+                  either, and that used to be the figure leading this screen.
+
+                  Loading and error are scoped to this query alone — a live
+                  rail call can fail on its own, and must never block or hide
+                  the ledger figures beneath it. */}
+              {atRail.isPending ? (
+                <div className="max-w-xl space-y-3">
+                  <Skeleton className="h-32" />
+                  <Skeleton className="h-40" />
+                </div>
+              ) : (
+                atRail.data && (
+                  <>
+                    <RailHeadline
+                      currency={b.currency}
+                      rows={atRail.data.atRail}
+                      ledgerExpected={
+                        b.held +
+                        b.pending_clearance +
+                        b.available +
+                        b.reserved +
+                        b.fees_retained +
+                        b.tenant_funds
+                      }
+                    />
+                    <RailSplit currency={b.currency} rows={atRail.data.atRail} />
+                  </>
+                )
+              )}
+
+              {/* PayHold's own allocation of the money above: who it is held
+                  for, who it has cleared for, and who has already been paid.
+                  Not a second opinion on the total — that is the headline's
+                  job — this is the ledger's own bookkeeping over it. */}
+              <h3 className="mt-6 mb-3 flex items-center gap-2 text-xs font-semibold tracking-[0.06em] text-fg-subtle uppercase">
+                PayHold's allocation of it
+                <span className="h-px flex-1 bg-line/60" />
+              </h3>
               <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
                 <StatTile
                   label="Held"
@@ -160,30 +204,6 @@ export function OverviewPage() {
                   own header comment for why the rail's number cannot be
                   totalled here at all. */}
               <TakeBreakdown currency={b.currency} balance={b} />
-
-              {/* What the rail itself says it holds right now, next to what
-                  the ledger above expects it to hold. Loading and error are
-                  scoped to this query alone — a live rail call can fail on
-                  its own, and must never block or hide the ledger figures
-                  above it. */}
-              {atRail.isPending ? (
-                <Skeleton className="mt-3 h-28 max-w-xl" />
-              ) : (
-                atRail.data && (
-                  <RailReality
-                    currency={b.currency}
-                    rows={atRail.data.atRail}
-                    ledgerExpected={
-                      b.held +
-                      b.pending_clearance +
-                      b.available +
-                      b.reserved +
-                      b.fees_retained +
-                      b.tenant_funds
-                    }
-                  />
-                )
-              )}
             </section>
           ))}
         </div>
@@ -303,12 +323,19 @@ function AttentionCard({
 }
 
 /**
- * What the rail itself says it holds for one currency, right now — summed
- * from `atRail` — next to `ledgerExpected`, which is exactly the six buckets
- * `reconcile` expects a provider to be holding for this currency: `held`,
- * `pending_clearance`, `available`, `reserved`, `fees_retained` and
- * `tenant_funds`. `paid_out` is excluded because that money has already left
- * this rail.
+ * THE HEADLINE FIGURE for one currency: what the rail itself says it holds,
+ * right now — summed from `atRail` — attributed to whichever rail(s)
+ * answered, with the time that figure was true. `ledgerExpected` is shown
+ * beside it only as a difference, never as a second opinion on the total:
+ * it is exactly the six buckets `reconcile` expects a provider to be holding
+ * for this currency — `held`, `pending_clearance`, `available`, `reserved`,
+ * `fees_retained` and `tenant_funds`. `paid_out` is excluded because that
+ * money has already left this rail.
+ *
+ * This card used to sit below PayHold's own ledger buckets as a secondary
+ * "reality check". It leads the screen now: PayHold's buckets say who the
+ * money is owed to, which no provider can answer, but no provider ever
+ * stood behind those numbers either, and this is the one that has.
  *
  * **This never adjusts either figure.** A difference is rendered as a fact —
  * `diff` — and nothing here decides which side is right; that is what
@@ -322,7 +349,7 @@ function AttentionCard({
  * against a figure nobody could ask the rail for is not the ledger's to
  * explain.
  */
-function RailReality({
+function RailHeadline({
   currency,
   rows,
   ledgerExpected,
@@ -357,11 +384,11 @@ function RailReality({
         : 'released'
 
   return (
-    <Card className="mt-3 max-w-xl p-5">
+    <Card className="max-w-xl p-5">
       <div className="flex flex-wrap items-center gap-2">
         <Dot tone={tone} />
         <span className="text-xs font-semibold tracking-[0.06em] text-fg-muted uppercase">
-          At the rail
+          What the rail reports
         </span>
         {sandbox && (
           <Badge
@@ -402,10 +429,13 @@ function RailReality({
       </div>
 
       <div className="mt-2.5 space-y-1.5 text-xs leading-relaxed text-fg-muted">
-        {latestAsOf && (
+        {!allUnreachable && (
           <div>
-            as of {formatDateTime(latestAsOf)}
-            {stale ? ' — last known, not a live call' : ''}
+            {reachable.length === 1
+              ? `Reported by ${PROVIDER_LABEL[reachable[0]!.provider] ?? reachable[0]!.provider}`
+              : `Reported by ${reachable.length} rails`}
+            {latestAsOf ? ` — as of ${formatDateTime(latestAsOf)}` : ''}
+            {stale ? ' (last known, not a live call)' : ''}
           </div>
         )}
 
@@ -437,15 +467,115 @@ function RailReality({
         {diff !== null && (
           <div className={diff === 0 ? '' : 'font-semibold text-danger'}>
             {diff === 0
-              ? 'Matches what the ledger expects the rail to hold.'
+              ? "Matches PayHold's own allocation below."
               : `${formatMoney(Math.abs(diff), currency)} ${
-                  diff > 0 ? 'more' : 'less'
-                } at the rail than the ledger expects — not corrected here.`}
+                  diff > 0 ? 'more here than' : 'less here than'
+                } PayHold's allocation below accounts for — not corrected here.`}
           </div>
         )}
       </div>
     </Card>
   )
+}
+
+/**
+ * The rail's own clearing, per currency: how much of what it holds (the
+ * headline figure above) it says can move right now, how much it is still
+ * holding back, and — where it says so — when the held part frees up.
+ *
+ * **This is the rail's split, not PayHold's.** `available`/`pending` here
+ * have nothing to do with `Balance.available`/`pending_clearance` below:
+ * those are PayHold's own allocation of the money by deal; these three
+ * fields are one number the provider itself reports, unrelated to which
+ * deal any of it belongs to.
+ *
+ * **A rail that backs this currency shows its own row.** More than one rail
+ * is never blended into a single split — they clear on their own schedules,
+ * and averaging a same-day mobile-money settlement with a multi-day card
+ * settlement would describe a schedule nobody is actually on.
+ *
+ * **Null renders as "not reported by <rail>", never as zero and never
+ * computed.** `pending` at zero and `pending` unreported are different
+ * facts — one says nothing is held back, the other says the rail does not
+ * expose the question at all — and `available_on` being null is not the
+ * same as "now": several rails genuinely do not expose timing.
+ */
+function RailSplit({ currency, rows }: { currency: Currency; rows: RailLiveBalance[] }) {
+  const mine = rows.filter((r) => r.currency === currency)
+  if (mine.length === 0) return null
+
+  const showLabel = mine.length > 1
+
+  return (
+    <Card className="mt-3 max-w-xl p-5">
+      <div className="flex flex-wrap items-center gap-2">
+        <Dot tone="neutral" />
+        <span className="text-xs font-semibold tracking-[0.06em] text-fg-muted uppercase">
+          What the rail can move right now
+        </span>
+      </div>
+
+      <div className="mt-3 space-y-4">
+        {mine.map((r, i) => {
+          const rail = PROVIDER_LABEL[r.provider] ?? r.provider
+          const unreachable = r.amount === null || r.error != null
+
+          return (
+            <div key={r.provider} className={i > 0 ? 'border-t border-line pt-4' : ''}>
+              {showLabel && (
+                <div className="mb-2 text-xs font-semibold tracking-[0.04em] text-fg-muted">
+                  {rail}
+                </div>
+              )}
+
+              {unreachable ? (
+                <p className="text-sm font-medium text-danger">
+                  Could not be reached{r.error ? ` (${r.error})` : ''} — no split to show.
+                </p>
+              ) : (
+                <dl className="space-y-2.5 text-sm">
+                  <TakeRow
+                    label="Available now"
+                    value={
+                      r.available === null
+                        ? notReported(rail)
+                        : formatMoney(r.available, r.currency)
+                    }
+                    hint={`What ${rail} itself says can be paid out today.`}
+                  />
+                  <TakeRow
+                    label="Still clearing"
+                    value={
+                      r.pending === null ? notReported(rail) : formatMoney(r.pending, r.currency)
+                    }
+                    hint={`What ${rail} is holding back from the figure above.`}
+                    faint={r.pending === null}
+                  />
+                  <TakeRow
+                    // "Expected", not "Frees up". No rail states a clearing
+                    // date on its balance response: this is today plus the
+                    // account's own payout delay, which Stripe reports and the
+                    // others do not. It is the rail's own number applied to the
+                    // clock, not a date the rail committed to, and the label
+                    // should not imply otherwise.
+                    label="Expected to clear"
+                    value={r.available_on ? formatDateTime(r.available_on) : notReported(rail)}
+                    hint="When the clearing amount above becomes available, exactly as the rail itself reports it — never a computed estimate."
+                    faint={!r.available_on}
+                  />
+                </dl>
+              )}
+            </div>
+          )
+        })}
+      </div>
+    </Card>
+  )
+}
+
+/** Null, rendered as the fact it is — never a zero and never a guess. */
+function notReported(rail: string): ReactNode {
+  return <span className="font-normal text-fg-subtle">not reported by {rail}</span>
 }
 
 // ---------------------------------------------------------------------------

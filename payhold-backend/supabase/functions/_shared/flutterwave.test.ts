@@ -1294,3 +1294,71 @@ Deno.test('a beneficiary name splits on the first space, and a single word fills
   assertEquals(splitBeneficiaryName('   '), null)
   assertEquals(splitBeneficiaryName(undefined), null)
 })
+
+// ---------------------------------------------------------------------------
+// balances() — the clearing split
+// ---------------------------------------------------------------------------
+
+Deno.test('balances reports available and the ledger/available gap as pending, amount unchanged', async () => {
+  const { restore } = intercept({
+    status: 'success',
+    data: [{
+      currency: 'USD',
+      ledger_balance: 100,
+      available_balance: 60,
+      reserved_balance: 5,
+    }],
+  })
+  try {
+    const p = new FlutterwaveProvider(CREDS, '', 'live')
+    const [usd] = await p.balances()
+    // `amount` is untouched — still `ledger_balance` in minor units.
+    assertEquals(usd.amount, 10_000)
+    assertEquals(usd.available, 6_000)
+    // The clearing gap: ledger minus available.
+    assertEquals(usd.pending, 4_000)
+    assertEquals(usd.reserved, 500)
+    // Flutterwave's `/balances` names no clearing date.
+    assertEquals(usd.available_on, null)
+  } finally {
+    restore()
+  }
+})
+
+Deno.test('balances reports available and reserved as null when the rail does not send them', async () => {
+  const { restore } = intercept({
+    status: 'success',
+    data: [{ currency: 'RWF', ledger_balance: 1000 }],
+  })
+  try {
+    const p = new FlutterwaveProvider(CREDS, '', 'live')
+    const [rwf] = await p.balances()
+    assertEquals(rwf.amount, 1000)
+    // Never zero, never derived from the ledger figure — the rail simply did
+    // not send an `available_balance` for this currency.
+    assertEquals(rwf.available, null)
+    // With no `available_balance` to diff against, there is nothing to call
+    // "pending" either.
+    assertEquals(rwf.pending, null)
+    assertEquals(rwf.reserved, null)
+    assertEquals(rwf.available_on, null)
+  } finally {
+    restore()
+  }
+})
+
+Deno.test('balances never reports a negative pending figure', async () => {
+  // available_balance ahead of ledger_balance should not happen, but a
+  // reporting quirk must not turn "clearing" into a negative number.
+  const { restore } = intercept({
+    status: 'success',
+    data: [{ currency: 'USD', ledger_balance: 50, available_balance: 80 }],
+  })
+  try {
+    const p = new FlutterwaveProvider(CREDS, '', 'live')
+    const [usd] = await p.balances()
+    assertEquals(usd.pending, 0)
+  } finally {
+    restore()
+  }
+})

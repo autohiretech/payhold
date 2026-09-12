@@ -788,9 +788,22 @@ export class PayPalProvider implements PaymentProvider {
    * look like a zero balance — `call` throws, the pass records a `skipped`
    * rail, and a skipped rail is explicitly not a clean one.
    */
-  async balances(): Promise<{ currency: Currency; amount: Money }[]> {
+  async balances(): Promise<
+    {
+      currency: Currency
+      amount: Money
+      available: Money | null
+      pending: Money | null
+      available_on: string | null
+    }[]
+  > {
     const res = await this.call<{
-      balances?: { currency: Currency; total_balance?: AmountShape }[]
+      balances?: {
+        currency: Currency
+        total_balance?: AmountShape
+        available_balance?: AmountShape
+        withheld_balance?: AmountShape
+      }[]
     }>('/v1/reporting/balances')
 
     return (res.balances ?? [])
@@ -798,6 +811,15 @@ export class PayPalProvider implements PaymentProvider {
       .map((b) => ({
         currency: b.currency,
         amount: fromValue(b.total_balance!.value, b.currency),
+        // `available_balance` — what PayPal says can move right now.
+        available: b.available_balance ? fromValue(b.available_balance.value, b.currency) : null,
+        // `withheld_balance` — PayPal's own reserve/hold. This response is
+        // where "pending" comes from on this rail: money still with PayPal,
+        // counted in `total_balance`, not yet spendable.
+        pending: b.withheld_balance ? fromValue(b.withheld_balance.value, b.currency) : null,
+        // This response carries no date a withheld balance is released on —
+        // nothing to read, so never a guess.
+        available_on: null,
       }))
   }
 

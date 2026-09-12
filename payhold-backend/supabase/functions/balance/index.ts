@@ -117,6 +117,17 @@ interface AtRailBalance {
    * a mode.
    */
   mode: 'test' | 'live' | null
+  /**
+   * The provider's own clearing split on `amount`, straight off
+   * `PaymentProvider.balances()` — see that interface for what each field
+   * means and why every one of them is independently nullable rather than
+   * derived here. All three are `null` on the stored-reading fallback path:
+   * `last_rail_readings` only ever kept `amount`, so there is nothing to
+   * degrade to for a live call that failed.
+   */
+  available: Money | null
+  pending: Money | null
+  available_on: string | null
 }
 
 /**
@@ -206,6 +217,12 @@ async function atRailForRail(
       stale: false,
       error: null,
       mode,
+      // `?? null` rather than a bare pass-through: an adapter that has not
+      // been taught one of these (or omits the field entirely) must still
+      // answer `null` here, never `undefined` sailing into the JSON response.
+      available: b.available ?? null,
+      pending: b.pending ?? null,
+      available_on: b.available_on ?? null,
     }))
   } catch (err) {
     // A rail this tenant has never connected — or disconnected between the
@@ -230,6 +247,13 @@ async function atRailForRail(
         // The rail could not be reached, so nothing answered and there is no
         // account to attribute the stored figure to.
         mode: null,
+        // `last_rail_readings` only ever stored `amount` — the reconciliation
+        // pass that writes it compares that figure alone. There is no split
+        // to fall back to, so this path is null across the board rather than
+        // reusing whatever the last live call happened to see.
+        available: null,
+        pending: null,
+        available_on: null,
       }
     })
   }

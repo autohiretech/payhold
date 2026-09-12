@@ -997,3 +997,102 @@ Deno.test('Connect status defaults both flags false rather than guessing', async
     restore()
   }
 })
+
+// ---------------------------------------------------------------------------
+// balances() — the clearing split
+// ---------------------------------------------------------------------------
+
+Deno.test('balances reports available and pending per currency, unsummed, alongside the unchanged total', async () => {
+  const original = globalThis.fetch
+  globalThis.fetch = ((url: string | URL | Request) => {
+    const u = String(url)
+    if (u.includes('/balance')) {
+      return Promise.resolve(new Response(JSON.stringify({
+        available: [{ amount: 700, currency: 'usd' }],
+        pending: [{ amount: 300, currency: 'usd' }],
+      }), { status: 200, headers: { 'content-type': 'application/json' } }))
+    }
+    if (u.includes('/account')) {
+      return Promise.resolve(new Response(JSON.stringify({
+        settings: { payouts: { schedule: { delay_days: 2 } } },
+      }), { status: 200, headers: { 'content-type': 'application/json' } }))
+    }
+    return Promise.resolve(new Response('{}', { status: 404 }))
+  }) as typeof fetch
+
+  try {
+    const [usd] = await new StripeProvider(CREDS, '').balances()
+    // `amount` is untouched — the sum reconciliation still compares.
+    assertEquals(usd.amount, 1000)
+    assertEquals(usd.available, 700)
+    assertEquals(usd.pending, 300)
+    // `delay_days: 2` from `/account` is a real API value, so `available_on`
+    // is populated — roughly two days out, not exact-to-the-millisecond.
+    assert(usd.available_on !== null)
+    const days = (new Date(usd.available_on!).getTime() - Date.now()) / (24 * 60 * 60 * 1000)
+    assert(days > 1.9 && days < 2.1)
+  } finally {
+    globalThis.fetch = original
+  }
+})
+
+Deno.test('balances reports available_on as null when the account has no payout schedule delay to read', async () => {
+  const original = globalThis.fetch
+  globalThis.fetch = ((url: string | URL | Request) => {
+    const u = String(url)
+    if (u.includes('/balance')) {
+      return Promise.resolve(new Response(JSON.stringify({
+        available: [{ amount: 500, currency: 'usd' }],
+      }), { status: 200, headers: { 'content-type': 'application/json' } }))
+    }
+    // A manual schedule, or a key without account-read permission — either
+    // way, nothing usable in `settings.payouts.schedule`.
+    if (u.includes('/account')) {
+      return Promise.resolve(new Response(JSON.stringify({ settings: {} }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }))
+    }
+    return Promise.resolve(new Response('{}', { status: 404 }))
+  }) as typeof fetch
+
+  try {
+    const [usd] = await new StripeProvider(CREDS, '').balances()
+    assertEquals(usd.available, 500)
+    // Never in either array — the `pending` bucket is absent from the
+    // response entirely, so this is null rather than a zero this adapter
+    // invented.
+    assertEquals(usd.pending, null)
+    // No guessed schedule — `/account` gave nothing usable.
+    assertEquals(usd.available_on, null)
+  } finally {
+    globalThis.fetch = original
+  }
+})
+
+Deno.test('balances survives an unreadable /account rather than failing the whole call', async () => {
+  const original = globalThis.fetch
+  globalThis.fetch = ((url: string | URL | Request) => {
+    const u = String(url)
+    if (u.includes('/balance')) {
+      return Promise.resolve(new Response(JSON.stringify({
+        available: [{ amount: 100, currency: 'usd' }],
+      }), { status: 200, headers: { 'content-type': 'application/json' } }))
+    }
+    if (u.includes('/account')) {
+      return Promise.resolve(new Response(JSON.stringify({ error: { message: 'nope' } }), {
+        status: 403,
+        headers: { 'content-type': 'application/json' },
+      }))
+    }
+    return Promise.resolve(new Response('{}', { status: 404 }))
+  }) as typeof fetch
+
+  try {
+    const [usd] = await new StripeProvider(CREDS, '').balances()
+    assertEquals(usd.available, 100)
+    assertEquals(usd.available_on, null)
+  } finally {
+    globalThis.fetch = original
+  }
+})

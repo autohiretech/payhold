@@ -945,7 +945,15 @@ export class StripeProvider implements PaymentProvider {
     }
   }
 
-  async balances(): Promise<{ currency: Currency; amount: Money }[]> {
+  async balances(): Promise<
+    {
+      currency: Currency
+      amount: Money
+      available: Money | null
+      pending: Money | null
+      available_on: string | null
+    }[]
+  > {
     const balance = await this.call<{
       available?: { amount: number; currency: string }[]
       pending?: { amount: number; currency: string }[]
@@ -957,12 +965,67 @@ export class StripeProvider implements PaymentProvider {
     // holding, and the reconciliation cron compares against everything the
     // ledger expects to be held. Reading `available` alone reported a fully
     // funded account as empty and froze its payouts on the first pass.
+    // `amount` below is exactly that sum, unchanged.
+    const availableByCurrency = new Map<string, number>()
+    const pendingByCurrency = new Map<string, number>()
     const byCurrency = new Map<string, number>()
-    for (const b of [...(balance.available ?? []), ...(balance.pending ?? [])]) {
+    // `available[]` — the dashboard's "can move right now" figure, read per
+    // currency rather than summed into `amount`.
+    for (const b of balance.available ?? []) {
       const key = b.currency.toUpperCase()
+      availableByCurrency.set(key, (availableByCurrency.get(key) ?? 0) + b.amount)
       byCurrency.set(key, (byCurrency.get(key) ?? 0) + b.amount)
     }
-    return [...byCurrency].map(([currency, amount]) => ({ currency, amount }))
+    // `pending[]` — the dashboard's "still held back" figure. Same array
+    // `amount` already folds in above; read again here for its own sake.
+    for (const b of balance.pending ?? []) {
+      const key = b.currency.toUpperCase()
+      pendingByCurrency.set(key, (pendingByCurrency.get(key) ?? 0) + b.amount)
+      byCurrency.set(key, (byCurrency.get(key) ?? 0) + b.amount)
+    }
+
+    // The account's own payout schedule, read once and applied to every
+    // currency below — Stripe's `/balance` carries no per-currency release
+    // date of its own, only this account-level setting.
+    const availableOn = await this.payoutDelayAvailableOn()
+
+    return [...byCurrency].map(([currency, amount]) => ({
+      currency,
+      amount,
+      // `undefined` (array absent) means "nothing to read here", distinct
+      // from a currency simply missing from an array that *was* returned,
+      // which is a real zero for that bucket.
+      available: balance.available !== undefined ? (availableByCurrency.get(currency) ?? 0) : null,
+      pending: balance.pending !== undefined ? (pendingByCurrency.get(currency) ?? 0) : null,
+      available_on: availableOn,
+    }))
+  }
+
+  /**
+   * When the account's currently-pending funds are expected to clear, from
+   * `GET /v1/account`'s own `settings.payouts.schedule.delay_days` — this
+   * tenant's own account, reached with the same secret key `/balance` used,
+   * since there is no per-currency "next payout" date on the balance
+   * response itself to read instead.
+   *
+   * `null` whenever `delay_days` is not a real number Stripe reported: a
+   * manual payout schedule, a key without permission to read account
+   * settings, or the call failing outright all land here rather than at a
+   * default like "usually two days" — this must be a fact from the API or
+   * nothing, never a computed stand-in.
+   */
+  private async payoutDelayAvailableOn(): Promise<string | null> {
+    try {
+      const account = await this.call<{
+        settings?: { payouts?: { schedule?: { delay_days?: number } } }
+      }>('/account')
+      const delayDays = account.settings?.payouts?.schedule?.delay_days
+      if (typeof delayDays !== 'number' || !Number.isFinite(delayDays)) return null
+      return new Date(Date.now() + delayDays * 24 * 60 * 60 * 1000).toISOString()
+    } catch {
+      // A failed lookup must not fail `balances()` itself — see the call site.
+      return null
+    }
   }
 
   // -------------------------------------------------------------------------

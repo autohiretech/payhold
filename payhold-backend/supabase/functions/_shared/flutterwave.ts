@@ -1405,7 +1405,25 @@ export class FlutterwaveProvider implements PaymentProvider {
     return data.map((b) => ({ code: b.code, name: b.name }))
   }
 
-  async balances(): Promise<{ currency: Currency; amount: Money }[]> {
+  async balances(): Promise<
+    {
+      currency: Currency
+      amount: Money
+      available: Money | null
+      pending: Money | null
+      available_on: string | null
+      /**
+       * Flutterwave's `reserved_balance` — a third figure this rail reports
+       * alongside `ledger_balance`/`available_balance`, and neither the
+       * "can move now" nor the "still clearing" bucket: it is money the
+       * wallet is carrying that is not the settlement lag `pending`
+       * describes. Not part of `PaymentProvider.balances()`'s named shape,
+       * so `GET /balance?live=1` does not surface it — see this file's
+       * `balances()` for why it is kept here rather than folded into either.
+       */
+      reserved: Money | null
+    }[]
+  > {
     const data = await this.call<
       {
         currency: string
@@ -1421,8 +1439,21 @@ export class FlutterwaveProvider implements PaymentProvider {
       // them into `available_balance`, and the reconciliation cron compares
       // against everything the ledger expects the provider to be holding.
       // Reading `available_balance` alone reported a funded wallet as empty and
-      // froze its payouts on the first pass.
+      // froze its payouts on the first pass. Unchanged by the split below.
       amount: toMinor(b.ledger_balance ?? b.available_balance ?? 0, b.currency),
+      // `available_balance` — what Flutterwave says can be withdrawn right now.
+      available: b.available_balance != null ? toMinor(b.available_balance, b.currency) : null,
+      // The difference against `ledger_balance` — everything still clearing
+      // that has not yet moved into `available_balance`. Only computable when
+      // both figures are present; never `ledger_balance` alone re-labelled.
+      pending: (b.ledger_balance != null && b.available_balance != null)
+        ? toMinor(Math.max(0, b.ledger_balance - b.available_balance), b.currency)
+        : null,
+      // Flutterwave's `/balances` names no date this clears by, and no other
+      // documented endpoint gives one per wallet — never guessed.
+      available_on: null,
+      // `reserved_balance` — see the field's own comment above.
+      reserved: b.reserved_balance != null ? toMinor(b.reserved_balance, b.currency) : null,
     }))
   }
 

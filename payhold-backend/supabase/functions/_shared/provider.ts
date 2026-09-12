@@ -739,10 +739,44 @@ export interface PaymentProvider {
 
   /**
    * What the provider says it is holding for us, per currency. The
-   * reconciliation cron compares this to `rail_balances()`, and a mismatch
-   * freezes that tenant's payouts.
+   * reconciliation cron compares `amount` to `rail_balances()`, and a
+   * mismatch freezes that tenant's payouts — so `amount` must keep meaning
+   * exactly what it always has: everything still with the provider, not only
+   * the spendable slice. `stripe.ts`'s and `flutterwave.ts`'s own comments on
+   * why they sum rather than report only "available" are the reason this
+   * field is never touched by the split below.
+   *
+   * `available`, `pending` and `available_on` are the dashboard's own
+   * clearing-split view of the same rail — how much of `amount` can move
+   * right now, how much is still held back, and when the held-back part is
+   * expected to clear. All three are optional and independently nullable:
+   * `null` means the rail's own response carried nothing to read for that
+   * currency, never a computed stand-in and never zero standing in for
+   * "unknown". A rail that has not been taught to look at all simply omits
+   * the field, so every existing caller — `reconciliation.ts` included —
+   * keeps compiling and keeps reading only `amount`.
    */
-  balances(): Promise<{ currency: Currency; amount: Money }[]>
+  balances(): Promise<
+    {
+      currency: Currency
+      amount: Money
+      /** What the rail says can move right now. `null` when it does not say. */
+      available?: Money | null
+      /**
+       * What the rail is still holding back from `available` — not
+       * `amount - available` computed here, but read from wherever the rail's
+       * own response actually distinguishes the two. `null` when it does not.
+       */
+      pending?: Money | null
+      /**
+       * When the `pending` slice is expected to become `available`, as an
+       * ISO timestamp the rail's own API reported — never a guess derived
+       * from a generic schedule. `null` when the rail gives no such date, or
+       * when there is nothing pending to clear.
+       */
+      available_on?: string | null
+    }[]
+  >
 
   /**
    * Verify an inbound webhook's signature. Flutterwave sends `verif-hash`,

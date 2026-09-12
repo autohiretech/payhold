@@ -868,3 +868,54 @@ Deno.test('a rejected token exchange never quotes their body back', async () => 
     globalThis.fetch = original
   }
 })
+
+// ---------------------------------------------------------------------------
+// balances() — the clearing split
+// ---------------------------------------------------------------------------
+
+Deno.test('balances reads available and withheld off the reporting response, amount unchanged', async () => {
+  const { restore } = intercept([{
+    balances: [{
+      currency: 'USD',
+      total_balance: { currency_code: 'USD', value: '150.00' },
+      available_balance: { currency_code: 'USD', value: '100.00' },
+      withheld_balance: { currency_code: 'USD', value: '50.00' },
+    }],
+  }])
+
+  try {
+    const pp = new PayPalProvider(CREDS, 'https://pay.example')
+    const [usd] = await pp.balances()
+    // `amount` is still `total_balance`, untouched by the split below.
+    assertEquals(usd.amount, 15_000)
+    assertEquals(usd.available, 10_000)
+    assertEquals(usd.pending, 5_000)
+    // The reporting-balances response carries no release date for a withheld
+    // balance — never a guess.
+    assertEquals(usd.available_on, null)
+  } finally {
+    restore()
+  }
+})
+
+Deno.test('balances reports available and pending as null when PayPal omits them', async () => {
+  const { restore } = intercept([{
+    balances: [{
+      currency: 'EUR',
+      total_balance: { currency_code: 'EUR', value: '20.00' },
+    }],
+  }])
+
+  try {
+    const pp = new PayPalProvider(CREDS, 'https://pay.example')
+    const [eur] = await pp.balances()
+    assertEquals(eur.amount, 2_000)
+    // Never zero, never derived from `total_balance` — PayPal simply did not
+    // send these fields for this currency.
+    assertEquals(eur.available, null)
+    assertEquals(eur.pending, null)
+    assertEquals(eur.available_on, null)
+  } finally {
+    restore()
+  }
+})

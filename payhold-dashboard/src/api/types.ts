@@ -1162,6 +1162,26 @@ export interface RailLiveBalance {
   provider: Provider
   currency: Currency
   amount: Money | null
+  /**
+   * What the rail itself says is free to move out right now — its own
+   * split of `amount`, not PayHold's. Minor units, or **null** when this
+   * rail does not report the split at all. Several rails genuinely do not
+   * expose this, and a screen must render that null as "not reported",
+   * never as zero and never computed from `amount - pending`.
+   */
+  available: Money | null
+  /**
+   * What the rail says it is still holding back from `available` — its own
+   * clearing, unrelated to PayHold's `pending_clearance` bucket. Same null
+   * rule as `available`.
+   */
+  pending: Money | null
+  /**
+   * When the rail says `pending` becomes `available`. Null means the rail
+   * does not expose timing — common, and not the same fact as `pending`
+   * being zero.
+   */
+  available_on: Timestamp | null
   as_of: Timestamp
   stale: boolean
   error: string | null
