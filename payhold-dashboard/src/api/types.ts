@@ -1144,6 +1144,29 @@ export interface RailBalance extends Balance {
   provider: Provider
 }
 
+/**
+ * What the rail itself says it is holding right now, for one provider and
+ * currency — `GET /v1/balance?live=1`'s `atRail`, alongside the derived
+ * `Balance[]` the same call still returns.
+ *
+ * This is not a `Balance`: it is one observed figure, not seven derived
+ * buckets, and it may simply fail to answer. **`amount` is null exactly when
+ * the rail could not be reached** — never a stand-in zero, because a rail
+ * holding nothing and a rail nobody could ask are different facts and a
+ * screen that rendered both as `0` would erase the difference this exists to
+ * surface. `error` carries why, for the same case. `stale: true` means this
+ * is the last stored reconciliation figure rather than a call just made, and
+ * `as_of` is when that figure — live or stale — was actually true.
+ */
+export interface RailLiveBalance {
+  provider: Provider
+  currency: Currency
+  amount: Money | null
+  as_of: Timestamp
+  stale: boolean
+  error: string | null
+}
+
 // ---------------------------------------------------------------------------
 // Disputes
 // ---------------------------------------------------------------------------

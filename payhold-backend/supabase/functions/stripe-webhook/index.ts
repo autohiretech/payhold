@@ -32,9 +32,9 @@
 
 import type { SupabaseClient } from 'npm:@supabase/supabase-js@2'
 import { serviceClient } from '../_shared/auth.ts'
-import { convert } from '../_shared/fx.ts'
 import { handler, json } from '../_shared/http.ts'
 import { loadProvider, type LoadedProvider } from '../_shared/load-provider.ts'
+import { lockedFxRate } from '../_shared/locked-fx-rate.ts'
 import { normaliseIp, recordContext } from '../_shared/request-context.ts'
 import { persistSavedPaymentMethod } from '../_shared/settle.ts'
 import { loadSettings } from '../_shared/settings.ts'
@@ -267,7 +267,7 @@ Deno.serve(handler(async (req) => {
 
   const { data: deal } = await db
     .from('deals')
-    .select('id, currency, presentment_currency, tenant_id')
+    .select('id, amount, currency, presentment_currency, tenant_id')
     .eq('id', dealId)
     .eq('tenant_id', tenantId)
     .maybeSingle()
@@ -282,11 +282,9 @@ Deno.serve(handler(async (req) => {
   const settings = await loadSettings(db, tenantId)
 
   // The rate is locked from what actually arrived against what the seller is
-  // owed, and stored on the deal. Re-deriving it later would move the number
-  // under a deal that has already been paid.
-  const lockedRate = verified.currency === deal.currency
-    ? null
-    : convert(1_000_000, deal.currency, verified.currency)?.rate ?? null
+  // owed, and stored on the deal — see `lockedFxRate`. Re-deriving it later
+  // would move the number under a deal that has already been paid.
+  const lockedRate = lockedFxRate(deal, verified)
 
   // (5) One call. The amount/currency comparison and the state write share a
   // transaction, which is the only way "mismatch → disputed, never funded_held"

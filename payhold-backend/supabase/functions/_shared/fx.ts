@@ -105,7 +105,14 @@ export interface Conversion {
  */
 const ZERO_DECIMAL = new Set(['RWF', 'UGX', 'XAF', 'XOF', 'JPY', 'BIF'])
 
-function toMajor(amount: number, currency: Currency): number {
+/**
+ * Exported so nothing else has to keep its own copy of `ZERO_DECIMAL`. A
+ * second classification of which currencies have a minor unit is wrong by a
+ * factor of a hundred the day the two disagree, and `deals.fx_rate` is
+ * computed against this scale in `locked-fx-rate.ts` and applied against it
+ * again in `atLockedRate` below — those two must never be able to drift.
+ */
+export function toMajor(amount: number, currency: Currency): number {
   return ZERO_DECIMAL.has(currency) ? amount : amount / 100
 }
 

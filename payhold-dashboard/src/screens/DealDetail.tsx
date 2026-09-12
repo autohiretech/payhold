@@ -340,6 +340,27 @@ const REFUND_STATUS_META: Record<RefundStatus, StatusMeta> = {
 // ---------------------------------------------------------------------------
 
 /**
+ * Where the locked rate on a cross-currency deal comes from.
+ *
+ * `deals.fx_rate` is stamped at funding by `lockedFxRate`
+ * (`payhold-backend/supabase/functions/_shared/settle.ts`, called from
+ * `settle.ts` itself and the Flutterwave/Stripe/PayPal webhooks): the ratio
+ * between what the provider's own re-fetched transaction says arrived and
+ * what the seller is owed — not a lookup in `lib/fx.ts`'s indicative table.
+ * That table is only ever reached as a last-resort fallback, inside
+ * `lockedFxRate` itself, for a zero or non-finite settlement amount — a data
+ * problem upstream on a deal that should not exist, not the ordinary case.
+ *
+ * Kept as a named string, not written inline, so if that derivation ever
+ * changes again the fix here is one line rather than a hunt through the
+ * Breakdown's JSX.
+ */
+const FX_RATE_SOURCE_LOCKED =
+  "Locked when the deal funded, from what the provider's own re-fetched transaction confirmed arrived — not a rate table."
+const FX_RATE_SOURCE_PENDING =
+  'Locks at funding, from the provider’s own confirmed amount against what the seller is owed — never from a rate table.'
+
+/**
  * §7's breakdown — nine figures, all in the presentment currency, all derived
  * from the ledger.
  *
@@ -364,6 +385,7 @@ function Breakdown({
   const rate = deal.fx_rate
     ? formatRate(deal.currency, deal.presentment_currency, deal.fx_rate)
     : 'locks when paid'
+  const rateHint = deal.fx_rate ? FX_RATE_SOURCE_LOCKED : FX_RATE_SOURCE_PENDING
 
   if (loading) {
     return (
@@ -394,7 +416,7 @@ function Breakdown({
                 value={formatMoney(deal.presentment_amount, deal.presentment_currency)}
                 muted
               />
-              <Row label="Rate" value={rate} muted />
+              <Row label="Rate" value={rate} muted hint={rateHint} />
             </>
           )}
           <Row
@@ -451,7 +473,7 @@ function Breakdown({
       </p>
       <dl className="mt-3 space-y-2 text-sm">
         <Row label="Buyer paid" value={money(a.buyer_paid)} />
-        {converted && <Row label="Rate" value={rate} muted />}
+        {converted && <Row label="Rate" value={rate} muted hint={rateHint} />}
 
         {deductions
           .filter(([, value]) => value !== 0)

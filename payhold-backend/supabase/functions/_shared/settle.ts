@@ -36,11 +36,17 @@
  */
 
 import type { SupabaseClient } from 'npm:@supabase/supabase-js@2'
-import { convert } from './fx.ts'
 import { loadProvider } from './load-provider.ts'
+import { lockedFxRate } from './locked-fx-rate.ts'
 import { normaliseIp, recordContext } from './request-context.ts'
 import { loadSettings } from './settings.ts'
-import { PayHoldError, type DealStatus, type PaymentMethod, type Provider } from './types.ts'
+import {
+  PayHoldError,
+  type DealStatus,
+  type Money,
+  type PaymentMethod,
+  type Provider,
+} from './types.ts'
 
 /**
  * The deal columns a settlement needs, and no others.
@@ -50,11 +56,12 @@ import { PayHoldError, type DealStatus, type PaymentMethod, type Provider } from
  * as a currency and book a hold against it.
  */
 export const SETTLE_COLUMNS =
-  'id, tenant_id, currency, presentment_currency, status, provider, provider_ref'
+  'id, tenant_id, amount, currency, presentment_currency, status, provider, provider_ref'
 
 export interface SettleableDeal {
   id: string
   tenant_id: string
+  amount: Money
   currency: string
   presentment_currency: string
   status: DealStatus
@@ -222,11 +229,9 @@ export async function settleDeal(
   const settings = await loadSettings(db, deal.tenant_id)
 
   // Locked from what actually arrived against what the seller is owed, exactly
-  // as the webhooks lock it. Re-deriving it later would move the number under a
-  // deal that has already been paid.
-  const lockedRate = verified.currency === deal.currency
-    ? null
-    : convert(1_000_000, deal.currency, verified.currency)?.rate ?? null
+  // as the webhooks lock it — see `lockedFxRate`. Re-deriving it later would
+  // move the number under a deal that has already been paid.
+  const lockedRate = lockedFxRate(deal, verified)
 
   // Said before the write rather than after it, so a deal that funds through
   // the doorbell and a deal that funds through the poll are told apart in the

@@ -66,6 +66,7 @@ import type {
   ProviderAccount,
   ProviderRequirement,
   RailBalance,
+  RailLiveBalance,
   SellerWallet,
   RailStatus,
   ReconciliationAlert,
@@ -317,6 +318,19 @@ export interface PayHoldClient {
   getBalance(): Promise<Balance[]>
   /** The same buckets split by the rail holding the money. */
   getRailBalances(): Promise<RailBalance[]>
+  /**
+   * `getBalance` plus what each rail itself says it is holding right now —
+   * `GET /v1/balance?live=1`. A separate method rather than a parameter on
+   * `getBalance`, because every other caller wants the derived ledger figure
+   * and nothing else, and a live rail call is not free: it is one screen's
+   * question, not the default shape of "what is the balance".
+   *
+   * `atRail` answers a different question than `balances` does and is never
+   * folded into it — see `RailLiveBalance`. The two are shown side by side,
+   * not reconciled here: this method reports what each side said, and it is
+   * for the caller to notice whether they agree.
+   */
+  getBalanceWithRail(): Promise<{ balances: Balance[]; atRail: RailLiveBalance[] }>
   /**
    * The same buckets split by *seller* — who PayHold is holding money for.
    *

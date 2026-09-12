@@ -484,3 +484,42 @@ describe('the new-seller reserve — §6.1', () => {
     await clearSetting('reserve_after_payouts')
   })
 })
+
+// ---------------------------------------------------------------------------
+
+describe("the rail's cut comes off the hold — regression", () => {
+  // Reported from the dashboard: one funded, unreleased deal showed
+  // HELD = the whole charge and CLEARING = minus the provider fee, i.e. a
+  // negative debt to a seller who was owed nothing yet, against a vault
+  // claiming money the rail had already taken.
+  //
+  // Deltas, not absolutes: every suite in this file shares one tenant and the
+  // buckets accumulate, so what this pins is what THIS deal contributes.
+  test('an unreleased deal shows the fee out of held, and nothing owed', async () => {
+    await clearSetting('reserve_rate')
+    const charge = 6_100_000
+    const railTook = 84_717
+    const ourFee = 500_000
+
+    const before = await buckets()
+    const deal = await fundedDeal({ amount: charge, fee: ourFee, providerFee: railTook })
+    const held = await buckets()
+
+    expect(held.held - before.held).toBe(charge - railTook)
+    expect(held.pending_clearance - before.pending_clearance).toBe(0)
+    expect(held.available - before.available).toBe(0)
+    // The whole point: the split moved, the total did not. This is the figure
+    // reconcile asks the provider to confirm, and it is what the rail is
+    // actually holding after taking its cut.
+    expect(stillWithProvider(held) - stillWithProvider(before)).toBe(charge - railTook)
+
+    // Once released, every bucket is what it always was: the seller's net is
+    // the charge less the rail, our commission and tax.
+    await release(deal, ourFee)
+    const after = await buckets()
+    expect(after.held - before.held).toBe(0)
+    expect(after.pending_clearance - before.pending_clearance).toBe(charge - railTook - ourFee)
+    expect(after.fees_retained - before.fees_retained).toBe(ourFee)
+    expect(stillWithProvider(after) - stillWithProvider(before)).toBe(charge - railTook)
+  })
+})

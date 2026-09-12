@@ -88,6 +88,7 @@ import {
   type ProviderRequirement,
   type PublicCheckout,
   type RailBalance,
+  type RailLiveBalance,
   type RailStatus,
   type ReconciliationAlert,
   type ReconciliationRun,
@@ -446,6 +447,20 @@ export class HttpClient implements PayHoldClient {
       '/balance?by=rail',
     )
     return balances
+  }
+
+  /**
+   * `balances` unchanged; `atRail` is what each rail itself reports holding
+   * right now, or why it could not answer. Defaulted to `[]` rather than left
+   * undefined only in the case the endpoint omits the key entirely — every
+   * row's own `amount`/`error` still carries whether *that* rail answered.
+   */
+  async getBalanceWithRail(): Promise<{ balances: Balance[]; atRail: RailLiveBalance[] }> {
+    const { balances, atRail } = await this.#call<{
+      balances: Balance[]
+      atRail: RailLiveBalance[]
+    }>('/balance?live=1')
+    return { balances, atRail: atRail ?? [] }
   }
 
   async listSellerWallets(sellerId?: string): Promise<SellerWallet[]> {
