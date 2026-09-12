@@ -9,6 +9,12 @@ import '@fontsource/jetbrains-mono/400.css'
 import '@fontsource/jetbrains-mono/500.css'
 import '@fontsource/jetbrains-mono/600.css'
 import './index.css'
+import { applyDensity, readDensity } from './lib/density'
+
+// Before the first render rather than inside a component: applied in an effect,
+// the whole dashboard would paint at one size and jump to the other, which is
+// worse than either size on its own.
+applyDensity(readDensity())
 
 const queryClient = new QueryClient({
   defaultOptions: {

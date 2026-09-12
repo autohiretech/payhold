@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { NavLink, Outlet } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { api } from '@/api'
@@ -5,6 +6,7 @@ import { useAuth } from '@/auth/AuthProvider'
 import { cx, LogoMark } from '@/components/ui'
 import { AssistantProvider } from '@/components/assistant'
 import { keys } from '@/lib/queries'
+import { DENSITIES, applyDensity, readDensity, writeDensity, type Density } from '@/lib/density'
 
 const NAV = [
   { to: '/', label: 'Overview', end: true, icon: IconHome },
@@ -175,13 +177,74 @@ function AccountBlock() {
         </div>
       </div>
 
+      <DensityControl />
+
       <button
         type="button"
         onClick={() => void signOut()}
-        className="mt-2.5 w-full rounded-lg px-2 py-1.5 text-left text-xs font-medium text-fg-muted transition hover:bg-surface-2 hover:text-fg"
+        className="mt-1 w-full rounded-lg px-2 py-1.5 text-left text-xs font-medium text-fg-muted transition hover:bg-surface-2 hover:text-fg"
       >
         Sign out
       </button>
+    </div>
+  )
+}
+
+/**
+ * How large this browser draws the dashboard — a two-way switch, and the only
+ * setting in this product that belongs to a machine rather than to the account.
+ *
+ * It is here rather than on the Settings screen for that reason: Settings is
+ * the tenant's, saved for everyone, and a display size saved for everyone would
+ * shrink a colleague's screen because somebody else's laptop is scaled. This
+ * writes to `localStorage` and reaches nobody else.
+ *
+ * The reason it exists at all is that Windows and macOS scale their displays
+ * and Linux commonly does not, so the same build is noticeably larger on one
+ * machine than another with nothing wrong on either. `lib/density.ts` has the
+ * argument for why the app must not detect that and adjust silently.
+ */
+function DensityControl() {
+  const [density, setDensity] = useState<Density>(readDensity)
+
+  function choose(next: Density) {
+    setDensity(next)
+    writeDensity(next)
+    applyDensity(next)
+  }
+
+  return (
+    <div className="mt-2.5">
+      <span className="px-2 text-[0.625rem] font-semibold tracking-[0.06em] text-fg-subtle uppercase">
+        Display size
+      </span>
+      <div
+        role="radiogroup"
+        aria-label="Display size, saved in this browser only"
+        className="mt-1.5 flex gap-1 rounded-lg bg-surface-2 p-1"
+      >
+        {DENSITIES.map((d) => (
+          <button
+            key={d.value}
+            type="button"
+            role="radio"
+            aria-checked={density === d.value}
+            title={d.hint}
+            onClick={() => choose(d.value)}
+            className={cx(
+              'flex-1 rounded-md px-2 py-1 text-[0.6875rem] font-semibold transition',
+              density === d.value
+                ? 'bg-surface text-fg shadow-[var(--shadow-card)]'
+                : 'text-fg-muted hover:text-fg',
+            )}
+          >
+            {d.label}
+          </button>
+        ))}
+      </div>
+      <p className="mt-1 px-2 text-[0.625rem] leading-snug text-fg-subtle">
+        This browser only. Nobody else's screen changes.
+      </p>
     </div>
   )
 }

@@ -93,11 +93,27 @@
 html {
   color-scheme: light;
   -webkit-text-size-adjust: 100%;
+  /* The root size every rem in the app is a multiple of, named here so the
+     density preference has one number to move. */
+  font-size: 16px;
+}
+
+/* `Compact` is the answer to a display the operating system has already scaled
+   up — a Windows laptop at 150% hands the page a 1280px viewport and paints
+   everything half again as large, so the same build looks bigger there than on
+   an unscaled screen. 13.6px is 85% of the root, which lands close to what
+   Ctrl+Minus twice does, and moves spacing and radii with the text because
+   Tailwind sizes both in rem. See `lib/density.ts` for why this is a choice a
+   person makes rather than something the app infers from devicePixelRatio. */
+html[data-density='compact'] {
+  font-size: 13.6px;
 }
 
 body {
   @apply bg-canvas text-fg font-sans antialiased;
-  font-size: 15px;
+  /* rem, not px, or the one element whose size matters most would be the one
+     the preference could not move. */
+  font-size: 0.9375rem;
   line-height: 1.55;
   letter-spacing: -0.006em;
   text-rendering: optimizeLegibility;
