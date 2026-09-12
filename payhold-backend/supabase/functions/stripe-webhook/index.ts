@@ -34,7 +34,7 @@ import type { SupabaseClient } from 'npm:@supabase/supabase-js@2'
 import { serviceClient } from '../_shared/auth.ts'
 import { convert } from '../_shared/fx.ts'
 import { handler, json } from '../_shared/http.ts'
-import { loadProvider } from '../_shared/load-provider.ts'
+import { loadProvider, type LoadedProvider } from '../_shared/load-provider.ts'
 import { normaliseIp, recordContext } from '../_shared/request-context.ts'
 import { persistSavedPaymentMethod } from '../_shared/settle.ts'
 import { loadSettings } from '../_shared/settings.ts'
@@ -110,6 +110,27 @@ async function recordEvent(
   return 'new'
 }
 
+/**
+ * `loadProvider`, answering `null` where it would refuse.
+ *
+ * Every refusal it can make here — no stored account, an unbuilt or disabled
+ * adapter — means the same thing to a webhook: there is no secret to check
+ * this signature against. That is the `null` case the code below already
+ * handles, and routing it anywhere else would make the response depend on a
+ * fact the caller has not authenticated well enough to learn.
+ */
+async function loadedOrNull(
+  db: SupabaseClient,
+  tenantId: string,
+): Promise<LoadedProvider | null> {
+  try {
+    return await loadProvider(db, tenantId, 'stripe')
+  } catch (err) {
+    if (err instanceof PayHoldError) return null
+    throw err
+  }
+}
+
 /** Finish the event row, whatever the outcome. */
 async function close(
   db: SupabaseClient,
@@ -161,7 +182,13 @@ Deno.serve(handler(async (req) => {
     ? (await db.from('tenants').select('id').eq('id', tenantId).maybeSingle()).data
     : null
 
-  const loaded = known ? await loadProvider(db, tenantId, 'stripe') : null
+  // A rail this tenant has not connected — or one switched off — loads as
+  // `null` rather than throwing, and the request then fails the signature check
+  // like any other unverifiable one. It must not answer differently: a distinct
+  // refusal here would tell an unauthenticated caller which tenants have
+  // connected stripe, and the launch gate's forged-webhook test wants a flat
+  // 401 from every path that cannot verify.
+  const loaded = known ? await loadedOrNull(db, tenantId) : null
 
   // (3) Signature, against this tenant's own stored secret. Awaited, unlike
   // Flutterwave's: Stripe's is a real HMAC and Web Crypto has no synchronous

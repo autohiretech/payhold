@@ -40,7 +40,7 @@ import { convert } from './fx.ts'
 import { loadProvider } from './load-provider.ts'
 import { normaliseIp, recordContext } from './request-context.ts'
 import { loadSettings } from './settings.ts'
-import type { DealStatus, PaymentMethod, Provider } from './types.ts'
+import { PayHoldError, type DealStatus, type PaymentMethod, type Provider } from './types.ts'
 
 /**
  * The deal columns a settlement needs, and no others.
@@ -88,7 +88,8 @@ export type SettleReason =
   | 'settled'
   /** Nothing has been charged yet, so there is nothing to ask about. */
   | 'not_started'
-  /** A demo rail, or a tenant whose credentials are gone. Cannot be verified. */
+  /** No rail to ask: unconnected, switched off, or a deal naming the retired
+   * demo rail. Nothing external to verify against. */
   | 'not_connected'
   /** The rail could not be reached, or has never heard of this reference. */
   | 'unreachable'
@@ -161,13 +162,23 @@ export async function settleDeal(
   }
 
   const rail = hint.rail ?? deal.provider
-  const loaded = await loadProvider(db, deal.tenant_id, rail)
 
-  if (!loaded.connected) {
-    // The same refusal the webhooks make on an unconnected tenant, and for the
-    // same reason: there is no external truth to check against, so anything we
-    // wrote would be our own invention. A demo tenant funds through the fake
-    // rail's own path, never through this one.
+  let loaded
+  try {
+    loaded = await loadProvider(db, deal.tenant_id, rail)
+  } catch (err) {
+    // No rail to ask, for whatever reason — unconnected, switched off, or the
+    // retired demo rail a deal predating its retirement still names. The
+    // refusal is the same one the webhooks make, for the same reason: there is
+    // no external truth to check against, so anything we wrote would be our
+    // own invention.
+    //
+    // Answered rather than thrown because of who is asking. This is the
+    // buyer's own poll on the hosted page and the `settle-pending` sweep, and
+    // neither should turn "nobody can be charged here" into a 500 or an
+    // errored batch — a deal that cannot be settled is a deal that stays where
+    // it is, which is exactly what this reason says.
+    if (!(err instanceof PayHoldError)) throw err
     return { status: deal.status, funded: false, reason: 'not_connected' }
   }
 

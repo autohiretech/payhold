@@ -77,7 +77,8 @@ describe('§9 — adapters declare what they can do', () => {
     const { rows } = await h.db.query<{ provider: string }>(
       `select provider::text from provider_capabilities order by provider::text`,
     )
-    // §9's five, plus the demo rail that §12 requires work with zero keys.
+    // §9's five, plus the retired demo rail — the row stays so historical
+    // `provider = 'fake'` rows still resolve to a description of themselves.
     expect(rows.map((r) => r.provider).sort()).toEqual([
       'cash_app_pay',
       'china_wallet_partner',
@@ -88,15 +89,17 @@ describe('§9 — adapters declare what they can do', () => {
     ])
   })
 
-  test('four are built and two are declared', async () => {
+  test('three are built and three are not', async () => {
     const { rows } = await h.db.query<{ provider: string }>(
       `select provider::text from provider_capabilities
         where implemented order by provider::text`,
     )
     // `paypal` joined in `20260808000003` — `_shared/paypal.ts` exists and
     // `loadProvider` returns it, which is the whole claim `implemented` makes.
+    // `fake` left this list when the demo rail was retired: its class is gone,
+    // so claiming it is built would be the matrix lying about the code.
     expect(rows.map((r) => r.provider)).toEqual([
-      'fake', 'flutterwave', 'paypal', 'stripe',
+      'flutterwave', 'paypal', 'stripe',
     ])
   })
 
@@ -132,7 +135,7 @@ describe('§9 — adapters declare what they can do', () => {
       `select provider::text from provider_capabilities
         where supports_mobile_money and implemented order by provider::text`,
     )
-    expect(rows.map((r) => r.provider)).toEqual(['fake', 'flutterwave'])
+    expect(rows.map((r) => r.provider)).toEqual(['flutterwave'])
   })
 })
 

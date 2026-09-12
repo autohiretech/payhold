@@ -635,10 +635,13 @@ describe('§17 — no promise that every method works everywhere', () => {
     expect(rows.map((r) => r.provider)).toEqual([
       'cash_app_pay',
       'china_wallet_partner',
+      // Retired rather than never built: the demo rail's class is gone, so the
+      // matrix stopped claiming an implementation that no longer exists.
+      'fake',
     ])
   })
 
-  test('loadProvider throws for them rather than reaching for the fake', async () => {
+  test('loadProvider throws for them, and has nothing to fall back to', async () => {
     // A deal routed to an adapter that silently collected nothing would be
     // worse than a loud failure. Note what the loader does *not* do: it never
     // names the three, it reads `implemented` off the capability row — which is
@@ -647,13 +650,13 @@ describe('§17 — no promise that every method works everywhere', () => {
 
     expect(loader.code).toContain('implemented')
 
-    // There are two routes to the demo rail and both are §12's: `rail ===
-    // 'fake'`, and a tenant who has connected nothing. What matters is that the
-    // refusal sits *between* them — an unbuilt adapter is thrown out before
-    // anything can fall back to a charge that collects nothing and says it
-    // worked.
-    expect(loader.code.indexOf('declared but not built'))
-      .toBeLessThan(loader.code.lastIndexOf('new FakeProvider('))
+    // The demo rail is gone, so there is no longer a fallback to sit after
+    // the refusal — there is nothing to fall back TO. Both routes that reached
+    // it (`rail === 'fake'`, and a tenant who has connected nothing) now end in
+    // a throw, which is the stronger form of the same guarantee: a deal can no
+    // longer be charged against an invented counterparty.
+    expect(loader.code).not.toContain('FakeProvider')
+    expect(loader.code).toContain('is not connected')
   })
 })
 

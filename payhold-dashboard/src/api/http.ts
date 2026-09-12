@@ -873,13 +873,13 @@ export class HttpClient implements PayHoldClient {
   }
 
   /**
-   * Which rails this company has connected, and which are still demo.
+   * Which rails this company has connected, and which it has not.
    *
    * Derived from the endpoint's own list of connectable rails rather than a
    * pair named here: which adapters exist is the backend's fact, and a screen
-   * with them baked in is wrong the day one is added. Demo mode is "active"
-   * precisely when no real rail is connected — it disappears the moment real
-   * keys arrive, rather than lingering as a second way money might be moving.
+   * with them baked in is wrong the day one is added. An unconnected rail is
+   * simply unconnected — there is no longer a simulated one standing in for
+   * it, so no rail on this list is a second way money might be moving.
    */
   async listRailStatus(): Promise<RailStatus[]> {
     const { accounts, available } = await this.#call<{

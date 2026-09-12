@@ -7,8 +7,8 @@
  * `account_bank: currency === 'RWF' ? 'MPS' : undefined` and a hardcoded
  * `beneficiary_name`, which meant every MoMo seller outside Rwanda — and every
  * bank seller anywhere — was registered against a beneficiary Flutterwave
- * refuses to transfer to. Nothing caught it because every test to date runs
- * against `FakeProvider`.
+ * refuses to transfer to. Nothing caught it because no test to date has made
+ * a live transfer — they run against an intercepted `fetch` or PGlite.
  *
  * ─────────────────────────────────────────────────────────────────────────────
  * THE CODES BELOW ARE TRANSCRIBED FROM FLUTTERWAVE'S DOCUMENTATION AND ARE NOT

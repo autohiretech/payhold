@@ -27,10 +27,12 @@ export type Currency = string
 export type Timestamp = string
 
 /**
- * §9's adapters. The first three are built; the last three are **declared and
- * unbuilt** (§29.3), so they can be named, refused with a reason and carry a
- * capability row — `loadProvider` throws for them rather than falling back to
- * the fake.
+ * §9's adapters. Three are built — Flutterwave, Stripe, PayPal. The rest are
+ * **declared and unbuilt** (§29.3), so they can be named, refused with a
+ * reason and carry a capability row; `loadProvider` throws for them. `fake`
+ * is the retired demo rail (§29.19): its enum value stays because deals and
+ * ledger entries from before it was retired name it, and nothing implements,
+ * offers or routes to it any more.
  *
  * Distinct from `PayoutProvider`, which names a **rail** — the shape of
  * destination a token was minted for. One adapter carries several: Venmo

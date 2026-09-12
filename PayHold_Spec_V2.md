@@ -1274,6 +1274,49 @@ restores the person path exactly as it was.
 Implemented 2026-09-11, migration `20260911000004`.
 `payhold-backend/tests/platform-owns-verification.test.ts` is the acceptance spec.
 
+## 29.19 The demo rail is retired — Part II, reversing §2's `FakeProvider`
+
+§2 lists `FakeProvider` among what is built, and §29.3 uses it as the thing the
+unbuilt adapters must *not* fall back to. It was the rail a tenant with no
+provider account ran on: a full lifecycle with every guard applied — webhooked
+in, matched on amount and currency, confirmed twice, released, cleared, paid
+out — against an invented counterparty.
+
+**It is deleted.** §29.3's own sentence is the argument, and it does not stop at
+the adapters it was written about: a rail that silently collects nothing while
+reporting success is worse than one that refuses. Demo mode was that, for the
+whole lifecycle rather than one call, and nothing in the ledger distinguished
+its entries from money. `loadProvider` now refuses a rail with no stored
+account and names what to do about it.
+
+The `fake` enum value stays. Deals, ledger entries and payouts written before
+the retirement carry it, and dropping the value would orphan rows that describe
+real history. The capability row is `implemented = false, enabled = false`, so
+nothing offers it, nothing routes to it and no class implements it.
+
+Three callers answer the refusal rather than propagate it, each for a reason of
+its own: an inbound webhook cannot check a signature without a secret, so an
+unloadable rail is the same 401 a forgery gets rather than a different answer
+that would reveal which tenants have connected what; the hosted page's own poll
+and the settlement sweep report "not connected" rather than failing; and the FX
+path keeps its own sentence, because it loads Flutterwave as the rail rates are
+quoted from rather than the rail a buyer is charged on.
+
+**§12's AI stand-in is untouched** (`_shared/ai-demo.ts`, answering when no
+`ANTHROPIC_API_KEY` is set). The distinction is what each one claims: the rail
+claimed money had moved; a stand-in suggestion claims to be a suggestion, is
+recorded as `demo-stand-in` at zero cost, and a named person still approves it
+before anything happens. Invariant 9 is what makes that safe and it is
+unchanged.
+
+A consequence worth stating plainly: a company that has connected no rail can
+still sign up, register sellers, create deals and read every screen — it cannot
+charge anybody, which is the fact demo mode was concealing. All three connected
+accounts are still `mode = 'test'`, so retiring the fake does not by itself make
+any payment live; §16's gate still stands between here and live money.
+
+Implemented 2026-09-12, migration `20260912000001_retire_demo_rail.sql`.
+
 ## References
 
 1. Fiverr Help Center — Payment methods

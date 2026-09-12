@@ -297,7 +297,12 @@ charge.
   transfers for payouts, and `request_three_d_secure: 'any'` rather than
   Stripe's `automatic` default — letting Radar decide *is* the silent downgrade
   §6 forbids.
-- `FakeProvider` — **demo mode with zero keys must work end-to-end.**
+- `FakeProvider` — **deleted (§29.19).** Demo mode let a tenant with no
+  provider account run a whole lifecycle against an invented counterparty. A
+  path that reports money moved when nothing moved is worse than one that
+  refuses, so `loadProvider` now refuses an unconnected rail by name. The
+  `fake` enum value stays because deals and ledger entries written before it
+  was retired name it; nothing implements, offers or routes to it.
 - `PayPalProvider` — **built**. Orders v2 for collection (`AUTHORIZE` for §22's
   deposits), Payouts v1 for sending, and it carries Venmo. Three shapes differ
   from Stripe and all three are in the file header: amounts are major-unit
@@ -321,8 +326,8 @@ charge.
   way PayPal was. `china_wallet_partner` names a partner nobody has
   chosen — Antom, Adyen and Airwallex are different APIs — behind §5's bar on
   promising cross-border payout until an approved local structure exists, which
-  is a legal arrangement rather than an adapter. `loadProvider` throws for it
-  rather than falling back to the fake.
+  is a legal arrangement rather than an adapter. `loadProvider` throws for it,
+  as it now does for every rail it cannot load.
 
 **`wallet` is a payment method as of `20260808000004`**, and its absence was a
 real gap rather than an oversight found late. §9 names five wallet rails and
@@ -550,12 +555,18 @@ deal_outcomes(id, tenant_id, deal_id, outcome, reason_code, notes,
 risk_signals(id, tenant_id, deal_id, seller_id, signal, value jsonb, created_at)
 ```
 
-**Demo mode with zero keys works here too**, the same rule `FakeProvider` keeps
-for the rails. With no `ANTHROPIC_API_KEY`, `askClaude` answers from
+**A stand-in answers when no model key is set, and this is the one place
+that survived §29.19's deletion of demo mode.** The rails' demo provider had to
+go because it claimed money had moved; this claims nothing of the sort — it
+advises, it is labelled a stand-in in its own text, and a named person still
+approves before anything happens. With no `ANTHROPIC_API_KEY`, `askClaude`
+answers from
 `_shared/ai-demo.ts` — a deterministic rule over the real case file, validated
 by the same validator a model's answer goes through, written with
 `model = 'demo-stand-in'` and `cost_usd = 0` so no row ever claims a model
-produced it. It advises exactly as the model does, and a person still approves.
+produced it. **It is what the linked project is running on today** — no
+`ANTHROPIC_API_KEY` is set — so every draft an operator reads there is the
+rule, not Claude. Setting the key is the whole of making it real.
 The one secret with no stand-in is `AI_JWT_SECRET`: a Postgres role cannot
 be faked, and the only fallback would be the service role. It is not named
 `SUPABASE_JWT_SECRET` — the Supabase CLI reserves that prefix for the values it

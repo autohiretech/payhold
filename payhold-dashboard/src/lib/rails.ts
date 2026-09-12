@@ -293,7 +293,7 @@ export function countryFlag(code: Country): string {
 export const PROVIDER_LABEL: Record<Provider, string> = {
   flutterwave: 'Flutterwave',
   stripe: 'Stripe',
-  fake: 'Demo mode',
+  fake: 'Retired demo rail',
   // §9's declared-and-unbuilt adapters. Named so a screen showing why a route
   // is unavailable can say which adapter, rather than printing an enum value.
   paypal: 'PayPal',
@@ -399,7 +399,7 @@ export const PROVIDER_BLURB: Record<Provider, string> = {
     'Local rails across Africa — mobile money, local-currency cards and bank transfers, and the only way to pay an African seller.',
   stripe:
     'International card acquiring. Charges a card issued anywhere in the world, but can only pay out in the countries Stripe operates in.',
-  fake: 'No provider keys configured. Payments are simulated end to end so the product works without a live account.',
+  fake: 'Retired. Payments are never simulated — an unconnected rail is refused instead. Kept only to describe historical rows.',
   // Built but not enabled, which is the distinction `implemented` and `enabled`
   // were split to draw — and the blurb has to draw it too, because the two need
   // different next actions. Saying "not built" here while a connect form sits

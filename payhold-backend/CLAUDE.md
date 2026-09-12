@@ -370,7 +370,7 @@ never tries to run a `Deno.test` file.
 | `DASHBOARD_ORIGIN` | comma-separated origins allowed to call the API from a browser |
 | `PUBLIC_URL` | where buyers are sent to pay |
 | `CRON_SECRET` | sent by pg_cron as `x-cron-secret`. The scheduled jobs are not tenant-scoped, so no API key may trigger them. Unset means they refuse every caller. |
-| `ANTHROPIC_API_KEY` | the Intelligence layer's model key. **Unset is demo mode, not off** — `askClaude` answers from `_shared/ai-demo.ts`'s stand-in, so §12 works end to end with zero keys. |
+| `ANTHROPIC_API_KEY` | the Intelligence layer's model key. **Unset is a stand-in, not off** — `askClaude` answers from `_shared/ai-demo.ts`, so §12 works end to end with zero keys. It is **unset on the linked project**, so every draft an operator reads there today is the rule rather than Claude. |
 | `AI_JWT_SECRET` | the project's own JWT secret (from the dashboard), used to mint the short-lived `payhold_ai` token in `_shared/ai-db.ts`. **The one secret §12 cannot do without**, and for the reason it has no fallback: falling back would mean running the AI layer with the service role. **Not named `SUPABASE_JWT_SECRET`** — the CLI refuses to set any secret with that prefix, since it is reserved for the values Supabase auto-injects (`SUPABASE_URL`, `SUPABASE_ANON_KEY`, …). |
 | `FLUTTERWAVE_PROXY_URL` | optional. Routes `FlutterwaveProvider`'s calls through an outbound proxy with a fixed IP, e.g. `http://user:pass@us-east-static-01.quotaguard.com:9293`. **Unset is today's behavior** — a direct call, from whatever IP Supabase's Edge Runtime happens to use for that invocation. See below. |
 
@@ -606,8 +606,11 @@ not have helped.
 
 ### Demo mode is a stand-in model, not a switched-off layer
 
-`_shared/ai-demo.ts` is `FakeProvider`'s counterpart for §12, and the product
-rule is the same one: **demo mode with zero keys must work end to end.** With no
+`_shared/ai-demo.ts` was `FakeProvider`'s counterpart for §12 and is now the
+last of it: **§29.19 deleted the demo rail and deliberately left this.** The
+rail had to go because it reported money moved when nothing had; a stand-in
+suggestion reports nothing of the kind — it advises, says so in its own text,
+and a named person still approves. With no
 `ANTHROPIC_API_KEY`, `askClaude` returns a deterministic answer built from the
 real case file the endpoint already assembled, rather than refusing.
 
@@ -734,12 +737,27 @@ Flutterwave's is a shared secret compared verbatim and answers synchronously;
 Stripe's is an HMAC, and Web Crypto has no synchronous digest. That shape costs
 a synchronous rail nothing and is the only one a real signature scheme fits.
 
-`FakeProvider` is not a test double bolted on for convenience: §12 requires a
-full lifecycle with zero keys, so it is the rail a fresh tenant runs on until
-they bring their own. It fakes the counterparty and **nothing else** — a fake
-charge is still webhooked in, still matched on amount and currency, still
-confirmed twice before it releases. Its `verifySignature` still rejects an
-unsigned webhook, because the forged-webhook test must 401 on every rail.
+**`FakeProvider` is deleted — §29.19, migration `20260912000001`.** It was the
+rail a fresh tenant ran on until they brought their own keys, and it faked the
+counterparty and nothing else: a fake charge was still webhooked in, matched on
+amount and currency, and confirmed twice before it released. What it could not
+stop doing was reporting that money had moved. `loadProvider` now refuses a rail
+with no stored account — *"flutterwave is not connected — connect it in Rails
+before taking payments"* — the same branch §9's unbuilt adapters already took.
+
+Three places had to answer that refusal rather than propagate it, and each for
+its own reason:
+
+| Caller | Why |
+|---|---|
+| the three inbound webhooks | a rail that will not load has no secret to check a signature against, so `loadedOrNull` makes it the same 401 a forgery gets. A distinct refusal would tell an unauthenticated caller which tenants have which rail connected |
+| `settleDeal` | the buyer's own poll on the hosted page and the `settle-pending` sweep both call it. Neither should turn "nobody can be charged here" into a 500 or an errored batch, so it keeps answering `not_connected` |
+| `flutterwaveRate` | the FX path loads Flutterwave because it is the rail *rates* are quoted from, not the rail the buyer is charged on. `isRailNotConnected` is what lets it keep its own sentence, which names that |
+
+The `fake` enum value stays. Deals, ledger entries and settled payouts written
+before the retirement carry `provider = 'fake'`, and dropping the value would
+orphan rows describing real history. The capability row is `implemented = false,
+enabled = false`, so nothing offers it and nothing routes to it.
 
 ## StripeProvider, and the two things it does differently
 
@@ -938,8 +956,8 @@ steers around.
 
 Credentials go in and never come out. There is no endpoint returning them in
 any form; the only reader is `loadProvider`, which hands back a
-`PaymentProvider` interface rather than a key. A tenant with no row falls back
-to `FakeProvider`, which is how demo mode stays true.
+`PaymentProvider` interface rather than a key. A tenant with no row is refused
+there: since §29.19 there is no simulated rail to fall back to.
 
 ### Three rails connect, and PayPal proves its mode differently
 
@@ -2200,7 +2218,7 @@ The four counters, and what each is actually claiming:
 | | Means |
 |---|---|
 | `matched` / `mismatched` | currency comparisons on this rail that agreed or did not. Every mismatch opens or refreshes an alert, and `reconciliation_alerts.run_id` is the pass that first raised it |
-| `skipped` | no external figure — an unreachable API, or a demo tenant on `FakeProvider`. A skipped rail is not a clean rail, which is why `incomplete` exists as a resolution |
+| `skipped` | no external figure — an unreachable API, or a rail this tenant has never connected. A skipped rail is not a clean rail, which is why `incomplete` exists as a resolution. The two are told apart in the log, not in the count: an unconnected rail is an ordinary state and is skipped silently, while a provider that could not be reached is logged |
 | `missing` | verified inbound events in the window with no `processed_at`: what the provider told us and the ledger never posted |
 
 **`missing` is deliberately not a transaction-export diff**, which is what §13's
@@ -2294,8 +2312,8 @@ value`, and a type created inside a transaction is usable inside it.
 **Live credentials are refused while a required item is outstanding.**
 `assertLiveAllowed` is called from `functions/provider-accounts/` and nowhere
 else, and that is defensible for one reason: there is exactly one writer of
-`tenant_provider_accounts`, and a rail with no stored account falls back to
-`FakeProvider`. `tests/launch-gate.test.ts` asserts the writer stays singular —
+`tenant_provider_accounts`, and a rail with no stored account cannot charge
+anybody at all. `tests/launch-gate.test.ts` asserts the writer stays singular —
 if a second one appears, that test is what says the gate has a hole. The check
 runs **before** the credentials are validated, because refusing after we have
 sent a live secret key to the provider would have already used it.
@@ -2383,15 +2401,15 @@ violated by one row, and Postgres does not promise which it reports.
   scheme. `/confirm` is still called by the client's server on the buyer's
   behalf.
 - `FlutterwaveProvider`'s and `StripeProvider`'s live calls are unexercised
-  until real keys are connected — every test to date runs against
-  `FakeProvider`, an intercepted `fetch`, or PGlite. `stripe.test.ts` pins the
+  until real keys are connected — every test to date runs against an
+  intercepted `fetch` or PGlite. `stripe.test.ts` pins the
   request shapes and the signature check without touching the network, which is
   as far as CI should go.
 - **§9's other two adapters.** `cash_app_pay` and `china_wallet_partner` have
   enum values, capability rows and payout routes, and no classes. `loadProvider`
-  throws for them by name rather than falling back to the fake, because a deal
-  routed to an adapter that silently collected nothing would be worse than a
-  loud failure. **PayPal has a class as of `20260808000003`** and is connectable
+  throws for them by name, because a deal routed to an adapter that silently
+  collected nothing would be worse than a loud failure — which is the argument
+  §29.19 then applied to the demo rail itself. **PayPal has a class as of `20260808000003`** and is connectable
   — see below — but its capability row stays `enabled = false`, so
   `loadProvider` throws for it too, by the *second* of those two branches. That
   is the distinction `implemented`/`enabled` was split to draw.

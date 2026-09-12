@@ -2,9 +2,11 @@
  * Create a company and its first owner.
  *
  * Signing up produces an **empty** company: no deals, no sellers, no connected
- * payment rails. That is the honest starting state — a new tenant runs on the
- * demo rail until it brings its own keys, which is exactly what the backend
- * does with a tenant that has no `tenant_provider_accounts` row.
+ * payment rails. That is the honest starting state, and it is also a working
+ * one — the whole product except taking money is reachable from it. What a
+ * tenant with no `tenant_provider_accounts` row cannot do is charge anybody:
+ * the backend refuses rather than simulating, so the copy below promises
+ * setting a rail up rather than a lifecycle it could run without one.
  *
  * The password rule is checked here and enforced again server-side. This copy
  * is a courtesy so the refusal appears next to the field; it is not the check.
@@ -64,7 +66,7 @@ export function SignupPage() {
   return (
     <AuthLayout
       title="Create an account"
-      subtitle="Hold a buyer's payment until both sides confirm. You can run a whole deal on the demo rail before connecting a payment provider."
+      subtitle="Hold a buyer's payment until both sides confirm. Set up your company and connect your own Stripe or Flutterwave account — the money stays in it, and PayHold holds the deal."
       footer={
         <>
           Already have one?{' '}

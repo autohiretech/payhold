@@ -129,8 +129,8 @@ async function connect(
 
   // §16: the production release begins in test mode, and §15 phase 8 keeps live
   // keys disabled until the checklist is signed off. This is the only door live
-  // credentials can come through — a rail with no stored account falls back to
-  // `FakeProvider`, and there is no other writer of
+  // credentials can come through — a rail with no stored account cannot charge
+  // anybody at all, and there is no other writer of
   // `tenant_provider_accounts` — so one check here is the whole gate.
   //
   // Deliberately before the credential validation below: refusing after we have

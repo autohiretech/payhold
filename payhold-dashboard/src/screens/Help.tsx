@@ -196,8 +196,9 @@ export function HelpPage() {
 
   const liveKeys = apiKeys.data?.filter((k) => !k.revoked_at)
   const liveEndpoints = endpoints.data?.filter((e) => !e.disabled_at)
-  // `fake` is demo mode rather than a connected rail, and counting it would
-  // report an account as ready to take money when nothing can.
+  // `fake` is the retired demo rail. Nothing can connect it any more, but a
+  // tenant that ran on it before it was retired still has the row, and counting
+  // that would report an account as ready to take money when nothing can.
   const connectedRails = rails.data?.filter((r) => r.connected && r.provider !== 'fake')
 
   return (
@@ -247,7 +248,7 @@ export function HelpPage() {
               ? 'Checking…'
               : connectedRails.length > 0
               ? `${connectedRails.length} connected. Buyers can be charged for real.`
-              : 'None. Deals still work end to end on demo mode, and move no money.'
+              : 'None yet. A deal can be created, but nobody can be charged until one is connected.'
           }
           fix="/rails"
           fixLabel="Payment rails"

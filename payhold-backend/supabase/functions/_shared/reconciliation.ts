@@ -36,7 +36,7 @@
  */
 
 import type { SupabaseClient } from 'npm:@supabase/supabase-js@2'
-import { loadProvider } from './load-provider.ts'
+import { isRailNotConnected, loadProvider } from './load-provider.ts'
 import type { Currency, Money, Provider } from './types.ts'
 
 interface RailBalance {
@@ -132,24 +132,31 @@ async function reconcileRail(
 
     try {
       const loaded = await loadProvider(db, tenantId, provider)
-
-      if (loaded.connected) {
-        const balances = await loaded.provider.balances()
-        reported = new Map(balances.map((b) => [b.currency, b.amount]))
-      }
-      // Otherwise a demo rail: there is no external truth to compare against,
-      // and treating an empty list as "the provider holds nothing" would freeze
-      // every demo tenant on the first pass. Its currencies count as skipped,
-      // which is why a run with any of them cannot report `clean`.
+      const balances = await loaded.provider.balances()
+      reported = new Map(balances.map((b) => [b.currency, b.amount]))
     } catch (err) {
-      // A provider being unreachable is not drift. Freezing payouts because
-      // their API had a bad minute would be an outage of our own making, so
-      // these rails are skipped and the next pass tries again.
-      console.error('provider balance lookup failed', {
-        tenant_id: tenantId,
-        provider,
-        message: err instanceof Error ? err.message : String(err),
-      })
+      // Two different silences, and neither is drift.
+      //
+      // A rail this tenant never connected has no external truth to compare
+      // against, and treating an empty list as "the provider holds nothing"
+      // would freeze the tenant on the first pass. It is an ordinary state
+      // rather than a fault, so it is skipped without a line in the log — a
+      // nightly error for every rail a company chose not to use is noise that
+      // hides the ones that mean something.
+      //
+      // A provider being unreachable is the other, and freezing payouts
+      // because their API had a bad minute would be an outage of our own
+      // making. Also skipped; the next pass tries again.
+      //
+      // Either way the rail's currencies count as skipped, which is why a run
+      // with any of them cannot report `clean`.
+      if (!isRailNotConnected(err)) {
+        console.error('provider balance lookup failed', {
+          tenant_id: tenantId,
+          provider,
+          message: err instanceof Error ? err.message : String(err),
+        })
+      }
     }
 
     let skipped = 0

@@ -26,12 +26,12 @@
  * ─────────────────────────────────────────────────────────────────────────────
  * THE ONLY PLACE `PER_USD` MAY STILL PRICE ANYTHING IS DEMO MODE.
  *
- * "Demo mode with zero keys must work end to end" is a product rule this file
- * does not get to break: a tenant with no connected rail has no credentials to
- * ask a rate with, and refusing would make a fresh account unable to create its
- * first cross-border deal — the exact demonstration `FakeProvider` and
- * `ai-demo.ts` exist to protect. So a demo tenant gets the indicative table and
- * is told so in `source`.
+ * A tenant with no connected rail has no credentials to ask a rate with, and
+ * gets the indicative table, labelled as such in `source`. That is a quote, not
+ * a payment: nothing here reports money moving. The simulated rail that used to
+ * back such a tenant is gone — `loadProvider` refuses an unconnected rail — so
+ * this is the only remaining case of "no credentials", and it answers with a
+ * number that says where it came from rather than with a fiction.
  *
  * A tenant operating on real credentials gets a live rate or a refusal. There
  * is no third case, and in particular there is no quiet fall-through to the
@@ -43,7 +43,8 @@
 
 import type { SupabaseClient } from 'npm:@supabase/supabase-js@2'
 import { tableRate } from './fx.ts'
-import { connectedRails, loadProvider } from './load-provider.ts'
+import { connectedRails, isRailNotConnected, loadProvider } from './load-provider.ts'
+import { type PaymentProvider } from './provider.ts'
 import { PayHoldError, type Currency } from './types.ts'
 
 
@@ -135,7 +136,7 @@ export async function liveRate(
     return { rate: hit.rate, source: 'flutterwave' }
   }
 
-  if (await isDemoTenant(db, tenantId)) {
+  if (await hasNoConnectedRail(db, tenantId)) {
     const indicative = tableRate(from, to)
     if (indicative === null) {
       throw new PayHoldError(
@@ -162,13 +163,27 @@ export async function liveRate(
  * since it would only bite the accounts that had connected the *other* rail.
  * Such a tenant is refused below with a message that says what to do about it.
  *
- * `connectedRails` already answers exactly this and reports `fake` as active
- * precisely when nothing real is, so the demo rail disappearing is one fact
- * with one reader rather than a second derivation to keep in step.
+ * `connectedRails` already answers exactly this, so it stays one fact with one
+ * reader rather than a second derivation to keep in step.
  */
-async function isDemoTenant(db: SupabaseClient, tenantId: string): Promise<boolean> {
+async function hasNoConnectedRail(db: SupabaseClient, tenantId: string): Promise<boolean> {
   const rails = await connectedRails(db, tenantId)
-  return !rails.some((r) => r.provider !== 'fake' && r.connected)
+  return !rails.some((r) => r.connected)
+}
+
+/**
+ * No rail to quote the corridor with — the same refusal whether Flutterwave is
+ * unconnected or the adapter cannot answer rates at all. Both leave us without
+ * a number anybody quoted, which is the only fact the caller can act on.
+ */
+function noRateRail(from: Currency, to: Currency): PayHoldError {
+  return new PayHoldError(
+    'policy_violation',
+    `No live ${from}\u2192${to} rate can be quoted: this account is operating on real ` +
+      'credentials but has not connected Flutterwave, which is the rail PayHold ' +
+      'quotes rates from. Connect it, or price the deal in a currency the buyer ' +
+      'can already be charged so that no conversion is needed.',
+  )
 }
 
 /**
@@ -187,17 +202,20 @@ async function flutterwaveRate(
   from: Currency,
   to: Currency,
 ): Promise<number> {
-  const { provider, connected } = await loadProvider(db, tenantId, 'flutterwave')
-
-  if (!connected || !provider.transferRate) {
-    throw new PayHoldError(
-      'policy_violation',
-      `No live ${from}\u2192${to} rate can be quoted: this account is operating on real ` +
-        'credentials but has not connected Flutterwave, which is the rail PayHold ' +
-        'quotes rates from. Connect it, or price the deal in a currency the buyer ' +
-        'can already be charged so that no conversion is needed.',
-    )
+  let provider: PaymentProvider
+  try {
+    provider = (await loadProvider(db, tenantId, 'flutterwave')).provider
+  } catch (err) {
+    // A tenant collecting through Stripe alone reaches here, and the loader's
+    // own sentence would send them to Rails to connect a rail they do not
+    // otherwise need. Say which rail is missing and *why* it is being asked
+    // for. Anything else — unbuilt, switched off — already names its own next
+    // action and is left alone.
+    if (!isRailNotConnected(err)) throw err
+    throw noRateRail(from, to)
   }
+
+  if (!provider.transferRate) throw noRateRail(from, to)
 
   try {
     return await provider.transferRate(from, to)

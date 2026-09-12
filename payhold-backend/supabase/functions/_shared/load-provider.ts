@@ -6,16 +6,18 @@
  * needs `decryptCredentials` imported, and a credential cannot end up in a log
  * line by accident.
  *
- * A tenant with no row for a rail falls back to `FakeProvider`. That is the
- * spec's demo mode (§12): a company can run a complete deal lifecycle before
- * they have any provider account at all, and the fake fakes only the
- * counterparty — every guard still applies.
+ * A tenant with no row for a rail is refused here. There is no simulated
+ * counterparty any more: §12's demo mode existed so a company could see the
+ * product work before connecting anything, and it is gone because a payment
+ * path that answers "succeeded" without touching a provider is indisputably
+ * worse than one that says "connect a rail first" — the same reasoning §9's
+ * unbuilt adapters already followed one branch below.
  */
 
 import type { SupabaseClient } from 'npm:@supabase/supabase-js@2'
 import { decryptCredentials } from './crypto.ts'
 import { FlutterwaveProvider, type FlutterwaveCredentials } from './flutterwave.ts'
-import { FakeProvider, type PaymentProvider } from './provider.ts'
+import { type PaymentProvider } from './provider.ts'
 import { PayPalProvider, type PayPalCredentials } from './paypal.ts'
 import { StripeProvider, type StripeCredentials } from './stripe.ts'
 import { PayHoldError, type Provider } from './types.ts'
@@ -23,7 +25,9 @@ import { PayHoldError, type Provider } from './types.ts'
 export interface LoadedProvider {
   provider: PaymentProvider
   mode: 'test' | 'live'
-  /** False when this is the demo rail rather than a connected account. */
+  /** Always true now that a provider is only ever a connected account. Kept
+   * because callers and the dashboard read it to say which rail took the
+   * money. */
   connected: boolean
 }
 
@@ -51,6 +55,28 @@ export async function providerCapability(
   return data as { implemented: boolean; enabled: boolean; note: string | null } | null
 }
 
+const NOT_CONNECTED = 'is not connected — connect it in Rails before taking payments'
+
+/** The refusal for a rail this tenant has no stored account on. One spelling,
+ * because `rates.ts` recognises it (below) and a second copy could drift. */
+export function railNotConnected(rail: Provider): PayHoldError {
+  return new PayHoldError('policy_violation', `${rail} ${NOT_CONNECTED}`)
+}
+
+/**
+ * Was that refusal "no stored account", rather than an unbuilt or switched-off
+ * rail?
+ *
+ * `rates.ts` asks because the FX path has a better sentence than this one: it
+ * knows *why* Flutterwave is being loaded — it is the rail rates are quoted
+ * from, not the rail the buyer is being charged on — so it can say what to do
+ * instead of converting. An unbuilt or disabled rail keeps its own message,
+ * which already names a different next action.
+ */
+export function isRailNotConnected(err: unknown): boolean {
+  return err instanceof PayHoldError && err.message.endsWith(NOT_CONNECTED)
+}
+
 export async function loadProvider(
   db: SupabaseClient,
   tenantId: string,
@@ -73,14 +99,10 @@ export async function loadProvider(
    */
   explicitMode?: 'test' | 'live',
 ): Promise<LoadedProvider> {
-  if (rail === 'fake') {
-    return { provider: new FakeProvider(publicUrl()), mode: 'test', connected: false }
-  }
-
-  // §9's declared-but-unbuilt adapters, and any rail an operator has switched
-  // off. Both fail here and neither falls back to the fake, for the reason
-  // Stripe used to: a deal routed to an adapter that silently collected nothing
-  // while reporting success is worse than a visible failure.
+  // §9's declared-but-unbuilt adapters, the retired demo rail, and any rail an
+  // operator has switched off. All of them fail here, for the reason Stripe
+  // used to: a deal routed to an adapter that silently collected nothing while
+  // reporting success is worse than a visible failure.
   //
   // The two are separate messages because they need different next actions —
   // one is a roadmap item, the other is an outage or a commercial decision.
@@ -107,9 +129,10 @@ export async function loadProvider(
     .maybeSingle()
 
   if (!data) {
-    // No account connected. Demo mode rather than an error, so a fresh tenant
-    // is never blocked from seeing the product work end to end.
-    return { provider: new FakeProvider(publicUrl()), mode: 'test', connected: false }
+    // Nothing to charge against. This used to answer with the demo provider,
+    // which meant a tenant who had connected nothing still saw deals fund and
+    // settle — money that never moved, reported as money that had.
+    throw railNotConnected(rail)
   }
 
   const credentials = await decryptCredentials(data.encrypted_credentials)
@@ -167,9 +190,9 @@ export async function loadProvider(
 /**
  * Which rails this tenant has actually connected.
  *
- * The dashboard's Rails screen reads this instead of the hardcoded placeholder
- * it shows today. `fake` is reported as active only when nothing real is
- * connected — the demo rail disappears the moment real keys arrive.
+ * The dashboard's Rails screen reads this. Every row is a real adapter: a
+ * tenant with nothing connected gets three unconnected rails and no fourth
+ * one offering to pretend.
  */
 export async function connectedRails(
   db: SupabaseClient,
@@ -195,13 +218,6 @@ export async function connectedRails(
       rows.push({ provider: rail, mode: 'test', connected: false })
     }
   }
-
-  rows.push({
-    provider: 'fake',
-    mode: 'test',
-    // Demo mode is "active" precisely when no real rail is connected.
-    connected: !rows.some((r) => r.connected),
-  })
 
   return rows.sort((a, b) => a.provider.localeCompare(b.provider))
 }

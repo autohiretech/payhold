@@ -1186,8 +1186,8 @@ export class FlutterwaveProvider implements PaymentProvider {
    * it was sent only for RWF (`'MPS'`) and left `undefined` everywhere else —
    * so every MoMo seller outside Rwanda and every bank seller anywhere was
    * registered against a beneficiary Flutterwave will not transfer to. Nothing
-   * caught it because every test runs against `FakeProvider`; it surfaces as a
-   * payout that fails at the rail with the buyer's money already collected.
+   * caught it because no test makes a live transfer; it surfaces as a payout
+   * that fails at the rail with the buyer's money already collected.
    *
    * A destination is therefore one of exactly two shapes, and neither has a
    * default:

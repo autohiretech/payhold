@@ -439,7 +439,7 @@ export interface PayHoldClient {
   disputeTimeline(disputeId: string): Promise<DisputeTimelineEvent[]>
 
   // -- Payment provider accounts (bring-your-own-keys) ----------------------
-  /** Which rails this company has connected, and which are still demo. */
+  /** Which rails this company has connected, and which it has not. */
   listRailStatus(): Promise<RailStatus[]>
   listProviderAccounts(): Promise<ProviderAccount[]>
   /** What each rail needs before it can be connected. */

@@ -43,8 +43,8 @@ import {
  * How a rail's real connection state reads on screen.
  *
  * This is derived from `tenant_provider_accounts` via `listRailStatus()`, not
- * hardcoded: a company that has connected nothing is genuinely running on the
- * demo rail, and saying otherwise would be a lie about where their money is.
+ * hardcoded: a company that has connected nothing genuinely cannot charge
+ * anybody, and saying otherwise would be a lie about where their money is.
  */
 function providerState(status: RailStatus | undefined): StatusMeta {
   if (!status?.connected) {
@@ -67,22 +67,6 @@ function providerState(status: RailStatus | undefined): StatusMeta {
         hint: 'Connected in test mode. No real money moves.',
       }
 }
-
-/** Demo mode is only "active" while no real rail is connected. */
-function demoState(anyConnected: boolean): StatusMeta {
-  return anyConnected
-    ? {
-        label: 'Off',
-        tone: 'neutral',
-        hint: 'A real rail is connected, so demo payments are no longer used.',
-      }
-    : {
-        label: 'Active',
-        tone: 'released',
-        hint: 'Demo mode — payments are simulated end to end, with every guard still applied.',
-      }
-}
-
 
 /**
  * Three states, not two. "Documented" is the provider's own page supporting the
@@ -135,7 +119,6 @@ export function RailsPage() {
   // is deliberately absent rather than rendered as a form that cannot succeed.
   const providers: Provider[] = ['flutterwave', 'stripe', 'paypal']
   const statusFor = (p: Provider) => railStatus.data?.find((r) => r.provider === p)
-  const anyConnected = railStatus.data?.some((r) => r.connected && r.provider !== 'fake')
   const currencies = settings.data?.currencies ?? []
   // **An empty list is "no restriction", not "nothing enabled."** `deals`
   // only filters when the list is non-empty — `settings.currencies.length > 0
@@ -262,22 +245,6 @@ export function RailsPage() {
           )
         })}
       </div>
-
-      {/* --- Demo rail ---------------------------------------------------- */}
-      <Card className="mb-6 p-6">
-        <div className="flex flex-wrap items-center gap-2">
-          <h2 className="text-base font-semibold text-fg">
-            {PROVIDER_LABEL.fake}
-          </h2>
-          <Badge meta={demoState(Boolean(anyConnected))} />
-        </div>
-        <p className="mt-1.5 max-w-2xl text-sm leading-relaxed text-fg-muted">
-          {anyConnected
-            ? 'Your real rail handles payments now. Demo payments are no longer used.'
-            : 'Until you connect a provider, deals run end to end on simulated payments — ' +
-              'every confirmation, timer and payout guard still applies. Nothing here moves real money.'}
-        </p>
-      </Card>
 
       <p className="mb-6 text-sm leading-relaxed text-fg-muted">
         These are separate pots. Reconciliation compares each one against that
