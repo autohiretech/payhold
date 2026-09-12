@@ -348,22 +348,29 @@ function CurrencyCard({
         )}
       </div>
 
-      {/* 1 — what the rail holds, and the rail's own words for the parts of it */}
-      <div className="px-5 pb-4 pt-2">
-        <RailHeadline rows={rows} s={s} railStatus={railStatus} />
-        <RailParts s={s} currency={currency} />
-      </div>
+      {/* The rail's account of the money and PayHold's sit side by side on a
+          wide screen and stack on a narrow one — they are two answers to the
+          same question, and reading them level with each other is the point of
+          the card. Stacked, the second one starts below the fold on a laptop,
+          which is how "PayHold's allocation" went unread in the table. */}
+      <div className="grid lg:grid-cols-[minmax(0,1fr)_minmax(0,1.15fr)]">
+        {/* 1 — what the rail holds, in the rail's own words */}
+        <div className="px-5 pb-4 pt-2">
+          <RailHeadline rows={rows} s={s} railStatus={railStatus} />
+          <RailParts s={s} currency={currency} />
+        </div>
 
-      {/* 2 and 3 — PayHold's side, on the same card rather than behind a chevron */}
-      <div className="border-t border-line bg-surface-2/40 px-5 py-4">
-        <LedgerSide
-          balance={balance}
-          currency={currency}
-          diff={diff}
-          s={s}
-          rows={rows}
-          serviceFeeRate={serviceFeeRate}
-        />
+        {/* 2 and 3 — whether the books agree, and what the money is for */}
+        <div className="border-t border-line bg-surface-2/40 px-5 py-4 lg:border-t-0 lg:border-l">
+          <LedgerSide
+            balance={balance}
+            currency={currency}
+            diff={diff}
+            s={s}
+            rows={rows}
+            serviceFeeRate={serviceFeeRate}
+          />
+        </div>
       </div>
 
       {/* A single reachable rail's split is already on the card above, so the

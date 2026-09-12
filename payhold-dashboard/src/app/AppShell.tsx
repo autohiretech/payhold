@@ -79,7 +79,14 @@ export function AppShell() {
           </div>
         )}
 
-        <div className="mx-auto max-w-6xl px-5 py-8 sm:px-7 lg:px-10 lg:py-10">
+        {/* 1152px (`max-w-6xl`) was a reading measure, and this is not prose.
+            On a 1920-wide laptop it left roughly 600px of empty margin beside
+            tables that were meanwhile wrapping their own headers onto two
+            lines — the screen looked small because the app declined to use it.
+            The cap stays, well above any screen anyone here works on, so a
+            32-inch monitor does not stretch a balances row into a tracking
+            shot; everything below that now fills. */}
+        <div className="mx-auto max-w-[1680px] px-5 py-8 sm:px-7 lg:px-10 lg:py-10">
           <Outlet />
         </div>
       </main>
