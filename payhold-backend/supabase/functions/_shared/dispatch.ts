@@ -547,14 +547,21 @@ export async function dispatchPayout(
     // `release`. That is the exact shape the Flutterwave note above warns
     // against, and it had a live transfer in front of it.
     //
-    // So the assumption is now enforced instead of stated. A `processing`
-    // payout on a rail that cannot be polled is left alone: nothing is
-    // re-sent, no attempt is spent, and it waits for an adapter that can ask
-    // or for a person. Whatever the rail's duplicate handling does — PayPal
-    // anchors on `sender_batch_id` and refuses a repeat, which would have
-    // booked a failure against money that had gone — the answer is not to find
-    // out by trying.
-    if (payout.status === 'processing' && payout.provider_ref && !provider.transferStatus) {
+    // So the assumption is now enforced instead of stated, and the test is
+    // **the reference rather than the status**. `provider_ref` is only ever
+    // written by a rail that accepted the transfer, so its presence — not
+    // `processing` — is what says the money has been handed over. Tying the
+    // poll to `processing` was too narrow and the live payout proved it: two
+    // re-POSTs were refused as duplicates, `fail_payout` moved it to `failed`
+    // while keeping the reference, and on the next pass a `failed` row with a
+    // reference would have been sent again, and again, until the budget ran
+    // out. A rail that has it is asked; a rail that has it and cannot be asked
+    // is left alone, nothing re-sent and no attempt spent.
+    //
+    // A payout with no reference never reached a rail at all, and that is the
+    // one case still sent — which is what keeps §13's ladder meaningful for a
+    // transfer that genuinely never started.
+    if (payout.provider_ref && !provider.transferStatus) {
       console.error('payout cannot be polled on this rail', {
         payout_id: payout.id,
         rail: decision.provider,
@@ -566,7 +573,7 @@ export async function dispatchPayout(
       return 'processing'
     }
 
-    if (payout.status === 'processing' && payout.provider_ref && provider.transferStatus) {
+    if (payout.provider_ref && provider.transferStatus) {
       const settled = await provider.transferStatus(payout.provider_ref)
 
       if (settled.status === 'pending') {
