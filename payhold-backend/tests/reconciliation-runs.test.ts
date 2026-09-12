@@ -258,10 +258,13 @@ describe('missing — what the provider told us and the ledger never posted', ()
 })
 
 describe('a case is signed off by a person, not by the numbers', () => {
+  // A shortfall — the provider holding less than the ledger expects — is
+  // what freezes payouts. (A surplus opens the identical kind of case but
+  // leaves the tenant active; see tests/surplus-does-not-freeze.test.ts.)
   const drift = async (): Promise<{ tenant: string; run: string }> => {
     const tenant = await newTenant()
     const run = await startRun(tenant)
-    await record(tenant, run, 100_000, 125_000)
+    await record(tenant, run, 125_000, 100_000)
     await h.db.query(`select finish_reconciliation_run($1, 0)`, [run])
     return { tenant, run }
   }

@@ -525,16 +525,19 @@ describe('reconciliation', () => {
     expect(rows).toHaveLength(0)
   })
 
-  test('drift raises an alert and freezes that tenant payouts', async () => {
+  test('a shortfall raises an alert and freezes that tenant payouts', async () => {
+    // A shortfall — the provider holding less than the ledger expects — is
+    // the drift that freezes. A surplus opens the same kind of case without
+    // freezing: see tests/surplus-does-not-freeze.test.ts.
     const s = await seed()
-    await h.db.query(`select record_reconciliation($1, 'flutterwave', 'RWF', 100000, 125000)`,
+    await h.db.query(`select record_reconciliation($1, 'flutterwave', 'RWF', 125000, 100000)`,
                      [s.tenant])
 
     const { rows: [a] } = await h.db.query<{ drift: string; provider: string }>(
       `select drift, provider from reconciliation_alerts
        where tenant_id = $1 and resolved_at is null`, [s.tenant],
     )
-    expect(Number(a.drift)).toBe(25_000)
+    expect(Number(a.drift)).toBe(-25_000)
     expect(a.provider).toBe('flutterwave')
 
     const { rows: [t] } = await h.db.query<{ status: string }>(
@@ -576,7 +579,7 @@ describe('reconciliation', () => {
 
   test('closes the alert when the drift goes away, but does not unfreeze', async () => {
     const s = await seed()
-    await h.db.query(`select record_reconciliation($1, 'flutterwave', 'RWF', 100000, 125000)`,
+    await h.db.query(`select record_reconciliation($1, 'flutterwave', 'RWF', 125000, 100000)`,
                      [s.tenant])
     await h.db.query(`select record_reconciliation($1, 'flutterwave', 'RWF', 100000, 100000)`,
                      [s.tenant])
