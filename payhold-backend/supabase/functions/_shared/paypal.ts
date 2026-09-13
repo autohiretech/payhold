@@ -776,9 +776,18 @@ export class PayPalProvider implements PaymentProvider {
     const batch = (details.batch_header?.batch_status ?? '').toUpperCase()
     const txn = (item?.transaction_status ?? '').toUpperCase()
 
+    // PayPal's own two words, carried back untranslated. Both levels, because
+    // both decide above and a seller reading "batch SUCCESS" with no item
+    // status would think they had been paid.
+    const detail = [
+      batch && `batch ${batch}`,
+      txn && `item ${txn}`,
+    ].filter(Boolean).join(', ') || undefined
+    const confirmedWithDetail = { ...confirmed, detail }
+
     // The batch never reached the rails at all.
     if (batch === 'DENIED' || batch === 'CANCELED') {
-      return { status: 'failed', ...confirmed }
+      return { status: 'failed', ...confirmedWithDetail }
     }
 
     // Sent, and came back or was stopped. `UNCLAIMED` is deliberately absent:
@@ -789,16 +798,16 @@ export class PayPalProvider implements PaymentProvider {
       txn === 'FAILED' || txn === 'RETURNED' || txn === 'REVERSED' ||
       txn === 'BLOCKED' || txn === 'REFUNDED'
     ) {
-      return { status: 'failed', ...confirmed }
+      return { status: 'failed', ...confirmedWithDetail }
     }
 
     // Paid only when both levels agree. An item PayPal has not priced or
     // labelled yet is not a payment we can confirm.
     if (batch === 'SUCCESS' && txn === 'SUCCESS') {
-      return { status: 'paid', ...confirmed }
+      return { status: 'paid', ...confirmedWithDetail }
     }
 
-    return { status: 'pending', ...confirmed }
+    return { status: 'pending', ...confirmedWithDetail }
   }
 
   /**

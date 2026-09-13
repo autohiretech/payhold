@@ -1381,3 +1381,32 @@ Deno.test('a withdrawable subset larger than the total never yields a negative r
     restore()
   }
 })
+
+Deno.test('a transfer that is going nowhere says why, in Flutterwave’s own words', async () => {
+  // `complete_message` is where a transfer stuck at NEW says "Insufficient
+  // funds in wallet". Without it, a pending that never ends is indistinguishable
+  // from a pending that is simply young.
+  const { restore } = intercept({
+    status: 'success',
+    data: { status: 'NEW', complete_message: 'Insufficient funds in wallet' },
+  })
+  try {
+    const p = new FlutterwaveProvider(CREDS, '', 'test')
+    const result = await p.transferStatus('12345')
+
+    assertEquals(result.status, 'pending')
+    assertEquals(result.detail, 'NEW — Insufficient funds in wallet')
+  } finally {
+    restore()
+  }
+})
+
+Deno.test('a transfer with nothing to add reports its status alone', async () => {
+  const { restore } = intercept({ status: 'success', data: { status: 'NEW' } })
+  try {
+    const p = new FlutterwaveProvider(CREDS, '', 'test')
+    assertEquals((await p.transferStatus('12345')).detail, 'NEW')
+  } finally {
+    restore()
+  }
+})

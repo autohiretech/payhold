@@ -517,6 +517,14 @@ export interface Payout {
   /** Who let it through. Either kind of hold, only ever a person. */
   review_approved_by?: string | null
   review_approved_at?: Timestamp | null
+  /**
+   * Where the rail last said this transfer is, in the rail's own words —
+   * `batch PENDING, item UNCLAIMED`. Written by every `transferStatus` poll,
+   * displayed to the seller, and read by no decision anywhere.
+   */
+  rail_status?: string | null
+  /** When the rail last answered. Also the proof that something is asking. */
+  rail_status_at?: Timestamp | null
 }
 
 // ---------------------------------------------------------------------------

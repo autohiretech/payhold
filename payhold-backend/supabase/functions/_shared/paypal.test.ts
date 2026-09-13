@@ -1053,3 +1053,34 @@ Deno.test('a batch PayPal has not priced yet reports no figures rather than zero
     restore()
   }
 })
+
+Deno.test('a pending batch says where it actually is, in PayPal’s own words', async () => {
+  // The silence this closes: a live payout answered `pending` for twenty-six
+  // hours, and `pending` alone cannot tell a seller whether PayPal is holding
+  // their money or the job asking has died.
+  const { restore } = intercept([batch('PENDING', 'UNCLAIMED')])
+  try {
+    const pp = new PayPalProvider(CREDS, 'https://pay.example')
+    const got = await pp.transferStatus!('RM2Z57VLX2BJ8')
+
+    assertEquals(got.status, 'pending')
+    assertEquals(got.detail, 'batch PENDING, item UNCLAIMED')
+  } finally {
+    restore()
+  }
+})
+
+Deno.test('both levels are reported even when the item alone decides', async () => {
+  // A batch can read SUCCESS while its one item came back. Reporting only the
+  // batch would put "SUCCESS" in front of a seller whose money bounced.
+  const { restore } = intercept([batch('SUCCESS', 'RETURNED')])
+  try {
+    const pp = new PayPalProvider(CREDS, 'https://pay.example')
+    const got = await pp.transferStatus!('RM2Z57VLX2BJ8')
+
+    assertEquals(got.status, 'failed')
+    assertEquals(got.detail, 'batch SUCCESS, item RETURNED')
+  } finally {
+    restore()
+  }
+})

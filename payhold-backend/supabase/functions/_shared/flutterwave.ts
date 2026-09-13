@@ -1330,9 +1330,17 @@ export class FlutterwaveProvider implements PaymentProvider {
       }
       : { amount: undefined, currency: undefined, fee: null }
 
-    if (status === 'SUCCESSFUL') return { status: 'paid', ...confirmed }
-    if (status === 'FAILED') return { status: 'failed', ...confirmed }
-    return { status: 'pending', ...confirmed }
+    // Flutterwave's own word, and its sentence where it wrote one —
+    // `complete_message` is where a transfer that is going nowhere says why
+    // ("Insufficient funds in wallet"), which is exactly what a `pending`
+    // that never ends needs to be able to say out loud.
+    const detail = [status || undefined, data.complete_message?.trim() || undefined]
+      .filter(Boolean).join(' — ') || undefined
+    const withDetail = { ...confirmed, detail }
+
+    if (status === 'SUCCESSFUL') return { status: 'paid', ...withDetail }
+    if (status === 'FAILED') return { status: 'failed', ...withDetail }
+    return { status: 'pending', ...withDetail }
   }
 
   /**

@@ -593,6 +593,30 @@ export async function dispatchPayout(
     if (providerRef && provider.transferStatus) {
       const settled = await provider.transferStatus(providerRef)
 
+      // Written down before anything is decided, and on every pass — the
+      // passes where nothing happens are the ones that need explaining. A
+      // payout that answers `pending` for a day otherwise leaves no trace at
+      // all: no status change, no audit row, no column touched, and a seller
+      // looking at "not moving yet" with no way to tell a rail holding their
+      // money from a cron that had stopped running.
+      //
+      // Never allowed to affect the outcome. Recording where the money is must
+      // not be able to fail a transfer, so a write that does not land is
+      // logged and stepped over.
+      if (settled.detail) {
+        const { error: noteError } = await db.rpc('note_payout_rail_status', {
+          p_payout_id: payout.id,
+          p_status: settled.detail,
+        })
+        if (noteError) {
+          console.error('could not record what the rail said', {
+            payout_id: payout.id,
+            rail_status: settled.detail,
+            message: noteError.message,
+          })
+        }
+      }
+
       if (settled.status === 'pending') {
         // Still with the rail. Nothing to book, and nothing has gone wrong —
         // this is not an outcome the caller should count as an attempt.

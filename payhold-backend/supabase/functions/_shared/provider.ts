@@ -424,6 +424,24 @@ export interface TransferStatusResult {
   amount?: Money
   currency?: Currency
   fee?: Money | null
+  /**
+   * The rail's own words for where this transfer is, in the rail's own
+   * vocabulary — `PayPal batch PENDING, item UNCLAIMED`, `Flutterwave
+   * NEW`. Short, human, and never translated into ours.
+   *
+   * It exists because `pending` is silent and can stay silent for a very
+   * long time. On 2026-09-12 a live payout sat at `pending` for a day: the
+   * cron asked PayPal every five minutes, booked "processing", wrote no
+   * audit row and changed no column, and the seller's screen could only say
+   * "not moving yet" — true, useless, and indistinguishable from a broken
+   * job. Three buckets of the answer (paid, failed, everything else) are
+   * enough to *decide* with and not enough to *explain* with.
+   *
+   * Recorded on the payout, shown to the seller, and never acted on: a
+   * decision made by matching this string would be a decision made on prose
+   * a provider is free to reword.
+   */
+  detail?: string
 }
 
 /** One `audit_log` row this decision calls for, or none. */

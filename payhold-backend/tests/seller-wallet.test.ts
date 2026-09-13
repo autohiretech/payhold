@@ -304,6 +304,158 @@ describe('what can actually be sent, and why it cannot', () => {
   })
 })
 
+describe('money that is stuck', () => {
+  test('a failed payout is counted and its amount is visible', async () => {
+    // The bug this was written for: a host whose transfer was refused had every
+    // figure on their earnings screen read zero — available, requested,
+    // clearing, paid — while the money sat owed to them on a row nobody
+    // disputed. AutoHire rendered what it was given, which made a confidently
+    // blank screen out of a real balance.
+    const tenant = await seedTenant()
+    const seller = await seedSeller(tenant)
+    const deal = await seedFundedDeal(tenant, seller)
+    await release(deal)
+    await mature(deal)
+    await h.db.query(
+      `update payouts set status = 'failed', failure_reason = 'rail said no'
+        where deal_id = $1`,
+      [deal],
+    )
+
+    const { rows: [w] } = await h.db.query<{
+      stuck_amount: string
+      stuck_count: number
+      available_amount: string
+    }>(`select * from seller_withdrawable($1)`, [seller])
+
+    expect(Number(w.stuck_amount)).toBeGreaterThan(0)
+    expect(w.stuck_count).toBe(1)
+    // Still not payable — stuck is not the same as available.
+    expect(Number(w.available_amount)).toBe(0)
+  })
+
+  test('the rail\u2019s own words reach the seller, and cost no retry budget', async () => {
+    // A payout can sit at `pending` for a day. The dispatcher asks the rail
+    // every five minutes and books `processing`, which writes no column and no
+    // audit row \u2014 so before this, twenty-six hours of correct polling left the
+    // seller reading "not moving yet" with nothing underneath it, unable to
+    // tell a rail holding their money from a cron that had died.
+    const tenant = await seedTenant()
+    const seller = await seedSeller(tenant)
+    const deal = await seedFundedDeal(tenant, seller)
+    await release(deal)
+    await mature(deal)
+    await h.db.query(
+      `update payouts set status = 'failed', attempts = 4,
+              next_attempt_at = now() - interval '1 hour',
+              scheduled_for = now() - interval '2 days'
+        where deal_id = $1`,
+      [deal],
+    )
+    const { rows: [p] } = await h.db.query<{ id: string }>(
+      `select id from payouts where deal_id = $1`,
+      [deal],
+    )
+
+    await h.db.query(`select note_payout_rail_status($1, $2)`, [
+      p.id,
+      'batch PENDING, item UNCLAIMED',
+    ])
+
+    const { rows: [w] } = await h.db.query<{
+      rail_status: string | null
+      rail_status_at: string | null
+      stuck_since: string | null
+    }>(`select * from seller_withdrawable($1)`, [seller])
+
+    expect(w.rail_status).toBe('batch PENDING, item UNCLAIMED')
+    expect(w.rail_status_at).not.toBeNull()
+    // Counted from when the money should have gone, not from the last refusal.
+    expect(new Date(w.stuck_since!).getTime()).toBeLessThan(Date.now() - 86_400_000)
+
+    // A poll is not an attempt: nothing that decides may move.
+    const { rows: [after] } = await h.db.query<{
+      status: string
+      attempts: number
+      next_attempt_at: string | null
+      failure_reason: string | null
+    }>(
+      `select status, attempts, next_attempt_at, failure_reason from payouts where id = $1`,
+      [p.id],
+    )
+    expect(after.status).toBe('failed')
+    expect(after.attempts).toBe(4)
+    expect(after.next_attempt_at).not.toBeNull()
+    expect(after.failure_reason).toBeNull()
+  })
+
+  test('a settled payout is not decorated with a status read afterwards', async () => {
+    const tenant = await seedTenant()
+    const seller = await seedSeller(tenant)
+    const deal = await seedFundedDeal(tenant, seller)
+    await release(deal)
+    await mature(deal)
+    await h.db.query(
+      `update payouts set status = 'paid', paid_at = now(), provider_ref = 'ref-1'
+        where deal_id = $1`,
+      [deal],
+    )
+    const { rows: [p] } = await h.db.query<{ id: string }>(
+      `select id from payouts where deal_id = $1`,
+      [deal],
+    )
+
+    await h.db.query(`select note_payout_rail_status($1, $2)`, [p.id, 'batch PENDING'])
+
+    const { rows: [after] } = await h.db.query<{ rail_status: string | null }>(
+      `select rail_status from payouts where id = $1`,
+      [p.id],
+    )
+    expect(after.rail_status).toBeNull()
+  })
+
+  test('every payout status lands in some bucket', async () => {
+    // The failure was not that `failed` was forgotten once. It was that a
+    // status could exist and belong nowhere, so the next one added would go
+    // silently missing from a seller's own screen the same way.
+    const tenant = await seedTenant()
+
+    const { rows: statuses } = await h.db.query<{ value: string }>(
+      `select unnest(enum_range(null::payout_status))::text as value`,
+    )
+
+    for (const { value } of statuses) {
+      // A seller each, rather than one seller reused: the ledger is
+      // append-only, so a fixture cannot be cleaned up between rounds, and
+      // leftovers from the previous status would be counted in the next.
+      const seller = await seedSeller(tenant)
+      const deal = await seedFundedDeal(tenant, seller)
+      await release(deal)
+      await mature(deal)
+      await h.db.query(
+        `update payouts set status = $2::payout_status,
+                provider_ref = case when $2 = 'paid' then 'ref-1' else provider_ref end,
+                paid_at = case when $2 = 'paid' then now() else paid_at end
+          where deal_id = $1`,
+        [deal, value],
+      )
+
+      const { rows: [w] } = await h.db.query<{
+        available_count: number
+        requested_count: number
+        clearing_count: number
+        stuck_count: number
+        paid_count: number
+      }>(`select * from seller_withdrawable($1)`, [seller])
+
+      const counted = w.available_count + w.requested_count + w.clearing_count +
+        w.stuck_count + w.paid_count
+
+      expect(counted, `payout_status '${value}' is in no bucket`).toBeGreaterThan(0)
+    }
+  })
+})
+
 describe('requesting a withdrawal', () => {
   test('stamps the cleared payouts and re-arms their clock', async () => {
     const tenant = await seedTenant()

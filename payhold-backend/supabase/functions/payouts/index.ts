@@ -29,7 +29,13 @@ import { PayHoldError, type Payout } from '../_shared/types.ts'
 const PAYOUT_COLUMNS =
   'id, tenant_id, deal_id, seller_id, amount, currency, status, scheduled_for, ' +
   'paid_at, failure_reason, attempts, next_attempt_at, provider_ref, destination_id, review_held_at, ' +
-  'review_held_by, review_hold_reason, review_approved_by, review_approved_at, created_at'
+  'review_held_by, review_hold_reason, review_approved_by, review_approved_at, created_at, ' +
+  // Where the rail says this transfer is, and when it last said so. A hand-
+  // maintained column list is how `provider_ref` went missing from two
+  // endpoints and made a manual "Send it now" re-POST a transfer PayPal
+  // already held; a field the client renders has to be in every list that
+  // feeds a client.
+  'rail_status, rail_status_at'
 
 async function getPayout(
   db: SupabaseClient,
