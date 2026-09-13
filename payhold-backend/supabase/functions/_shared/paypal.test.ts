@@ -1173,3 +1173,33 @@ Deno.test('the sign-in host follows the credentials, so live is live', async () 
   assert(live.loginUrl!('https://app.example/r', 's').startsWith('https://www.paypal.com/connect?'))
   await Promise.resolve()
 })
+
+Deno.test('a live tenant refuses a sandbox cert URL', async () => {
+  // The looseness that only exists in production. `(\.sandbox)?` in the host
+  // check accepted a sandbox cert URL on live credentials — every sandbox test
+  // passes either way, so nothing would ever have shown it. Nothing legitimate
+  // crosses: PayPal signs a live webhook with a live cert.
+  const live = new PayPalProvider({ ...CREDS, mode: 'live' }, 'https://pay.example')
+  const headers = new Headers({
+    'paypal-transmission-id': 'a',
+    'paypal-transmission-time': 'b',
+    'paypal-transmission-sig': 'c',
+    'paypal-cert-url': 'https://api-m.sandbox.paypal.com/v1/certs/x.pem',
+    'paypal-auth-algo': 'SHA256withRSA',
+  })
+  assertEquals(await live.verifySignature('{}', headers), false)
+})
+
+Deno.test('a sandbox tenant refuses a live cert URL too', async () => {
+  // The same rule in the other direction, so the check is about matching the
+  // mode rather than about blocking one particular host.
+  const sandbox = new PayPalProvider(CREDS, 'https://pay.example')
+  const headers = new Headers({
+    'paypal-transmission-id': 'a',
+    'paypal-transmission-time': 'b',
+    'paypal-transmission-sig': 'c',
+    'paypal-cert-url': 'https://api-m.paypal.com/v1/certs/x.pem',
+    'paypal-auth-algo': 'SHA256withRSA',
+  })
+  assertEquals(await sandbox.verifySignature('{}', headers), false)
+})

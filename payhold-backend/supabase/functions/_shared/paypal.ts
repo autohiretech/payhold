@@ -1167,10 +1167,21 @@ export class PayPalProvider implements PaymentProvider {
       return false
     }
 
-    // Their own host, and only their own. A cert_url taken from the header
-    // without this check is an attacker naming where we fetch a key from —
-    // PayPal validates it too, and it costs nothing to refuse first.
-    if (!/^https:\/\/api(-m)?(\.sandbox)?\.paypal\.com\//.test(certUrl)) {
+    // Their own host, and only their own, **in the mode we are actually in.**
+    // A cert_url taken from the header without this check is an attacker
+    // naming where we fetch a key from — PayPal validates it too, and it costs
+    // nothing to refuse first.
+    //
+    // The mode part is the half that was missing. `(\.sandbox)?` accepted a
+    // sandbox cert URL on live credentials, which is a check that can only
+    // ever be too generous where it matters and is invisible where it does
+    // not: every sandbox test passes either way, and the looseness only exists
+    // in production. Nothing legitimate crosses — PayPal signs a live webhook
+    // with a live cert — so the narrower rule costs nothing and closes it.
+    const certHost = this.creds.mode === 'live'
+      ? /^https:\/\/api(-m)?\.paypal\.com\//
+      : /^https:\/\/api(-m)?\.sandbox\.paypal\.com\//
+    if (!certHost.test(certUrl)) {
       return false
     }
 
