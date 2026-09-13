@@ -1146,3 +1146,30 @@ Deno.test('cancelling addresses the item, not the batch we hold', async () => {
     restore()
   }
 })
+
+Deno.test('the sign-in URL separates scopes with %20, not +', async () => {
+  // `URLSearchParams` writes a space as `+`, which PayPal's consent screen
+  // rejects with "invalid client_id or redirect_uri" — an error naming neither
+  // the parameter at fault nor the real one. Their reference writes the scopes
+  // `%20`-separated.
+  const pp = new PayPalProvider(CREDS, 'https://pay.example')
+  const url = pp.loginUrl!('https://app.example/return', 'state-1')
+
+  assert(!url.includes('+'), `no plus-encoded spaces: ${url}`)
+  assert(url.includes('scope=openid%20email%20https%3A%2F%2Furi.paypal.com%2Fservices%2Fpaypalattributes'))
+  assert(url.includes('redirect_uri=https%3A%2F%2Fapp.example%2Freturn'))
+  assert(url.includes('state=state-1'))
+  await Promise.resolve()
+})
+
+Deno.test('the sign-in host follows the credentials, so live is live', async () => {
+  // The consent screen lives on www.*, not the api-m.* host the rest of this
+  // adapter talks to — and it has to move to production with the credentials
+  // rather than staying pointed at a sandbox nobody's real seller has.
+  const sandbox = new PayPalProvider(CREDS, 'https://pay.example')
+  assert(sandbox.loginUrl!('https://app.example/r', 's').startsWith('https://www.sandbox.paypal.com/connect?'))
+
+  const live = new PayPalProvider({ ...CREDS, mode: 'live' }, 'https://pay.example')
+  assert(live.loginUrl!('https://app.example/r', 's').startsWith('https://www.paypal.com/connect?'))
+  await Promise.resolve()
+})

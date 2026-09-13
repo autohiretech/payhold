@@ -275,7 +275,20 @@ export class PayPalProvider implements PaymentProvider {
       redirect_uri: returnUrl,
       state,
     })
-    return `${this.www}/connect?flowEntry=static&${params.toString()}`
+
+    // **`%20`, not `+`.** `URLSearchParams` serialises a space as `+`, which is
+    // correct for a form body and is what PayPal's consent screen refuses in a
+    // query string: `scope=openid+email+…` came back as "invalid client_id or
+    // redirect_uri", an error message that names neither the parameter at fault
+    // nor the real one. Their own reference writes the scopes `%20`-separated,
+    // and swapping the encoding is the whole fix.
+    //
+    // Safe as a blanket replace: `URLSearchParams` percent-encodes a literal
+    // plus inside a value as `%2B`, so every bare `+` left in the string is one
+    // it put there for a space.
+    const query = params.toString().replace(/\+/g, '%20')
+
+    return `${this.www}/connect?flowEntry=static&${query}`
   }
 
   /**
