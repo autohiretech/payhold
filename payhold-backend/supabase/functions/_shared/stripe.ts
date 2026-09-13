@@ -569,10 +569,23 @@ export class StripeProvider implements PaymentProvider {
         await this.call<{ fee?: number }>(`/balance_transactions/${charge.balance_transaction}`),
       )
     }
-    if (typeof intent.latest_charge === 'string') {
+
+    // **The retry has to cover the expanded charge too, and it did not.**
+    // It ran only when `latest_charge` came back as a bare id, so the case
+    // that actually happens on the poll path — the charge expanded into an
+    // object whose `balance_transaction` is still `null`, because Stripe has
+    // not attached one in the fourteen seconds since the payment authorised —
+    // fell straight through every branch and gave up without asking twice. A
+    // live USD 320.00 charge on 2026-09-13 booked no fee that way; Stripe's
+    // own dashboard showed $9.58 against the same payment a moment later.
+    // The charge id is the same id whichever shape it arrives in.
+    const chargeId = charge?.id ??
+      (typeof intent.latest_charge === 'string' ? intent.latest_charge : undefined)
+
+    if (chargeId) {
       for (let attempt = 0; attempt < PROVIDER_FEE_RETRIES; attempt++) {
         const ch = await this.call<StripeCharge>(
-          `/charges/${intent.latest_charge}?expand[]=balance_transaction`,
+          `/charges/${chargeId}?expand[]=balance_transaction`,
         )
         if (ch && ch.balance_transaction && typeof ch.balance_transaction === 'object') {
           return stated(ch.balance_transaction)

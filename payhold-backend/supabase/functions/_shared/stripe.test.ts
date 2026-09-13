@@ -1242,3 +1242,44 @@ Deno.test('a stated zero fee stays zero', async () => {
     restore()
   }
 })
+
+Deno.test('an expanded charge whose fee has not attached yet is asked again', async () => {
+  // The gap that let the live USD 320.00 charge book no fee. The retry ran
+  // only when `latest_charge` came back as a bare id; on the poll path it
+  // comes back expanded, with `balance_transaction: null` because Stripe has
+  // not attached one in the fourteen seconds since authorisation. That shape
+  // fell through every branch and gave up without asking twice, while the
+  // Stripe dashboard showed $9.58 against the same payment moments later.
+  const original = globalThis.fetch
+  const urls: string[] = []
+  let call = 0
+  globalThis.fetch = ((url: string | URL) => {
+    urls.push(String(url))
+    // First: the verify re-fetch, charge expanded, no balance transaction yet.
+    // Second: the /charges retry, by which time Stripe has priced it.
+    const body = call++ === 0
+      ? {
+        id: 'pi_1',
+        status: 'succeeded',
+        amount: 32_000,
+        amount_received: 32_000,
+        currency: 'usd',
+        latest_charge: { id: 'ch_1', balance_transaction: null },
+      }
+      : { id: 'ch_1', balance_transaction: { id: 'txn_1', fee: 958 } }
+    return Promise.resolve(
+      new Response(JSON.stringify(body), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }),
+    )
+  }) as typeof fetch
+
+  try {
+    const v = await new StripeProvider(CREDS, '').verify('pi_1')
+    assertEquals(v.fee, 958)
+    assert(urls.some((u) => u.includes('/charges/ch_1')))
+  } finally {
+    globalThis.fetch = original
+  }
+})
