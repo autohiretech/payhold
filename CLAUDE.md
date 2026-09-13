@@ -385,7 +385,11 @@ Flutterwave.** Adding Paystack/DPO later = one new class + one webhook function
 `ai_risk_narrator`, `seller_auto_verify` (default **false** — when a tenant's own onboarding checks
 who a seller is, sellers and destinations are written verified and out of hold
 rather than waiting for a person here; the gates that read those columns are
-unchanged, so `verify_seller(…, false)` still stops a payout),
+unchanged, so `verify_seller(…, false)` still stops a payout. **Never a PayPal
+destination** since `20260913000005`: that rail's token is a typed address
+nobody has checked, and PayPal accepts a payout to an unconfirmed account,
+reports it a success and returns the money thirty days later — so only PayPal's
+own `verified_account`, read by the connect flow, or a person may verify one),
 `seller_verification_relay` (default **true** since `20260911000001` — the tenant reviews each seller
 itself and reports the result, so `POST /v1/sellers/:id/verify` accepts that
 account's API key. A **separate** switch from the one before it and never a

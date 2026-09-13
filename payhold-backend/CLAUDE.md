@@ -536,6 +536,24 @@ false)` still stops a payout on an auto-verified seller, and turning the flag on
 does **not** retroactively verify sellers already registered (those are a
 per-seller Verify, or a sandbox reset).
 
+**Never carries a PayPal destination — migration `20260913000005`.** All three
+insert paths now compute `trusted := seller_auto_verify(t) and not
+platform_owns_verification(t) and provider is distinct from 'paypal'`. The flag
+is a tenant saying "take my word for my sellers' payout accounts", and on every
+other rail the thing it vouches for was minted by the rail — a Stripe `acct_…`,
+a Flutterwave beneficiary. PayPal's token is an email address somebody typed,
+and PayPal accepts a payout to one whose account is unconfirmed: batch
+`SUCCESS`, item `UNCLAIMED`, money returned after thirty days. On 2026-09-13
+three payouts totalling USD 2,231.07 sat in exactly that state against two
+typed addresses that both looked correct. A PayPal destination is verified by
+**PayPal** — `POST /v1/sellers/:id/paypal/complete` reads `verified_account` off
+the sign-in and verifies on it — or by a **person**, and by nothing else. The
+row also serves its full `destination_hold_hours` rather than the zero a trusted
+row gets, since §5.1's window is then the only thing between a typed address and
+a transfer. Nothing is un-verified retroactively, on `20260911000004`'s
+reasoning. Pinned in `tests/paypal-is-not-auto-verified.test.ts`, which also
+pins that the flag still carries every other rail unchanged.
+
 **Inert while `platform_owns_verification` is on (§29.18)**, which is the
 default: all three insert paths compute `trusted := seller_auto_verify(t) and not
 platform_owns_verification(t)`, a stored 1 verifies nothing, and `PATCH /settings`
