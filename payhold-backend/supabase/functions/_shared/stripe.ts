@@ -923,6 +923,21 @@ export class StripeProvider implements PaymentProvider {
         country,
         email: email ?? undefined,
         capabilities: { transfers: { requested: true } },
+        // **Required outside the US, and the right shape regardless.** Left
+        // unset, Stripe defaults new accounts to the `full` service
+        // agreement — the one written for an account that processes card
+        // payments — and refuses `transfers` alone under it for most
+        // countries: "you must either specify the `recipient` service
+        // agreement, or request `card_payments` alongside `transfers`."
+        // Requesting `card_payments` would be the wrong fix for an account
+        // that never takes a charge; `recipient` is Stripe's own agreement
+        // for exactly this shape — "no direct service relationship with the
+        // recipient, only with the platform" — and it is the one that
+        // supports cross-border payouts (Global Payouts), which a seller
+        // paid from outside their own country needs. Stripe records the
+        // acceptance itself during hosted or embedded onboarding; nothing
+        // here has to attest to it.
+        tos_acceptance: { service_agreement: 'recipient' },
         controller: {
           // We collect the requirements — the clause the whole change rests on.
           requirement_collection: 'application',

@@ -852,6 +852,32 @@ Deno.test('a new Connect account only requests transfers, never charges', async 
     // transfer from `release`, and requesting a capability nothing here uses
     // is a capability someone downstream has to explain away in review.
     assertEquals(body.includes('card_payments'), false, body)
+    // **`recipient`, not the `full` service agreement Stripe defaults to.**
+    // Left unset, account creation for `transfers` alone fails outside the US
+    // with "you must either specify the `recipient` service agreement, or
+    // request `card_payments` alongside `transfers`" — found live, on real
+    // GB and IE onboarding attempts, both refused at this exact step. The
+    // `full` agreement is for accounts that process card payments; this one
+    // never does, and `recipient` is Stripe's own agreement for a
+    // transfers-only account — it also unlocks cross-border payouts (Global
+    // Payouts), which a seller paid from outside their own country needs.
+    assertEquals(body.includes('tos_acceptance[service_agreement]=recipient'), true, body)
+  } finally {
+    restore()
+  }
+})
+
+Deno.test('a non-US connect account requests the recipient agreement too', async () => {
+  // The bug this pins was invisible against `US` alone: Stripe's default
+  // (`full`) service agreement happens to accept a `transfers`-only US
+  // account, so every test and every real US onboarding worked while GB and
+  // IE were refused outright. `country` must not change which agreement is
+  // requested — the fix is unconditional, not a US/non-US branch.
+  const { seen, restore } = intercept({ id: 'acct_new_gb' })
+  try {
+    await new StripeProvider(CREDS, '').createConnectAccount('GB', null, 'seller_gb')
+    const body = decodeURIComponent(seen.body ?? '')
+    assertEquals(body.includes('tos_acceptance[service_agreement]=recipient'), true, body)
   } finally {
     restore()
   }
