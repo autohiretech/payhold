@@ -157,8 +157,15 @@ export function PayoutsPage() {
                         <Mono>{p.seller_id}</Mono>
                       )}
                     </Td>
+                    {/* The destination this payout was ROUTED to, which is
+                        not always where the seller is paid today. Falling back
+                        to the seller's current one only when the payout never
+                        got as far as being routed — where it is a statement of
+                        intent rather than a claim about money that has moved. */}
                     <Td className="text-fg-muted">
-                      {seller?.masked_destination ?? '—'}
+                      {p.destination?.masked_destination ?? (
+                        p.destination_id ? <Mono>{p.destination_id}</Mono> : seller?.masked_destination ?? '—'
+                      )}
                     </Td>
                     <Td>
                       <Link to={`/deals/${p.deal_id}`} className="hover:underline">

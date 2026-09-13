@@ -38,7 +38,14 @@ const PAYOUT_COLUMNS =
   'rail_status, rail_status_at, fx_from_amount, fx_from_currency, fx_rate, fx_rate_source, ' +
   // Decides the idempotency key of the next send. A stale one rebuilds the key
   // of a batch the rail already holds.
-  'send_seq'
+  'send_seq, ' +
+  // **Where the money actually went, not where the seller is paid today.**
+  // The dashboard rendered the seller's *current* destination against every
+  // payout, so a transfer sent to an address the seller has since replaced
+  // displayed the new one — a money screen telling an operator the money went
+  // somewhere it did not. Embedded through the payout's own foreign key, which
+  // is the only thing that knows.
+  'destination:seller_destinations!payouts_destination_id_fkey(masked_destination, payout_provider)'
 
 async function getPayout(
   db: SupabaseClient,

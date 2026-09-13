@@ -462,6 +462,16 @@ export interface Payout {
   provider_ref?: string | null
   /** §5.1: which destination this payout actually went to. */
   destination_id?: string | null
+  /**
+   * That destination, resolved — masked, and with the rail it is on.
+   *
+   * **Not the seller's current destination**, which is what this screen used
+   * to render against every payout. A seller who replaces their payout address
+   * does not move money already sent to the old one, and showing the new one
+   * beside an in-flight transfer tells an operator the money went somewhere it
+   * did not. Null on a payout that never got as far as being routed.
+   */
+  destination?: { masked_destination: string; payout_provider: string } | null
   /** When it was stopped — by a rule, or by a person. */
   review_held_at: Timestamp | null
   /**
