@@ -525,6 +525,17 @@ export interface Payout {
   rail_status?: string | null
   /** When the rail last answered. Also the proof that something is asking. */
   rail_status_at?: Timestamp | null
+  /**
+   * What this payout was converted from, and at whose rate.
+   *
+   * Recorded rather than derivable: the wallet figure a screen would divide
+   * by has the provider's fee taken out and this one does not, so dividing
+   * them yields a rate 5% off the one the rail actually quoted.
+   */
+  fx_from_amount?: Money | null
+  fx_from_currency?: Currency | null
+  fx_rate?: number | null
+  fx_rate_source?: string | null
 }
 
 // ---------------------------------------------------------------------------

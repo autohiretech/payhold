@@ -97,6 +97,50 @@ describe('a payout following its destination', () => {
     expect(await payoutRow(s.payout)).toMatchObject({ amount: USD, currency: 'USD' })
   })
 
+  test('keeps what it was converted from, so nobody has to derive it', async () => {
+    // Deriving it is the trap: dividing the seller's wallet balance by their
+    // payout gives a rate about 5% off the one the rail quoted, because the
+    // wallet figure has the provider's fee taken out of it and the payout was
+    // converted from a figure that does not. Both numbers look reasonable.
+    const s = await seed()
+    await follow(s.payout)
+
+    const { rows: [p] } = await h.db.query<{
+      fx_from_amount: string
+      fx_from_currency: string
+      fx_rate: string
+      fx_rate_source: string
+    }>(
+      `select fx_from_amount, fx_from_currency, fx_rate, fx_rate_source
+         from payouts where id = $1`,
+      [s.payout],
+    )
+
+    expect(Number(p.fx_from_amount)).toBe(90_000)
+    expect(p.fx_from_currency).toBe('RWF')
+    expect(Number(p.fx_rate)).toBeCloseTo(RATE, 10)
+    expect(p.fx_rate_source).toBe('flutterwave')
+  })
+
+  test('a second restatement describes the leg the amount is actually in', async () => {
+    const s = await seed()
+    await follow(s.payout)
+    await follow(s.payout, 5_500, 'EUR', 0.9167, 'flutterwave')
+
+    const { rows: [p] } = await h.db.query<{
+      currency: string
+      fx_from_amount: string
+      fx_from_currency: string
+    }>(
+      `select currency, fx_from_amount, fx_from_currency from payouts where id = $1`,
+      [s.payout],
+    )
+
+    expect(p.currency).toBe('EUR')
+    expect(Number(p.fx_from_amount)).toBe(USD)
+    expect(p.fx_from_currency).toBe('USD')
+  })
+
   test('moves no money and books nothing', async () => {
     // Nothing has left anywhere. `amountLeaving` reads the deal's clearing pool
     // in the presentment currency and is untouched by this; the restated figure
