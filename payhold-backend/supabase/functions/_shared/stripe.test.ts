@@ -840,7 +840,10 @@ Deno.test('a new Connect account only requests transfers, never charges', async 
 
     assertEquals(accountId, 'acct_new1')
     assertEquals(seen.url?.includes('/accounts'), true, seen.url)
-    assertEquals(body.includes('type=express'), true, body)
+    // `type` and `controller` are alternatives and Stripe refuses both at
+    // once, so the absence of `type=` here is as load-bearing as the
+    // controller fields the test below pins.
+    assertEquals(body.includes('type='), false, body)
     assertEquals(body.includes('country=US'), true, body)
     assertEquals(body.includes('email=host@example.com'), true, body)
     assertEquals(body.includes('capabilities[transfers][requested]=true'), true, body)
@@ -1281,5 +1284,132 @@ Deno.test('an expanded charge whose fee has not attached yet is asked again', as
     assert(urls.some((u) => u.includes('/charges/ch_1')))
   } finally {
     globalThis.fetch = original
+  }
+})
+
+// ---------------------------------------------------------------------------
+// Onboarding that does not leave the app — including the code step
+// ---------------------------------------------------------------------------
+
+/**
+ * `intercept` answers every call with one body and remembers only the last.
+ * `createAccountSession` now reads the account before it creates the session,
+ * so these tests need to answer the two calls differently and to see both.
+ */
+function interceptByPath(routes: Record<string, unknown>) {
+  const calls: { url: string; body?: string }[] = []
+  const original = globalThis.fetch
+
+  globalThis.fetch = ((url: string | URL | Request, init?: RequestInit) => {
+    const href = String(url)
+    calls.push({ url: href, body: init?.body ? String(init.body) : undefined })
+    const key = Object.keys(routes).find((k) => href.includes(k))
+    return Promise.resolve(
+      new Response(JSON.stringify(key ? routes[key] : {}), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }),
+    )
+  }) as typeof fetch
+
+  return {
+    calls,
+    /** The request sent to the first path that matches, decoded. */
+    body: (path: string) => decodeURIComponent(calls.find((c) => c.url.includes(path))?.body ?? ''),
+    restore: () => {
+      globalThis.fetch = original
+    },
+  }
+}
+
+Deno.test('a new Connect account collects its own requirements, with no Stripe dashboard', async () => {
+  const { seen, restore } = intercept({ id: 'acct_new3' })
+
+  try {
+    await new StripeProvider(CREDS, '').createConnectAccount('US', null, 'seller_3')
+    const body = decodeURIComponent(seen.body ?? '')
+
+    // The clause the whole in-app onboarding rests on: Stripe only permits
+    // `disable_stripe_user_authentication` where the platform collects.
+    assertEquals(body.includes('controller[requirement_collection]=application'), true, body)
+    // These travel with it — Stripe validates the combination, not each field.
+    assertEquals(body.includes('controller[fees][payer]=application'), true, body)
+    assertEquals(body.includes('controller[losses][payments]=application'), true, body)
+    assertEquals(body.includes('controller[stripe_dashboard][type]=none'), true, body)
+    // Still transfers-only. Collecting requirements ourselves does not make
+    // this account one that takes a payment.
+    assertEquals(body.includes('capabilities[transfers][requested]=true'), true, body)
+    assertEquals(body.includes('card_payments'), false, body)
+  } finally {
+    restore()
+  }
+})
+
+Deno.test('the account session turns off Stripe’s own code step for an account that allows it', async () => {
+  const net = interceptByPath({
+    '/accounts/acct_new': { controller: { requirement_collection: 'application' } },
+    '/account_sessions': { client_secret: 'accs_secret_new' },
+  })
+
+  try {
+    const session = await new StripeProvider(CREDS, '').createAccountSession('acct_new')
+    const body = net.body('/account_sessions')
+
+    assertEquals(
+      body.includes(
+        'components[account_onboarding][features][disable_stripe_user_authentication]=true',
+      ),
+      true,
+      body,
+    )
+    assertEquals(body.includes('components[account_onboarding][enabled]=true'), true, body)
+    // Nothing left to warn the seller about.
+    assertEquals(session.stripeAuthPopup, false)
+  } finally {
+    net.restore()
+  }
+})
+
+Deno.test('an older Express account is never sent the flag Stripe would refuse', async () => {
+  // The account read is the point of this test. Every account minted before
+  // the controller change is still Express — `controller.stripe_dashboard.type`
+  // cannot be changed — and Stripe rejects the feature outright on one whose
+  // requirements it collects itself. Sending it blind would turn one extra
+  // window into onboarding that refuses to start, for exactly the sellers who
+  // already have earnings waiting on it.
+  const net = interceptByPath({
+    '/accounts/acct_old': { controller: { requirement_collection: 'stripe' } },
+    '/account_sessions': { client_secret: 'accs_secret_old' },
+  })
+
+  try {
+    const session = await new StripeProvider(CREDS, '').createAccountSession('acct_old')
+    const body = net.body('/account_sessions')
+
+    assertEquals(body.includes('disable_stripe_user_authentication'), false, body)
+    assertEquals(body.includes('components[account_onboarding][enabled]=true'), true, body)
+    // And the client is told, so it can keep promising the window it will get.
+    assertEquals(session.stripeAuthPopup, true)
+  } finally {
+    net.restore()
+  }
+})
+
+Deno.test('an account Stripe describes without a controller is treated as the older kind', async () => {
+  // A response shape we do not recognise is not permission to send a flag that
+  // fails the whole call. The safe reading of silence here is "Express", which
+  // costs a popup; the unsafe one costs the onboarding.
+  const net = interceptByPath({
+    '/accounts/acct_quiet': {},
+    '/account_sessions': { client_secret: 'accs_secret_quiet' },
+  })
+
+  try {
+    const session = await new StripeProvider(CREDS, '').createAccountSession('acct_quiet')
+
+    assertEquals(net.body('/account_sessions').includes('disable_stripe_user_authentication'), false)
+    assertEquals(session.stripeAuthPopup, true)
+  } finally {
+    net.restore()
   }
 })

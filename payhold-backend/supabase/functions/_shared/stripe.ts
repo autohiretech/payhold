@@ -869,11 +869,48 @@ export class StripeProvider implements PaymentProvider {
   // -------------------------------------------------------------------------
 
   /**
-   * A new Express connected account for a seller who has never onboarded with
-   * Stripe. `tokenize` above can only confirm an account that already exists
-   * and can be paid; this is what creates one in the first place. Only
-   * `transfers` is requested — this account never collects a charge, only
-   * receives Connect transfers from `release`.
+   * A new connected account for a seller who has never onboarded with Stripe.
+   * `tokenize` above can only confirm an account that already exists and can
+   * be paid; this is what creates one in the first place. Only `transfers` is
+   * requested — this account never collects a charge, only receives Connect
+   * transfers from `release`.
+   *
+   * ## Why `controller` and not `type: 'express'`
+   *
+   * These two are alternatives, not companions — Stripe refuses a request
+   * carrying both — and the choice between them decides one visible thing: an
+   * Express account makes Stripe responsible for collecting requirements, and
+   * Stripe then **requires** its own authentication step. That is the window
+   * embedded onboarding opens near the end to text the seller a code, and
+   * Stripe is explicit that it cannot be styled or suppressed while they are
+   * the ones collecting: "some behavior in embedded components, such as user
+   * authentication, is always presented in a popup."
+   *
+   * Collecting the requirements ourselves is the only configuration where
+   * `disable_stripe_user_authentication` is permitted, and `createAccountSession`
+   * sends it. So onboarding finishes where it started, inside the client's own
+   * app, with no window and no code.
+   *
+   * **Two consequences, both deliberate and neither reversible:**
+   *
+   * • **Negative-balance liability moves to the platform.** Stripe's own
+   *   wording: "for account configurations that support this feature, such as
+   *   Custom, you assume liability for connected accounts if they can't pay
+   *   back negative balances." On a transfers-only account that owns no
+   *   charges this is a narrow exposure — a reversed transfer or a clawed-back
+   *   payout, not a stranger's chargebacks — but it is real and it is ours.
+   *
+   * • **`controller.stripe_dashboard.type` is immutable per account.** Stripe:
+   *   "to change a connected account's dashboard, you must create a new
+   *   Account object." Every account minted before this change stays Express
+   *   and keeps its popup forever; there is no migration, and
+   *   `createAccountSession` reads each account rather than assuming which
+   *   kind it is holding.
+   *
+   * `type: 'none'` rather than `'express'` because the two halves have to
+   * agree: an Express *dashboard* on a platform-collected account would give
+   * the seller a Stripe login for an account whose requirements Stripe is no
+   * longer collecting, which is a login that can show them nothing to do.
    */
   async createConnectAccount(
     country: string,
@@ -883,10 +920,19 @@ export class StripeProvider implements PaymentProvider {
     const account = await this.call<{ id: string }>('/accounts', {
       method: 'POST',
       body: {
-        type: 'express',
         country,
         email: email ?? undefined,
         capabilities: { transfers: { requested: true } },
+        controller: {
+          // We collect the requirements — the clause the whole change rests on.
+          requirement_collection: 'application',
+          // Our fee, our loss exposure, no Stripe-hosted dashboard for the
+          // seller. These travel together: Stripe validates the combination
+          // rather than each field on its own.
+          fees: { payer: 'application' },
+          losses: { payments: 'application' },
+          stripe_dashboard: { type: 'none' },
+        },
         metadata: { seller_id: sellerId },
       },
     })
@@ -951,12 +997,35 @@ export class StripeProvider implements PaymentProvider {
    */
   async createAccountSession(
     accountId: string,
-  ): Promise<{ clientSecret: string; publishableKey: string }> {
+  ): Promise<{ clientSecret: string; publishableKey: string; stripeAuthPopup: boolean }> {
+    // **Asked, not assumed.** `createConnectAccount` mints platform-collected
+    // accounts now, but every account minted before it did is still Express,
+    // and Stripe *rejects* `disable_stripe_user_authentication` on an account
+    // whose requirements it collects itself. Sending the flag blind would turn
+    // "one extra window" into "onboarding will not start at all" for exactly
+    // the sellers who already have money waiting on it.
+    //
+    // One GET, on a call that already costs a POST, on a path a seller walks
+    // once.
+    const account = await this.call<{
+      controller?: { requirement_collection?: string }
+    }>(`/accounts/${accountId}`)
+    const platformCollected = account.controller?.requirement_collection === 'application'
+
     const session = await this.call<{ client_secret?: string }>('/account_sessions', {
       method: 'POST',
       body: {
         account: accountId,
-        components: { account_onboarding: { enabled: true } },
+        components: {
+          account_onboarding: {
+            enabled: true,
+            // The line that removes the code step. Only ever sent where Stripe
+            // allows it; see above.
+            ...(platformCollected
+              ? { features: { disable_stripe_user_authentication: true } }
+              : {}),
+          },
+        },
       },
     })
 
@@ -977,6 +1046,11 @@ export class StripeProvider implements PaymentProvider {
     return {
       clientSecret: session.client_secret,
       publishableKey: this.creds.publishable_key,
+      // Reported so the client can say what is about to happen instead of
+      // guessing. A client that promises "no window" to a seller on an old
+      // Express account and then opens one has told them something false at
+      // the exact moment they are being asked to trust it with a bank account.
+      stripeAuthPopup: !platformCollected,
     }
   }
 

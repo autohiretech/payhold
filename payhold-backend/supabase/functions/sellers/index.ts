@@ -1364,12 +1364,21 @@ async function startConnectSession(
   requireSellerWriter(caller)
   const body = await readJson<{ country?: string; email?: string | null }>(req)
   const { provider, accountId, market } = await connectAccountFor(db, caller, id, body)
-  const { clientSecret, publishableKey } = await provider.createAccountSession(accountId)
+  const { clientSecret, publishableKey, stripeAuthPopup } =
+    await provider.createAccountSession(accountId)
 
   return json(req, {
     account_id: accountId,
     client_secret: clientSecret,
     publishable_key: publishableKey,
+    // Whether Stripe will still open its own window near the end to text the
+    // seller a code. False for accounts minted since we started collecting
+    // requirements ourselves, true for every Express account that predates it
+    // — the dashboard type is fixed at creation and there is no migrating it.
+    // Additive: a client that does not know this field shows the warning it
+    // always showed, which is the truthful answer for the older accounts and a
+    // harmless one for the rest.
+    stripe_auth_popup: stripeAuthPopup,
     // Same pair `/connect/onboard` returns, for the same reason: one
     // onboarding presented two ways cannot report its market two ways.
     country: market.country,
