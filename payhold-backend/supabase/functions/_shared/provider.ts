@@ -771,29 +771,29 @@ export interface PaymentProvider {
   ): Promise<{ payer_id: string; email: string | null; verified_account: boolean | null }>
 
   /**
-   * What a browser needs to run the rail's own sign-in button itself.
+   * Which of the rail's environments a sign-in will be against.
    *
-   * `loginUrl` above is a URL for a client to send a window to, which works and
-   * looks like what it is: the seller leaves the app for a page we assembled.
-   * The rails that offer a sign-in also ship a script that renders their own
-   * button and owns the window it opens — the same arrangement `charge`
-   * already reports as `wallet_approval`, where the buyer approves in PayPal's
-   * popup over a checkout that never went anywhere.
+   * A client renders its own surface around `loginUrl`, and the one thing it
+   * cannot honestly work out for itself is whether the seller is about to be
+   * asked for real credentials or sandbox ones. Sandbox and live are different
+   * hosts on this rail, so the answer lives with the credentials — and a
+   * client deciding it by inspecting the shape of a client id would be exactly
+   * the provider knowledge `/payment-options` exists to stop clients
+   * inventing.
    *
-   * **`client_id` is publishable**, and this returns nothing that
-   * `wallet_approval` has not been handing browsers since PayPal's adapter
-   * landed. The secret half never leaves this process.
-   *
-   * `environment` is here because the script needs telling which PayPal it is
-   * talking to — sandbox and live are different hosts on this rail, so a
-   * button configured for the wrong one fails the way a mismatched credential
-   * does. Deriving it in a client from the shape of a client id is exactly the
-   * provider knowledge `/payment-options` exists to stop clients inventing.
+   * **Deliberately not the client id.** An earlier version of this returned
+   * one, on the reasoning that `wallet_approval` already publishes it so a
+   * browser could drive the rail's own button — but there is no current
+   * sign-in button script to drive: PayPal's lives in the deprecated
+   * checkout.js generation, and their live reference builds this flow as the
+   * URL `loginUrl` already assembles. A publishable value is still an
+   * unused one, and API surface nothing consumes is surface that outlives the
+   * reason for it.
    *
    * Optional for the same reason `loginUrl` is: most rails have nobody to sign
-   * in as. A caller without it falls back to the URL.
+   * in as.
    */
-  loginConfig?(): { client_id: string; environment: 'sandbox' | 'live' }
+  loginConfig?(): { environment: 'sandbox' | 'live' }
 
   /**
    * What this rail will convert a corridor at, right now.

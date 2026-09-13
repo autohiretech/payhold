@@ -1174,30 +1174,25 @@ Deno.test('the sign-in host follows the credentials, so live is live', async () 
   await Promise.resolve()
 })
 
-Deno.test('loginConfig publishes the client id and the environment, and nothing else', async () => {
-  // What lets a client run PayPal's own sign-in surface in its own page rather
-  // than sending a window to a URL we assembled — the same arrangement
-  // `wallet_approval` has always given the checkout.
+Deno.test('loginConfig says which PayPal, and carries no credential at all', async () => {
+  // What lets a client say "this is the sandbox, use a test account" instead of
+  // leaving somebody wondering why their real password is refused.
   const sandbox = new PayPalProvider(CREDS, 'https://pay.example')
-  assertEquals(sandbox.loginConfig(), {
-    client_id: 'client-test',
-    environment: 'sandbox',
-  })
+  assertEquals(sandbox.loginConfig(), { environment: 'sandbox' })
 
-  // `environment` follows the credentials, because a button configured for the
-  // wrong PayPal fails the way a mismatched credential does — and a client
-  // deciding which PayPal this is by inspecting a client id would be exactly
-  // the provider knowledge clients must not hold.
+  // It follows the credentials, because sandbox and live are different hosts
+  // here and a client deciding which PayPal this is by inspecting a client id
+  // would be exactly the provider knowledge clients must not hold.
   const live = new PayPalProvider({ ...CREDS, mode: 'live' }, 'https://pay.example')
-  assertEquals(live.loginConfig().environment, 'live')
+  assertEquals(live.loginConfig(), { environment: 'live' })
 
-  // **The secret never crosses this line.** The client id is publishable and
-  // already goes to browsers on every PayPal charge; the secret is what makes
-  // the code exchange in `identityFromCode` mean anything, and a config a
-  // browser reads must never carry it.
+  // **Not the client id either**, publishable though it is: there is no
+  // current sign-in button script for a browser to drive with one, and the URL
+  // `loginUrl` builds already carries it, server-side. Nothing here is a
+  // credential of any kind.
   const serialised = JSON.stringify(sandbox.loginConfig())
   assert(!serialised.includes('secret-test'), serialised)
-  assert(!serialised.includes('webhook'), serialised)
+  assert(!serialised.includes('client-test'), serialised)
   await Promise.resolve()
 })
 

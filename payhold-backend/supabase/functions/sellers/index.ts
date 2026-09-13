@@ -1075,17 +1075,16 @@ async function startPayPalConnect(
 
   const state = crypto.randomUUID()
 
-  // **Both, because they are the same sign-in presented two ways.** `url` is
-  // for a client that sends a window somewhere; `client_id` and `environment`
-  // are for one that would rather run PayPal's own button in its own page, the
-  // way `wallet_approval` already lets it run PayPal's own checkout buttons.
-  // A client that cannot load the script falls back to the URL, which is why
-  // this is not a choice the caller has to declare up front.
+  // `environment` alongside the URL, because a client drawing its own "Connect
+  // PayPal" surface cannot honestly work out for itself whether the seller is
+  // about to be asked for real credentials or sandbox ones — and being told
+  // that in the moment is the difference between a test account and a person
+  // wondering why their real password is refused.
   //
-  // Nothing secret is added by the second pair: `client_id` is publishable and
-  // has been going to browsers on every PayPal charge since the adapter
-  // landed. The code either route comes back with is still exchanged here,
-  // server-side, against the secret.
+  // **Not the client id.** This briefly returned one so a client could drive
+  // PayPal's own sign-in button; there is no current button to drive, and the
+  // URL above already carries the id, assembled here against the secret. A
+  // publishable value is still an unused one if nothing reads it.
   const config = provider.loginConfig?.()
 
   return json(req, {

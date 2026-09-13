@@ -292,32 +292,24 @@ export class PayPalProvider implements PaymentProvider {
   }
 
   /**
-   * The same sign-in, for a client that would rather PayPal drew the button.
+   * Which PayPal a sign-in will be against — and nothing else.
    *
-   * `loginUrl` hands back a URL, and a client opening it is a seller watching
-   * their app hand them to paypal.com. PayPal's own login script renders a
-   * PayPal-branded button in the client's page and owns the window it opens —
-   * which is the arrangement `charge` has always reported as
-   * `wallet_approval`, so connecting an account can look exactly like paying,
-   * rather than like the one place the app gives up and redirects.
+   * A client drawing its own "Connect PayPal" surface needs to be able to say
+   * "this is the sandbox, use a test account" rather than leaving somebody
+   * wondering why their real password is refused. Sandbox and live are
+   * different hosts here, so only the credentials know.
    *
-   * **Nothing secret crosses this line.** `client_id` is the same publishable
-   * value `wallet_approval` already carries to a browser on every PayPal
-   * charge; the secret stays here, and the authorization code the button comes
-   * back with is still exchanged server-side in `identityFromCode`, against
-   * that secret. A button cannot mint a destination on its own, and this does
-   * not let it.
-   *
-   * `environment` rather than a host: the script takes `authend: "sandbox"`
-   * and picks its own hosts from it, and a client deciding which PayPal it is
-   * talking to by inspecting a client id would be exactly the provider
-   * knowledge clients are not supposed to hold.
+   * **The client id is not returned, and that is a decision rather than an
+   * omission.** It is publishable — `wallet_approval` hands it to a browser on
+   * every PayPal charge — and this briefly returned it so a client could run
+   * PayPal's own sign-in button. There is no such button to run: the login
+   * script belongs to the deprecated checkout.js generation, and PayPal's
+   * current reference builds this flow as the authorization URL `loginUrl`
+   * assembles above, client id included, server-side. Publishing a second copy
+   * for nothing to read would be surface that outlives its reason.
    */
-  loginConfig(): { client_id: string; environment: 'sandbox' | 'live' } {
-    return {
-      client_id: this.creds.client_id,
-      environment: this.creds.mode === 'live' ? 'live' : 'sandbox',
-    }
+  loginConfig(): { environment: 'sandbox' | 'live' } {
+    return { environment: this.creds.mode === 'live' ? 'live' : 'sandbox' }
   }
 
   /**
