@@ -40,6 +40,10 @@ export function PayoutsPage() {
   const now = new Date()
 
   const retry = useMoneyMutation((id: string) => api.retryPayout(id))
+  // The unstick button for a transfer a rail is holding. See `pullBackPayout`:
+  // Retry is inert on these, because a payout with a provider_ref gets polled
+  // rather than sent.
+  const pullBack = useMoneyMutation((id: string) => api.pullBackPayout(id))
   const approve = useMoneyMutation((id: string) => api.approvePayoutReview(id))
 
   // Stopping one payout, for the operator who knows something the rules do not.
@@ -239,6 +243,25 @@ export function PayoutsPage() {
                                   Retry
                                 </Button>
                               )}
+                            {/* A transfer the rail has but has not delivered.
+                                Retry is inert here — the payout has a
+                                provider_ref, so dispatch polls instead of
+                                sending — so the honest control is the one that
+                                asks for the money back. It re-routes on the way
+                                out: the resend reads the seller's destination
+                                as it stands then, which makes "fix the address,
+                                press this" the whole repair. */}
+                            {p.status === 'processing' && p.provider_ref && (
+                              <Button
+                                size="sm"
+                                variant="ghost"
+                                disabled={pullBack.isPending}
+                                onClick={() => pullBack.mutate(p.id)}
+                                title="Ask the rail to return it, then send it again to the destination on file now"
+                              >
+                                Pull back &amp; resend
+                              </Button>
+                            )}
                             {p.status === 'scheduled' && aiReady && (
                               <Button
                                 size="sm"

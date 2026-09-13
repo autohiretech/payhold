@@ -6,6 +6,7 @@
  *   POST /payouts/:id/hold            stop one. A person only
  *   POST /payouts/:id/approve-review  clear a hold. A person only
  *   POST /payouts/:id/retry           re-attempt one the provider refused
+ *   POST /payouts/:id/pull-back       ask the rail to return one it is holding
  *
  * The three POSTs look similar and are deliberately not interchangeable.
  * `retry` is for a provider that said no — nothing judged the payout, so
@@ -24,7 +25,8 @@ import type { SupabaseClient } from 'npm:@supabase/supabase-js@2'
 import { requireRole, resolveCaller, serviceClient, type Caller } from '../_shared/auth.ts'
 import { dispatchPayout } from '../_shared/dispatch.ts'
 import { handler, json } from '../_shared/http.ts'
-import { PayHoldError, type Payout } from '../_shared/types.ts'
+import { loadProvider } from '../_shared/load-provider.ts'
+import { PayHoldError, type Payout, type Provider } from '../_shared/types.ts'
 
 const PAYOUT_COLUMNS =
   'id, tenant_id, deal_id, seller_id, amount, currency, status, scheduled_for, ' +
@@ -195,6 +197,119 @@ async function hold(
   })
 }
 
+/**
+ * `POST /payouts/:id/pull-back` — ask the rail to give back a transfer it is
+ * holding but has not delivered, so it can be sent somewhere that works.
+ *
+ * **The fourth POST, and the one `retry` cannot be.** `retry` re-attempts a
+ * payout nothing is holding; this one is for a payout the rail accepted and
+ * then could not deliver. PayPal's case: an item sitting `UNCLAIMED` because
+ * the address has no confirmed PayPal account, held for thirty days before it
+ * returns on its own. Pressing `retry` there does nothing at all — the payout
+ * has a `provider_ref`, so `dispatchPayout` polls it rather than sending, and
+ * polls it to the same answer for a month. On 2026-09-13 the owner pressed it
+ * and watched nothing happen, which is what asked for this button.
+ *
+ * **It books nothing.** The rail is asked and that is all. The next dispatch
+ * pass — or the item webhook, which arrives in seconds — sees the transfer
+ * terminally failed, and the ordinary path books it, clears the dead
+ * reference, moves `send_seq` and sends again under a key the rail has not
+ * seen. One booking path; this only starts it sooner.
+ *
+ * Because the money goes out again straight afterwards, it re-routes as it
+ * goes: the send picks up the seller's destination as it stands *now*, so
+ * fixing the address and pressing this is the whole repair.
+ */
+async function pullBack(
+  req: Request,
+  db: SupabaseClient,
+  caller: Caller,
+  id: string,
+): Promise<Response> {
+  requireRole(caller, 'owner', 'staff')
+
+  const payout = await getPayout(db, caller, id)
+
+  if (payout.status === 'paid') {
+    throw new PayHoldError('invalid_state', 'This payout has already been sent')
+  }
+  if (!payout.provider_ref) {
+    throw new PayHoldError(
+      'invalid_state',
+      'This payout never reached a rail, so there is nothing to pull back',
+    )
+  }
+
+  const { data: dest } = await db
+    .from('seller_destinations')
+    .select('payout_provider')
+    .eq('id', payout.destination_id ?? '')
+    .maybeSingle()
+
+  const rail = (dest as { payout_provider?: string } | null)?.payout_provider
+
+  if (!rail) {
+    throw new PayHoldError(
+      'invalid_state',
+      'This payout has no destination on file, so there is no rail to ask',
+    )
+  }
+
+  // Which adapter is behind that rail, read from `payout_routes` — the same
+  // table `route_payout` reads, rather than a second copy of the mapping that
+  // could send the cancel to the wrong provider.
+  const { data: route } = await db
+    .from('payout_routes')
+    .select('provider, tenant_id')
+    .eq('payout_provider', rail)
+    .or(`tenant_id.eq.${payout.tenant_id},tenant_id.is.null`)
+    .order('tenant_id', { ascending: false, nullsFirst: false })
+    .limit(1)
+    .maybeSingle()
+
+  const adapter = (route as { provider?: string } | null)?.provider
+
+  if (!adapter) {
+    throw new PayHoldError(
+      'invalid_state',
+      `${rail} has no adapter behind it, so there is nothing to ask`,
+    )
+  }
+
+  const { provider } = await loadProvider(db, payout.tenant_id, adapter as Provider)
+
+  if (!provider.cancelTransfer) {
+    throw new PayHoldError(
+      'policy_violation',
+      `${rail} cannot return a transfer it has already accepted`,
+    )
+  }
+
+  const result = await provider.cancelTransfer(payout.provider_ref)
+
+  await db.rpc('write_audit', {
+    p_tenant: payout.tenant_id,
+    p_deal: payout.deal_id,
+    p_actor: caller.actor,
+    p_action: 'payout.cancel_requested_at_rail',
+    p_details: {
+      payout_id: payout.id,
+      provider_ref: payout.provider_ref,
+      rail,
+      result: result.detail,
+    },
+  })
+
+  return json(req, {
+    payout_id: payout.id,
+    pulled_back: true,
+    detail: result.detail,
+    note:
+      'The rail was asked to return it. Nothing has been booked here — the next ' +
+      'pass books the return and sends again to the destination on file now.',
+  })
+}
+
 async function retry(
   req: Request,
   db: SupabaseClient,
@@ -322,6 +437,8 @@ Deno.serve(handler(async (req) => {
       return await approveReview(req, db, caller, id)
     case 'retry':
       return await retry(req, db, caller, id)
+    case 'pull-back':
+      return await pullBack(req, db, caller, id)
     default:
       throw new PayHoldError('not_found', `No such action "${action ?? ''}"`)
   }

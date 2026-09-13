@@ -559,6 +559,24 @@ export class HttpClient implements PayHoldClient {
   }
 
   /**
+   * Ask the rail to return a transfer it is holding but has not delivered.
+   *
+   * **`retryPayout` cannot do this, which is why it exists.** A payout the rail
+   * accepted has a `provider_ref`, so a retry polls it rather than sending —
+   * and polls it to the same answer for as long as the rail holds it. PayPal
+   * holds an item nobody can claim for thirty days. Pressing Retry there does
+   * nothing at all, visibly.
+   *
+   * Books nothing: the rail is asked, and the next pass (or the item webhook,
+   * which lands in seconds) books the return, forgets the dead reference and
+   * sends again — to the destination on file at that moment, so fixing the
+   * address and pressing this is the whole repair.
+   */
+  async pullBackPayout(id: string): Promise<{ detail: string }> {
+    return await this.#post<{ detail: string }>(`/payouts/${id}/pull-back`)
+  }
+
+  /**
    * Invariant 11's narrow alternative to freezing a whole account. Takes a
    * reason, because the next person to look at the row has nothing else to go
    * on — and not a name: the endpoint takes the actor from the session, for the

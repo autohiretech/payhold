@@ -345,6 +345,15 @@ export interface PayHoldClient {
   listPayouts(): Promise<Payout[]>
   retryPayout(id: string): Promise<Payout>
   /**
+   * Ask the rail to return a transfer it holds but has not delivered, so the
+   * next pass can send it again — to the destination on file then.
+   *
+   * Distinct from `retryPayout`, which is inert on exactly these: a payout the
+   * rail accepted carries a `provider_ref`, so dispatch polls it rather than
+   * sending, and polls it to the same answer for as long as the rail holds it.
+   */
+  pullBackPayout(id: string): Promise<{ detail: string }>
+  /**
    * Stop one payout, because a person saw something the rules do not model.
    *
    * The narrow alternative to freezing a whole account, which stops every

@@ -49,6 +49,7 @@ import {
   useAudit,
   useCheckoutSessions,
   useDeal,
+  usePayouts,
   useSettings,
   useDealAmounts,
   useLedger,
@@ -910,6 +911,16 @@ const STEP_TONE: Record<StepTone, Tone> = {
 // ---------------------------------------------------------------------------
 
 function Actions({ deal }: { deal: Deal }) {
+  // This deal's payout, so the one thing an operator wants to do about a
+  // transfer stuck at a rail is on the screen that told them it was stuck.
+  // The deal page said "the transfer is with the provider and has not settled
+  // yet" and offered nothing — which is where the owner pressed Retry on the
+  // Payouts screen and watched it do nothing, because a payout the rail is
+  // holding gets polled rather than sent.
+  const payouts = usePayouts()
+  const payout = payouts.data?.find((p) => p.deal_id === deal.id) ?? null
+  const pullBack = useMoneyMutation((id: string) => api.pullBackPayout(id))
+
   const [refundReason, setRefundReason] = useState('')
   const [refundAmount, setRefundAmount] = useState('')
   const [disputeReason, setDisputeReason] = useState('')
@@ -978,6 +989,27 @@ function Actions({ deal }: { deal: Deal }) {
       )}
 
       <div className="mt-3 space-y-2">
+        {payout?.status === 'processing' && payout.provider_ref && (
+          <div className="rounded-md border border-line p-3">
+            <p className="text-xs text-fg-muted">
+              The rail has this transfer and has not delivered it.
+              {payout.rail_status ? ` It says: ${payout.rail_status}` : ''}
+            </p>
+            <Button
+              className="mt-2"
+              size="sm"
+              disabled={pullBack.isPending}
+              onClick={() => pullBack.mutate(payout.id)}
+            >
+              Pull back &amp; resend
+            </Button>
+            <p className="mt-2 text-xs text-fg-subtle">
+              Asks the rail to return it, then sends it again to the seller's
+              destination as it stands now. Nothing is booked until the rail
+              confirms the return.
+            </p>
+          </div>
+        )}
         {canConfirm && (
           <>
             <p className="text-xs text-fg-muted">
