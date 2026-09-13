@@ -1061,7 +1061,12 @@ async function startPayPalConnect(
   requireSellerWriter(caller)
   await ownSeller(db, caller, id)
 
-  const body = await readJson<{ return_url: string }>(req)
+  // `full_page` is the client saying "this device cannot keep a popup" — a
+  // phone, or an installed PWA. The rail then renders the consent as a page
+  // in the tab that arrives and sends that tab back to `return_url`, so the
+  // whole exchange stays inside the client's app. Optional and off by default:
+  // a desktop popup keeps the seller's place on the page underneath.
+  const body = await readJson<{ return_url: string; full_page?: boolean }>(req)
   required(body as unknown as Record<string, unknown>, 'return_url')
 
   const { provider } = await loadProvider(db, caller.tenant_id, 'paypal')
@@ -1088,7 +1093,7 @@ async function startPayPalConnect(
   const config = provider.loginConfig?.()
 
   return json(req, {
-    url: provider.loginUrl(body.return_url, state),
+    url: provider.loginUrl(body.return_url, state, { fullPage: body.full_page === true }),
     state,
     ...(config ?? {}),
   })

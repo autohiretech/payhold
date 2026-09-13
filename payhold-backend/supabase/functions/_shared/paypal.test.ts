@@ -1162,6 +1162,20 @@ Deno.test('the sign-in URL separates scopes with %20, not +', async () => {
   await Promise.resolve()
 })
 
+Deno.test('fullPage is appended only when asked for, and is PayPal\'s own switch', async () => {
+  // A phone or an installed PWA cannot keep a popup, so the client asks for
+  // PayPal's same-tab presentation; a desktop keeps the mini browser and the
+  // page underneath it. The parameter is PayPal's, documented on their
+  // build-button reference, and absent means "mini browser" to them.
+  const pp = new PayPalProvider(CREDS, 'https://pay.example')
+  const popup = pp.loginUrl!('https://app.example/r', 's')
+  assert(!popup.includes('fullPage'), popup)
+  const sameTab = pp.loginUrl!('https://app.example/r', 's', { fullPage: true })
+  assert(sameTab.includes('fullPage=true'), sameTab)
+  assert(!sameTab.includes('+'), sameTab)
+  await Promise.resolve()
+})
+
 Deno.test('the sign-in host follows the credentials, so live is live', async () => {
   // The consent screen lives on www.*, not the api-m.* host the rest of this
   // adapter talks to — and it has to move to production with the credentials

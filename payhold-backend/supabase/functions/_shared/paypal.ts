@@ -267,7 +267,7 @@ export class PayPalProvider implements PaymentProvider {
    * `state` is the caller's to generate and to check on the way back. It is
    * not decoration — without it the callback accepts a code from anywhere.
    */
-  loginUrl(returnUrl: string, state: string): string {
+  loginUrl(returnUrl: string, state: string, options?: { fullPage?: boolean }): string {
     const params = new URLSearchParams({
       client_id: this.creds.client_id,
       response_type: 'code',
@@ -275,6 +275,13 @@ export class PayPalProvider implements PaymentProvider {
       redirect_uri: returnUrl,
       state,
     })
+
+    // PayPal's own switch between its two presentations: omitted, the flow
+    // expects to live in a mini browser over the caller's page; `true`, it
+    // renders as a full page in the tab that arrived, and sends that tab
+    // back to `redirect_uri` when done. A phone gets the second, because a
+    // popup there is a separate browser the app never hears back from.
+    if (options?.fullPage) params.set('fullPage', 'true')
 
     // **`%20`, not `+`.** `URLSearchParams` serialises a space as `+`, which is
     // correct for a form body and is what PayPal's consent screen refuses in a

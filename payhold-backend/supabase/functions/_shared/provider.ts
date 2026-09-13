@@ -764,7 +764,14 @@ export interface PaymentProvider {
    * that from a discovery made a month later into a question answered at
    * setup.
    */
-  loginUrl?(returnUrl: string, state: string): string
+  /**
+   * `fullPage` asks the rail for its same-tab presentation rather than its
+   * mini-browser: a client on a phone or an installed PWA navigates the whole
+   * app to the consent page and is brought back to `returnUrl`, with no second
+   * window at any point. A popup on those devices is either blocked, opened as
+   * a separate browser the app never hears back from, or both.
+   */
+  loginUrl?(returnUrl: string, state: string, options?: { fullPage?: boolean }): string
   identityFromCode?(
     code: string,
     returnUrl: string,
