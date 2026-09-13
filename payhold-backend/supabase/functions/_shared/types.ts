@@ -751,6 +751,17 @@ export interface CreateDealInput {
   description: string
   amount: Money
   currency: Currency
+  /**
+   * How the buyer will pay, when the client already knows and PayHold is not
+   * choosing a rail.
+   *
+   * Only `'cash'` is accepted, and it is not a hint — it changes what the deal
+   * *is*. A cash deal is opened as `provider: 'offline'` and never routed,
+   * charged, held or paid out: the buyer hands the seller money in person and
+   * PayHold keeps the record. Every other method is still decided at funding,
+   * by the rail the buyer actually uses, and must not be declared here.
+   */
+  payment_method?: 'cash'
   buyer_country?: Country
   /**
    * What to charge the buyer in, when they have been given the choice — a

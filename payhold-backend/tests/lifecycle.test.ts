@@ -84,7 +84,10 @@ describe('the transition guard', () => {
          from unnest(enum_range(null::deal_status)) s(status)`,
     )
 
-    const terminal = ['refunded', 'expired', 'canceled']
+    // `settled_offline` is terminal for a reason the others are not: the money
+    // never came through PayHold at all. The seller was handed cash, so there
+    // is nothing left to release, pay out or reverse.
+    const terminal = ['refunded', 'expired', 'canceled', 'settled_offline']
     for (const row of rows) {
       if (terminal.includes(row.status)) {
         expect(row.n, `${row.status} should be terminal`).toBe(0)

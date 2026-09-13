@@ -148,6 +148,40 @@ async function create(
     }
   }
 
+  // ── Cash: a deal with no rail behind it ──────────────────────────────────
+  //
+  // Taken before any of the routing below, because none of it applies. There is
+  // no provider to choose, no currency a rail has to be able to collect, no FX
+  // to quote, no checkout session to open and no payout to schedule. The buyer
+  // is going to hand the seller money in person; PayHold's job is to remember
+  // what it was worth and, later, what was actually handed over.
+  //
+  // It goes through an RPC rather than an insert here so the row and its audit
+  // entry are written in one transaction — the same standing every other deal
+  // state change has, and the reason a cash deal cannot exist with nobody
+  // recorded as having opened it.
+  if (body.payment_method === 'cash') {
+    const { data, error } = await db.rpc('open_cash_deal', {
+      p_tenant: caller.tenant_id,
+      p_seller: body.seller_id,
+      p_buyer_ref: body.buyer_ref,
+      p_description: body.description,
+      p_amount: body.amount,
+      p_currency: body.currency,
+      // The buyer's market is still recorded — it is where the trip happens,
+      // and a seller's history is read by market whether or not a rail was
+      // involved. Defaulted to the seller's own country when the client has no
+      // opinion, which for a cash handover is nearly always right: both people
+      // are standing in the same place.
+      p_country: body.buyer_country ?? null,
+      p_actor: caller.actor,
+      p_expected_complete_at: body.expected_complete_at ?? null,
+      p_metadata: body.metadata ?? {},
+    })
+    if (error) throw rpcError(error, 'open this cash deal')
+    return json(req, shapeDeal(data as Record<string, unknown>))
+  }
+
   // Installment billing. `split_percent` alone charges that percentage now
   // and the rest on return; `overage_rate`/`overage_unit_seconds` alone
   // charges a late-return surcharge with no split at all. Independent knobs
@@ -913,6 +947,34 @@ Deno.serve(handler(async (req) => {
   // list must not confirm that another account's deal exists.
   if (req.method === 'POST' && id && action === 'cancel') {
     return await cancel(req, db, caller, id)
+  }
+
+  // `POST /v1/deals/:id/settle-cash` — the seller says what they were handed.
+  //
+  // The closing half of a cash deal, and the only way one ever leaves `created`.
+  // It records a number rather than moving one: no ledger entry, no payout, no
+  // fee. Zero is accepted and means the buyer never paid, which is a fact worth
+  // having rather than an error to swallow.
+  if (req.method === 'POST' && id && action === 'settle-cash') {
+    const body = await readJson<{ collected_amount?: number }>(req)
+    if (!Number.isInteger(body.collected_amount) || (body.collected_amount as number) < 0) {
+      throw new PayHoldError(
+        'policy_violation',
+        'collected_amount must be zero or a positive integer in minor units',
+      )
+    }
+    // Tenant scoping first, as `cancel` does — the 404 is what stops another
+    // account's deal id from being settleable, or from being confirmed to exist.
+    await getDeal(db, caller, id)
+
+    const { data, error } = await db.rpc('settle_cash_deal', {
+      p_deal: id,
+      p_tenant: caller.tenant_id,
+      p_collected: body.collected_amount,
+      p_actor: caller.actor,
+    })
+    if (error) throw rpcError(error, 'settle this cash deal')
+    return json(req, shapeDeal(data as Record<string, unknown>))
   }
 
   if (req.method === 'GET' && action === 'refunds') {
