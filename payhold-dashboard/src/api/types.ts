@@ -472,6 +472,16 @@ export interface Payout {
    * did not. Null on a payout that never got as far as being routed.
    */
   destination?: { masked_destination: string; payout_provider: string } | null
+  /**
+   * The rail's own words for where this transfer is, from the last poll —
+   * `batch SUCCESS · item UNCLAIMED · RECEIVER_UNCONFIRMED · …`.
+   *
+   * Displayed, never branched on: it is prose a provider is free to reword.
+   * `rail_status_at` is when they last said it, which is also the proof that
+   * something is still asking rather than that the job died.
+   */
+  rail_status?: string | null
+  rail_status_at?: Timestamp | null
   /** When it was stopped — by a rule, or by a person. */
   review_held_at: Timestamp | null
   /**

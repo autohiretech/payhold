@@ -39,12 +39,13 @@
 
 import type { SupabaseClient } from 'npm:@supabase/supabase-js@2'
 import { serviceClient } from '../_shared/auth.ts'
+import { dispatchPayout } from '../_shared/dispatch.ts'
 import { handler, json } from '../_shared/http.ts'
 import { loadProvider, type LoadedProvider } from '../_shared/load-provider.ts'
 import { lockedFxRate } from '../_shared/locked-fx-rate.ts'
 import { normaliseIp, recordContext } from '../_shared/request-context.ts'
 import { loadSettings } from '../_shared/settings.ts'
-import { PayHoldError } from '../_shared/types.ts'
+import { PayHoldError, type Payout } from '../_shared/types.ts'
 
 /** A path segment that is not a uuid cannot be a tenant, and must not reach a query. */
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
@@ -66,8 +67,29 @@ interface PayPalEvent {
     status?: string
     supplementary_data?: { related_ids?: { order_id?: string } }
     purchase_units?: { custom_id?: string }[]
+    /**
+     * Payout item events carry a different resource entirely: the item, its
+     * batch, and — the field that matters — `sender_item_id`, which is the
+     * payout id `release()` stamped on it. That is the only reference here
+     * that means anything to us; PayPal's ids are PayPal's.
+     */
+    payout_item?: { sender_item_id?: string }
+    payout_batch_id?: string
   }
 }
+
+/** Every item-level payout outcome PayPal reports. */
+const PAYOUT_ITEM_EVENTS = new Set([
+  'PAYMENT.PAYOUTS-ITEM.SUCCEEDED',
+  'PAYMENT.PAYOUTS-ITEM.FAILED',
+  'PAYMENT.PAYOUTS-ITEM.UNCLAIMED',
+  'PAYMENT.PAYOUTS-ITEM.RETURNED',
+  'PAYMENT.PAYOUTS-ITEM.DENIED',
+  'PAYMENT.PAYOUTS-ITEM.BLOCKED',
+  'PAYMENT.PAYOUTS-ITEM.REFUNDED',
+  'PAYMENT.PAYOUTS-ITEM.CANCELED',
+  'PAYMENT.PAYOUTS-ITEM.HELD',
+])
 
 /**
  * Our deal id, wherever this event happens to carry it.
@@ -236,9 +258,63 @@ Deno.serve(handler(async (req) => {
       .eq('event_id', eventId)
   }
 
+  /**
+   * A payout item has moved.
+   *
+   * **PayPal has been telling us this all along and we were dropping it.**
+   * `PAYMENT.PAYOUTS-ITEM.UNCLAIMED` arrived, signature verified, nine seconds
+   * after the transfer left — and fell into the "not a funding event" bin
+   * below, while `payout-dispatch` went on asking the same question by GET
+   * every five minutes for the next hour. On 2026-09-13 that gap was the whole
+   * difference between an operator learning where a seller's USD 1,660.70 was
+   * immediately and learning it on the next tick.
+   *
+   * **The body is not evidence, and this does not treat it as any.** It is a
+   * doorbell: find the payout the item names, then hand it to the very same
+   * `dispatchPayout` the cron runs, which re-asks PayPal through
+   * `transferStatus` and books through `settle_payout` / `fail_payout` under
+   * their own guards. One booking path, triggered sooner — not a second one
+   * that could disagree with the first.
+   */
+  if (PAYOUT_ITEM_EVENTS.has(event.event_type ?? '')) {
+    const payoutId = event.resource?.payout_item?.sender_item_id
+
+    if (!payoutId) {
+      await finished('Payout item event carries no sender_item_id')
+      return json(req, { status: 'ignored', reason: 'no payout reference' })
+    }
+
+    const { data: payout } = await db
+      .from('payouts')
+      // `select('*')` rather than a column list, deliberately: `dispatchPayout`
+      // decides between asking and sending on `provider_ref`, and picks its
+      // idempotency key from `send_seq`. A hand-maintained list here that
+      // missed either would re-POST a transfer PayPal already holds — which is
+      // exactly how this rail broke twice before.
+      .select('*')
+      .eq('id', payoutId)
+      .eq('tenant_id', tenantId)
+      .maybeSingle()
+
+    if (!payout) {
+      await finished(`No payout matches sender_item_id ${payoutId}`)
+      return json(req, { status: 'ignored', reason: 'unknown payout' })
+    }
+
+    const outcome = await dispatchPayout(db, payout as unknown as Payout)
+    await finished(`Payout item event handled: ${outcome}`)
+    return json(req, { status: 'ok', payout_id: payoutId, outcome })
+  }
+
   // Recorded and ignored rather than refused. PayPal sends far more than money
   // events, and failing an unrecognised one would make it retry something we
   // were never going to act on.
+  //
+  // Batch-level events (`PAYMENT.PAYOUTSBATCH.*`) stay here on purpose. A batch
+  // completing means PayPal finished processing it, not that anybody was paid —
+  // every one of our items was `UNCLAIMED` under a batch that reported SUCCESS —
+  // and booking a payment off one would be booking a payment that has not
+  // happened.
   if (!FUNDING_EVENTS.has(event.event_type ?? '')) {
     await finished(`Ignored event type ${event.event_type ?? 'unknown'}`)
     return json(req, { status: 'ignored', reason: 'not a funding event' })

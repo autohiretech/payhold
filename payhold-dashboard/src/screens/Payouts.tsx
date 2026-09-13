@@ -179,6 +179,26 @@ export function PayoutsPage() {
                           {p.failure_reason}
                         </p>
                       )}
+                      {/* **What the rail says, on the operator's screen.**
+                          It reached the seller-facing earnings page first,
+                          which is backwards: the seller can only read it, and
+                          the operator is the one who can cancel, re-route or
+                          chase. Until this line, "Processing" was the whole of
+                          what an operator saw against a payout PayPal was
+                          holding unclaimed and would return in thirty days —
+                          and the owner twice read a dispatched row as a
+                          completed one, which is exactly what a status word
+                          with no rail behind it invites. */}
+                      {p.rail_status && (
+                        <p className="mt-1 max-w-56 text-xs text-fg-muted">
+                          {p.rail_status}
+                          {p.rail_status_at && (
+                            <span className="text-fg-subtle">
+                              {' '}· asked {formatRelative(p.rail_status_at, now)}
+                            </span>
+                          )}
+                        </p>
+                      )}
                     </Td>
                     <Td align="right" className="tabular font-medium">
                       {formatMoney(p.amount, p.currency)}
