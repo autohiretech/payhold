@@ -49,6 +49,7 @@ import {
   useAudit,
   useCheckoutSessions,
   useDeal,
+  useSettings,
   useDealAmounts,
   useLedger,
   useMoneyAction,
@@ -60,6 +61,8 @@ import {
 export function DealDetailPage() {
   const { id = '' } = useParams()
   const deal = useDeal(id)
+  // Wallet mode changes what "ready to pay out" means, so the timeline needs it.
+  const settings = useSettings()
   const sellers = useSellers()
   const ledger = useLedger(id)
   const audit = useAudit(id)
@@ -114,7 +117,7 @@ export function DealDetailPage() {
 
       <div className="grid gap-5 lg:grid-cols-[1fr_20rem]">
         <div className="min-w-0 space-y-5">
-          <Timeline deal={d} now={now} />
+          <Timeline deal={d} now={now} walletMode={settings.data?.payout_mode === 'wallet'} />
 
           {refunds.data && refunds.data.length > 0 && (
             <Card>
@@ -703,7 +706,9 @@ interface Step {
  * in `released` is one where something is stopping it, and collapsing the two
  * would hide precisely the state somebody needs to see.
  */
-function Timeline({ deal, now }: { deal: Deal; now: Date }) {
+function Timeline(
+  { deal, now, walletMode }: { deal: Deal; now: Date; walletMode: boolean },
+) {
   const buyer = deal.confirmations.find((c) => c.side === 'buyer')
   const seller = deal.confirmations.find((c) => c.side === 'seller')
   const at = REACHED[deal.status]
@@ -802,7 +807,16 @@ function Timeline({ deal, now }: { deal: Deal; now: Date }) {
       tone: stage(4),
       detail:
         at === 4
-          ? 'The window has passed and the payout has not gone. Check the Payouts screen.'
+          // **In wallet mode nothing is wrong here, and the old sentence said
+          // there was.** `payout_mode = 'wallet'` is a deliberate setting:
+          // `due_payouts` excludes a cleared payout until somebody asks for it,
+          // so the cron will never pick this up and "the payout has not gone"
+          // read as a fault report about a system doing exactly what it was
+          // configured to do. The owner asked why a deal was stuck here twice
+          // before the setting turned out to be the whole answer.
+          ? walletMode
+            ? 'Cleared and waiting to be asked for — this tenant is on wallet payouts, so the seller requests it.'
+            : 'The window has passed and the payout has not gone. Check the Payouts screen.'
           : at > 4
             ? 'Cleared'
             : deal.payout_due_at && new Date(deal.payout_due_at) <= now
