@@ -1542,6 +1542,13 @@ export interface ProviderRequirement {
   fields: string[]
   /** Plain-language directions to the provider's own dashboard. */
   where: string
+  /**
+   * Where this rail must send its events for this company — the inbound
+   * webhook address, per tenant. Registered in the provider's dashboard with
+   * the same secret the form asks for. Optional only for a dashboard deployed
+   * ahead of its backend; the endpoint always returns it.
+   */
+  webhook_url?: string
 }
 
 export interface ConnectProviderInput {

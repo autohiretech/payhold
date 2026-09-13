@@ -78,6 +78,27 @@ const REQUIRED_FIELDS: Record<string, { fields: string[]; where: string }> = {
   },
 }
 
+/**
+ * Where a rail must send its events for this tenant.
+ *
+ * Every inbound webhook function is named `<provider>-webhook` and takes the
+ * tenant id as its path segment — `flutterwave-webhook/index.ts` explains why
+ * the tenant is in the path at all. Nothing else ever printed that address,
+ * so an operator registering a webhook in Flutterwave's dashboard had to
+ * assemble it from a project ref and a tenant id they had no screen for; on
+ * the linked project the first Flutterwave-funded deals were settled by the
+ * buyer's page polling `/confirm`, not by a webhook, because none was ever
+ * registered. The URL is a fact about this deployment and this tenant, so it
+ * is computed here rather than transcribed anywhere.
+ *
+ * `SUPABASE_URL` is the project's public origin in the hosted runtime
+ * (`https://<ref>.supabase.co`), which is the one a provider can reach.
+ */
+function webhookUrlFor(provider: string, tenantId: string): string {
+  const origin = (Deno.env.get('SUPABASE_URL') ?? '').replace(/\/+$/, '')
+  return `${origin}/functions/v1/${provider}-webhook/${tenantId}`
+}
+
 async function listAccounts(
   req: Request,
   db: SupabaseClient,
@@ -103,6 +124,9 @@ async function listAccounts(
         provider,
         fields: meta.fields,
         where: meta.where,
+        // The address to register with the provider, beside the fields the
+        // provider's own page hands back — the two halves of one setup.
+        webhook_url: webhookUrlFor(provider, caller.tenant_id),
       })),
     },
   )

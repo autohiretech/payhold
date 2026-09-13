@@ -81,6 +81,75 @@ const SECRET_FIELDS = new Set([
   'client_secret',
 ])
 
+/**
+ * The address the provider has to be told about, and the one part of connecting
+ * a rail that happens on *their* dashboard rather than this one.
+ *
+ * Every inbound webhook is `<provider>-webhook/<tenant>` on this deployment,
+ * and until this was rendered nobody could read that off any screen — the
+ * first Flutterwave-funded deals on the linked project were settled by the
+ * buyer's page polling `/confirm`, because no webhook had ever been registered.
+ * The poll and the five-minute settlement sweep keep a payment from being lost,
+ * but the webhook is what makes it land in seconds, and a transfer settling on
+ * the payout side is reported by nothing else in real time.
+ *
+ * Shown with the connected rail's buttons and again inside the form, next to
+ * the secret-hash field it pairs with: the provider's page asks for this URL
+ * and hands back that secret in the same breath.
+ */
+function WebhookAddress({
+  provider,
+  url,
+  inForm,
+}: {
+  provider: Provider
+  url: string
+  inForm?: boolean
+}) {
+  const [copied, setCopied] = useState(false)
+
+  return (
+    <div className={cx('w-full', inForm ? '' : 'mt-3')}>
+      <p className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-fg-subtle">
+        Webhook address
+      </p>
+      <div className="relative overflow-hidden rounded-lg border border-line bg-surface-2">
+        <button
+          type="button"
+          onClick={() => {
+            void navigator.clipboard?.writeText(url)
+            setCopied(true)
+            window.setTimeout(() => setCopied(false), 1500)
+          }}
+          className={cx(
+            'absolute right-2 top-2 rounded-md px-2 py-1 text-xs font-medium',
+            'ring-1 ring-inset transition',
+            copied
+              ? 'bg-released-soft text-released ring-released/30'
+              : 'bg-surface text-fg-muted ring-line hover:text-fg',
+          )}
+        >
+          {copied ? 'Copied' : 'Copy'}
+        </button>
+        <pre className="overflow-x-auto px-3 py-2.5 pr-16 text-xs leading-relaxed text-fg">
+          <code className="font-mono">{url}</code>
+        </pre>
+      </div>
+      <p className="mt-1.5 text-xs leading-relaxed text-fg-muted">
+        Register this in {PROVIDER_LABEL[provider]}’s dashboard as the webhook
+        URL
+        {provider === 'flutterwave'
+          ? ', with the same secret hash you enter here. Without it a payment ' +
+            'still settles — the buyer’s page asks, and a sweep re-checks every ' +
+            'five minutes — but only this reports a payout landing.'
+          : provider === 'stripe'
+          ? ', and paste the signing secret it shows you above.'
+          : ', and enter the webhook ID it is given above.'}
+      </p>
+    </div>
+  )
+}
+
 export function ConnectProvider({
   provider,
   requirement,
@@ -137,6 +206,10 @@ export function ConnectProvider({
 
         {disconnect.error && (
           <p className="w-full text-sm text-refunded">{disconnect.error.message}</p>
+        )}
+
+        {connected && requirement.webhook_url && (
+          <WebhookAddress provider={provider} url={requirement.webhook_url} />
         )}
       </div>
     )
@@ -199,6 +272,10 @@ export function ConnectProvider({
         <p className="rounded-lg bg-surface px-3 py-2 text-xs leading-relaxed text-fg-muted">
           Find these at {requirement.where}.
         </p>
+
+        {requirement.webhook_url && (
+          <WebhookAddress provider={provider} url={requirement.webhook_url} inForm />
+        )}
 
         {connect.error && (
           <p
