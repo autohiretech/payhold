@@ -471,6 +471,26 @@ export class StripeProvider implements PaymentProvider {
     // resolved silently lost its fee, and the next reconcile re-froze them.
     const fee = await this.resolveProviderFee(intent, charge)
 
+    // `null` is "we could not find out", and it must not travel on as money.
+    // Booked as zero, because the ledger needs a number and an invented one is
+    // worse — but said out loud, because the difference between this and a
+    // genuinely free charge is real revenue, and until now the two were the
+    // same silent zero. Reconciliation reads the gap as drift against Stripe's
+    // real balance and freezes payouts over it; this is the line that lets
+    // somebody find out why before that happens.
+    if (fee === null) {
+      console.error('stripe did not state a fee for this charge', {
+        provider_ref: providerRef,
+        intent: intent.id,
+        latest_charge: typeof intent.latest_charge === 'string'
+          ? intent.latest_charge
+          : intent.latest_charge?.id,
+        message:
+          'Booked as 0. Stripe returned no balance-transaction fee after retrying, ' +
+          'so the ledger may understate what this payment cost.',
+      })
+    }
+
     return {
       provider_ref: providerRef,
       // `amount_received` is what actually arrived; `amount` is what was asked
@@ -489,7 +509,11 @@ export class StripeProvider implements PaymentProvider {
         charge?.payment_method_details?.type ?? intent.payment_method_types?.[0],
       ),
       network: charge?.payment_method_details?.card?.brand ?? null,
-      fee,
+      // Zero where the answer is unknown, with the console line above saying
+      // so. `VerifiedTransaction.fee` is a number by contract because
+      // `fund_deal` books it, and a nullable one would push the same decision
+      // into every caller.
+      fee: fee ?? 0,
       // Only once the charge has actually succeeded — an authorized-but-
       // unconfirmed method is not what "saved" is supposed to mean, and
       // `chargeSaved` would fail against it anyway. Encoded as one opaque
@@ -502,33 +526,48 @@ export class StripeProvider implements PaymentProvider {
   }
 
   /**
-   * Resolves the fee Stripe actually took, fetching the balance transaction
-   * whenever the verify re-fetch only returned ids. Returns 0 only when there
-   * is genuinely nothing to read after retrying — never a guessed amount.
+   * The fee Stripe actually took, or `null` when we could not find out.
    *
-   * The retry is the fix for a real incident, not defensive padding. A charge
+   * **Zero and unknown are different answers and this used to give the same
+   * one for both.** Every path ended in `?? 0`, so a balance transaction that
+   * came back without a `fee` key, or a charge whose transaction never
+   * attached, was recorded as "Stripe charged nothing" — indistinguishable
+   * from a genuinely free payment. On 2026-09-13 a live USD 320.00 Checkout
+   * charge booked `provider_fee: 0`, and nothing anywhere said whether Stripe
+   * had really taken nothing or whether we had failed to ask. The owner's
+   * revenue read $32.00 when the truth was nearer $22.42, and the difference
+   * came quietly out of the Stripe balance.
+   *
+   * So the three real outcomes are now three values: a number Stripe stated,
+   * `0` where Stripe stated zero, and `null` where the question could not be
+   * answered. The caller decides what to do with `null`; what it must not do
+   * is print it as money.
+   *
+   * The retry is the fix for an earlier incident and is unchanged. A charge
    * can succeed — and its webhook fire — before Stripe has attached a balance
-   * transaction to it at all, not just before it was expanded inline: in that
-   * window `charge.balance_transaction` is `null`, not an id, so there is
-   * nothing here to fetch by id either. `fund_deal` calls this exactly once,
-   * so a fee missed in that window was booked as 0 forever — the ledger then
-   * permanently overstated Stripe's real balance by exactly the missing fee,
-   * which is what reconciliation was catching, one deal at a time, as
-   * "drift". Retrying a few times, a second or two apart, covers Stripe's
-   * normal attachment lag without turning a webhook handler into a long poll.
+   * transaction to it at all: in that window `charge.balance_transaction` is
+   * `null`, not an id, so there is nothing to fetch by id either. `fund_deal`
+   * calls this exactly once, so a fee missed there was booked as 0 forever,
+   * the ledger permanently overstated Stripe's real balance by the missing
+   * fee, and reconciliation caught it one deal at a time as "drift".
    */
   private async resolveProviderFee(
     intent: StripeIntent,
     charge: StripeCharge | null,
-  ): Promise<number> {
+  ): Promise<number | null> {
+    // A balance transaction with no `fee` key is not a fee of zero. Stripe
+    // always states `fee` on one it has priced, so its absence means this
+    // object is not the answer — reading it as 0 is the whole bug.
+    const stated = (txn: { fee?: number } | null | undefined): number | null =>
+      txn && typeof txn.fee === 'number' ? txn.fee : null
+
     if (charge && charge.balance_transaction && typeof charge.balance_transaction === 'object') {
-      return charge.balance_transaction.fee ?? 0
+      return stated(charge.balance_transaction)
     }
     if (charge && typeof charge.balance_transaction === 'string') {
-      const txn = await this.call<{ fee?: number }>(
-        `/balance_transactions/${charge.balance_transaction}`,
+      return stated(
+        await this.call<{ fee?: number }>(`/balance_transactions/${charge.balance_transaction}`),
       )
-      return txn?.fee ?? 0
     }
     if (typeof intent.latest_charge === 'string') {
       for (let attempt = 0; attempt < PROVIDER_FEE_RETRIES; attempt++) {
@@ -536,20 +575,19 @@ export class StripeProvider implements PaymentProvider {
           `/charges/${intent.latest_charge}?expand[]=balance_transaction`,
         )
         if (ch && ch.balance_transaction && typeof ch.balance_transaction === 'object') {
-          return ch.balance_transaction.fee ?? 0
+          return stated(ch.balance_transaction)
         }
         if (ch && typeof ch.balance_transaction === 'string') {
-          const txn = await this.call<{ fee?: number }>(
-            `/balance_transactions/${ch.balance_transaction}`,
+          return stated(
+            await this.call<{ fee?: number }>(`/balance_transactions/${ch.balance_transaction}`),
           )
-          return txn?.fee ?? 0
         }
         if (attempt < PROVIDER_FEE_RETRIES - 1) {
           await delay(PROVIDER_FEE_RETRY_DELAY_MS)
         }
       }
     }
-    return 0
+    return null
   }
 
   private async intentForSession(sessionId: string): Promise<StripeIntent | null> {

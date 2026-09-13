@@ -73,7 +73,15 @@ const ADMIN_PAYOUT_COLUMNS =
   // `provider_ref` here once already turned a manual "Send it now" into a
   // re-POST of a transfer PayPal was holding; `send_seq` decides the
   // idempotency key of the next send and would fail the same way.
-  'rail_status, rail_status_at, send_seq'
+  //
+  // `destination_id` is here for the third instance of the same mistake, made
+  // an hour after that comment was written: `cancel-at-rail` resolves the rail
+  // through the destination the payout actually went to, and with the column
+  // missing every cancel refused with "this payout has no destination on
+  // file". A hand-maintained list cannot be kept right by remembering to; the
+  // only reliable fix is that it stops being hand-maintained, which is a
+  // change bigger than this one.
+  'rail_status, rail_status_at, send_seq, destination_id'
 
 const DELIVERY_COLUMNS =
   'id, tenant_id, endpoint_id, event, deal_id, status, attempts, status_code, ' +

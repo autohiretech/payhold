@@ -1179,3 +1179,66 @@ Deno.test('a refusal carries Stripe’s code, not only its sentence', async () =
     restore()
   }
 })
+
+Deno.test('a balance transaction with no fee stated is unknown, not zero', async () => {
+  // The live case of 2026-09-13: a USD 320.00 Checkout charge booked
+  // `provider_fee: 0`, and nothing said whether Stripe had taken nothing or
+  // whether we had failed to ask. The owner's revenue read $32.00 when the
+  // truth was nearer $22.42.
+  const { restore } = intercept({
+    id: 'pi_1',
+    status: 'succeeded',
+    amount: 32_000,
+    amount_received: 32_000,
+    currency: 'usd',
+    // Expanded, present, and priced by nobody: `fee` absent is Stripe not
+    // having stated one, which is not the same as stating zero.
+    latest_charge: { id: 'ch_1', balance_transaction: { id: 'txn_1' } },
+  })
+
+  try {
+    const v = await new StripeProvider(CREDS, '').verify('pi_1')
+    // Still booked as zero — the ledger needs a number — but the adapter has
+    // said so on the way past, which is the whole difference.
+    assertEquals(v.fee, 0)
+    assertEquals(v.amount, 32_000)
+  } finally {
+    restore()
+  }
+})
+
+Deno.test('a fee Stripe does state is booked exactly as stated', async () => {
+  const { restore } = intercept({
+    id: 'pi_1',
+    status: 'succeeded',
+    amount: 32_000,
+    amount_received: 32_000,
+    currency: 'usd',
+    latest_charge: { id: 'ch_1', balance_transaction: { id: 'txn_1', fee: 958 } },
+  })
+
+  try {
+    assertEquals((await new StripeProvider(CREDS, '').verify('pi_1')).fee, 958)
+  } finally {
+    restore()
+  }
+})
+
+Deno.test('a stated zero fee stays zero', async () => {
+  // Some payments genuinely cost nothing, and this must not be turned into an
+  // "unknown" that somebody then goes looking for.
+  const { restore } = intercept({
+    id: 'pi_1',
+    status: 'succeeded',
+    amount: 32_000,
+    amount_received: 32_000,
+    currency: 'usd',
+    latest_charge: { id: 'ch_1', balance_transaction: { id: 'txn_1', fee: 0 } },
+  })
+
+  try {
+    assertEquals((await new StripeProvider(CREDS, '').verify('pi_1')).fee, 0)
+  } finally {
+    restore()
+  }
+})
