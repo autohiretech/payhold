@@ -1096,3 +1096,86 @@ Deno.test('balances survives an unreadable /account rather than failing the whol
     globalThis.fetch = original
   }
 })
+
+Deno.test('an account Stripe is still waiting on says what it is waiting for', async () => {
+  // The Stripe-shaped version of the bare "UNCLAIMED" that left a PayPal
+  // seller guessing for a day. `payouts_enabled: false` is identical for a
+  // seller asked for one more document and a seller whose account was
+  // rejected, and the difference is the whole of what they should do next.
+  const { restore } = intercept({
+    payouts_enabled: false,
+    details_submitted: true,
+    country: 'US',
+    requirements: {
+      disabled_reason: 'requirements.past_due',
+      past_due: ['individual.verification.document'],
+      currently_due: ['individual.id_number'],
+      errors: [{
+        requirement: 'individual.verification.document',
+        code: 'verification_document_not_readable',
+        reason: 'The uploaded file is blurry.',
+      }],
+    },
+  })
+
+  try {
+    const status = await new StripeProvider(CREDS, '').connectAccountStatus('acct_1')
+
+    assertEquals(status.payoutsEnabled, false)
+    assertEquals(status.currentlyDue, ['individual.id_number'])
+    assertEquals(
+      status.detail,
+      'requirements.past_due · past due: individual.verification.document · ' +
+        'currently due: individual.id_number · ' +
+        'individual.verification.document — verification_document_not_readable — ' +
+        'The uploaded file is blurry.',
+    )
+  } finally {
+    restore()
+  }
+})
+
+Deno.test('an account with nothing outstanding reports no reason at all', async () => {
+  const { restore } = intercept({ payouts_enabled: true, details_submitted: true })
+
+  try {
+    const status = await new StripeProvider(CREDS, '').connectAccountStatus('acct_1')
+    // Not an empty string: there is genuinely nothing to say, and a caller
+    // rendering "reason: " with nothing after it is worse than rendering none.
+    assertEquals(status.detail, null)
+    assertEquals(status.currentlyDue, [])
+  } finally {
+    restore()
+  }
+})
+
+Deno.test('a refusal carries Stripe’s code, not only its sentence', async () => {
+  // `balance_insufficient` is the one an operator can fix in a minute — top the
+  // platform balance up and re-issue, because Stripe explicitly does not retry
+  // a transfer that failed for funds. The prose alone reads like every other
+  // refusal.
+  const { restore } = intercept(
+    { error: { message: 'Insufficient funds in your Stripe balance.', code: 'balance_insufficient' } },
+    402,
+  )
+
+  try {
+    const err = await assertRejects(
+      () =>
+        new StripeProvider(CREDS, '').release({
+          payout_id: 'p1',
+          beneficiary_token: 'acct_1',
+          amount: 10_000,
+          currency: 'USD',
+          idempotency_key: 'payout:p1',
+        }),
+      PayHoldError,
+    )
+    assertEquals(
+      err.message,
+      'Stripe: Insufficient funds in your Stripe balance. (balance_insufficient)',
+    )
+  } finally {
+    restore()
+  }
+})

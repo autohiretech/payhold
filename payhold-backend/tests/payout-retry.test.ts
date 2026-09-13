@@ -328,3 +328,90 @@ describe('an async rail retried', () => {
     expect(p.status).toBe('processing')
   })
 })
+
+describe('a transfer the rail gave back can be sent again', () => {
+  test('clearing the rail leg forgets the reference and moves the send sequence', async () => {
+    // Two things stopped a returned payout from ever being re-sent, and they
+    // compounded: `provider_ref` stayed set, so every pass polled a transfer
+    // that no longer existed instead of sending a live one; and the
+    // idempotency key was `payout:<id>` forever, so even with the reference
+    // gone PayPal would refuse the second send as a duplicate batch — the
+    // exact error the whole investigation started from.
+    const s = await seedPayout()
+    await h.db.query(
+      `update payouts set status = 'failed', provider_ref = 'RM2Z57VLX2BJ8',
+              rail_status = 'batch SUCCESS · item RETURNED'
+        where id = $1`,
+      [s.payout],
+    )
+
+    await h.db.query(`select clear_payout_rail_leg($1, 'returned unclaimed')`, [s.payout])
+
+    const { rows: [p] } = await h.db.query<{
+      provider_ref: string | null
+      rail_status: string | null
+      send_seq: number
+      status: string
+    }>(
+      `select provider_ref, rail_status, send_seq, status from payouts where id = $1`,
+      [s.payout],
+    )
+
+    expect(p.provider_ref).toBeNull()
+    expect(p.rail_status).toBeNull()
+    expect(p.send_seq).toBe(1)
+    // The ladder is fail_payout's business, not this function's.
+    expect(p.status).toBe('failed')
+  })
+
+  test('the old reference survives in the audit log', async () => {
+    // It is the only remaining link between this payout and a transfer the
+    // rail still has records of, and "which batch was that" is the first
+    // question anybody asks when reconciling a return.
+    const s = await seedPayout()
+    await h.db.query(
+      `update payouts set status = 'failed', provider_ref = 'RM2Z57VLX2BJ8' where id = $1`,
+      [s.payout],
+    )
+
+    await h.db.query(`select clear_payout_rail_leg($1, 'returned unclaimed')`, [s.payout])
+
+    const { rows } = await h.db.query<{ details: Record<string, unknown> }>(
+      `select details from audit_log where action = 'payout.rail_leg_cleared'
+         and details ->> 'payout_id' = $1`,
+      [s.payout],
+    )
+    expect(rows).toHaveLength(1)
+    expect(rows[0].details.reason).toBe('returned unclaimed')
+  })
+
+  test('a transfer the rail still holds cannot be forgotten', async () => {
+    // The accident `provider_ref` exists to prevent: clearing it while the
+    // money is in flight would let a second transfer be sent against it.
+    const s = await seedPayout()
+    await h.db.query(
+      `update payouts set status = 'processing', provider_ref = 'RM2Z57VLX2BJ8' where id = $1`,
+      [s.payout],
+    )
+
+    await rejects(
+      () => h.db.query(`select clear_payout_rail_leg($1, 'no')`, [s.payout]),
+      /must not be cleared/,
+    )
+  })
+
+  test('a payout that never reached a rail is left exactly as it is', async () => {
+    const s = await seedPayout()
+    await h.db.query(`update payouts set status = 'failed' where id = $1`, [s.payout])
+
+    await h.db.query(`select clear_payout_rail_leg($1, 'nothing to clear')`, [s.payout])
+
+    const { rows: [p] } = await h.db.query<{ send_seq: number }>(
+      `select send_seq from payouts where id = $1`,
+      [s.payout],
+    )
+    // No phantom re-send: the sequence only moves when a real transfer is
+    // being forgotten, or the next key would skip a number for no reason.
+    expect(p.send_seq).toBe(0)
+  })
+})

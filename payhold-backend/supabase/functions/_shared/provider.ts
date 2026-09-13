@@ -734,6 +734,24 @@ export interface PaymentProvider {
   transferStatus?(providerRef: string): Promise<TransferStatusResult>
 
   /**
+   * Ask the rail to give back a transfer it is holding but has not delivered.
+   *
+   * Optional, and rare: most rails have no such call, and on the ones that do
+   * it applies only while the money is in a specific limbo. PayPal's case is
+   * an item sitting UNCLAIMED — sent to somebody with no account, who has 30
+   * days to sign up before it returns on its own. Cancelling is how an
+   * operator says "that address was wrong, give it back now" rather than
+   * waiting out the month with the seller's money in the air.
+   *
+   * **It does not book anything.** The rail is asked; the next
+   * `transferStatus` poll observes the result and the ordinary failure path
+   * books it, clears the dead reference and lets the payout be sent again.
+   * Booking here as well would be the same money recorded twice by two code
+   * paths that could disagree.
+   */
+  cancelTransfer?(providerRef: string): Promise<{ detail: string }>
+
+  /**
    * What this rail will convert a corridor at, right now.
    *
    * Optional for the same reason `banks` is: it is a real capability of a rail

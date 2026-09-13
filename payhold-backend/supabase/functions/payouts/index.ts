@@ -35,7 +35,10 @@ const PAYOUT_COLUMNS =
   // endpoints and made a manual "Send it now" re-POST a transfer PayPal
   // already held; a field the client renders has to be in every list that
   // feeds a client.
-  'rail_status, rail_status_at, fx_from_amount, fx_from_currency, fx_rate, fx_rate_source'
+  'rail_status, rail_status_at, fx_from_amount, fx_from_currency, fx_rate, fx_rate_source, ' +
+  // Decides the idempotency key of the next send. A stale one rebuilds the key
+  // of a batch the rail already holds.
+  'send_seq'
 
 async function getPayout(
   db: SupabaseClient,

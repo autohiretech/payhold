@@ -11,6 +11,7 @@
  *   GET  /admin/cron-runs                        what each scheduled job did, and when
  *   GET  /admin/payouts                          one tenant's payouts, all of them
  *   POST /admin/payouts/:id/retry                re-attempt one the provider refused
+ *   POST /admin/payouts/:id/cancel-at-rail       ask the rail to give back a transfer it holds
  *   GET  /admin/webhook-deliveries               every client notification attempt
  *   POST /admin/webhook-deliveries/:id/retry     send one again now
  *
@@ -42,8 +43,9 @@ import type { SupabaseClient } from 'npm:@supabase/supabase-js@2'
 import { platformAdminFromJwt, serviceClient } from '../_shared/auth.ts'
 import { dispatchPayout } from '../_shared/dispatch.ts'
 import { handler, json, readJson } from '../_shared/http.ts'
+import { loadProvider } from '../_shared/load-provider.ts'
 import { reconcileAll } from '../_shared/reconciliation.ts'
-import { PayHoldError, type Payout } from '../_shared/types.ts'
+import { PayHoldError, type Payout, type Provider } from '../_shared/types.ts'
 
 const ALERT_COLUMNS =
   'id, tenant_id, provider, currency, ledger_balance, provider_balance, drift, ' +
@@ -65,7 +67,13 @@ const CRON_RUN_COLUMNS =
 // never sent, and re-sends it.
 const ADMIN_PAYOUT_COLUMNS =
   'id, tenant_id, deal_id, seller_id, amount, currency, status, scheduled_for, ' +
-  'paid_at, failure_reason, attempts, next_attempt_at, provider_ref, created_at'
+  'paid_at, failure_reason, attempts, next_attempt_at, provider_ref, created_at, ' +
+  // This list is handed straight to `dispatchPayout` by the retry route, so a
+  // field that decides how a payout is sent has to be in it. Omitting
+  // `provider_ref` here once already turned a manual "Send it now" into a
+  // re-POST of a transfer PayPal was holding; `send_seq` decides the
+  // idempotency key of the next send and would fail the same way.
+  'rail_status, rail_status_at, send_seq'
 
 const DELIVERY_COLUMNS =
   'id, tenant_id, endpoint_id, event, deal_id, status, attempts, status_code, ' +
@@ -290,6 +298,123 @@ async function listAdminPayouts(req: Request, db: SupabaseClient): Promise<Respo
 }
 
 /**
+ * Ask the rail to give back a transfer it is holding but has not delivered.
+ *
+ * The case this exists for: PayPal accepted a payout, could not deliver it —
+ * the address has no PayPal account — and is holding it `UNCLAIMED` for thirty
+ * days before returning it. The seller's money is in the air for a month over
+ * a typo, and the operator who can see that has, until now, had no way to say
+ * "give it back, we will send it properly".
+ *
+ * **It books nothing, deliberately.** The rail is asked and that is all. The
+ * next dispatch pass polls, sees the transfer terminally failed, and the
+ * ordinary failure path books it, clears the dead reference and lets the
+ * payout be sent again under a fresh idempotency key. Two paths writing the
+ * same money is how they come to disagree.
+ *
+ * Refused on a paid payout, because there is nothing there to cancel and the
+ * question usually means somebody has the wrong row.
+ */
+async function cancelAtRail(
+  req: Request,
+  db: SupabaseClient,
+  payoutId: string,
+  actor: string,
+): Promise<Response> {
+  const { data, error } = await db
+    .from('payouts')
+    .select(ADMIN_PAYOUT_COLUMNS)
+    .eq('id', payoutId)
+    .maybeSingle()
+  if (error) throw new Error(`payout lookup failed: ${error.message}`)
+  if (!data) throw new PayHoldError('not_found', `Payout ${payoutId} not found`)
+
+  const payout = data as unknown as Payout
+
+  if (payout.status === 'paid') {
+    throw new PayHoldError('invalid_state', 'This payout has already been sent')
+  }
+  if (!payout.provider_ref) {
+    throw new PayHoldError(
+      'invalid_state',
+      'This payout never reached a rail, so there is nothing to cancel',
+    )
+  }
+
+  // Which rail actually holds it: the destination the payout went to, then the
+  // adapter behind that rail. `payout_routes` is where that second mapping
+  // lives — the same table `route_payout` reads — rather than a second copy of
+  // it here, because a rail this file thought was Stripe and routing thought
+  // was Flutterwave would be a cancel sent to the wrong provider.
+  const { data: dest } = await db
+    .from('seller_destinations')
+    .select('payout_provider')
+    .eq('id', payout.destination_id ?? '')
+    .maybeSingle()
+
+  const rail = (dest as { payout_provider?: string } | null)?.payout_provider
+
+  if (!rail) {
+    throw new PayHoldError(
+      'invalid_state',
+      'This payout has no destination on file, so there is no rail to ask',
+    )
+  }
+
+  const { data: route } = await db
+    .from('payout_routes')
+    .select('provider, tenant_id')
+    .eq('payout_provider', rail)
+    .or(`tenant_id.eq.${payout.tenant_id},tenant_id.is.null`)
+    // A tenant's own row replaces the platform default, so it must win.
+    .order('tenant_id', { ascending: false, nullsFirst: false })
+    .limit(1)
+    .maybeSingle()
+
+  const adapter = (route as { provider?: string } | null)?.provider
+
+  if (!adapter) {
+    throw new PayHoldError(
+      'invalid_state',
+      `${rail} has no adapter behind it, so there is nothing to ask`,
+    )
+  }
+
+  const { provider } = await loadProvider(db, payout.tenant_id, adapter as Provider)
+
+  if (!provider.cancelTransfer) {
+    throw new PayHoldError(
+      'policy_violation',
+      `${rail} cannot cancel a transfer it has already accepted`,
+    )
+  }
+
+  const result = await provider.cancelTransfer(payout.provider_ref)
+
+  await db.rpc('write_audit', {
+    p_tenant: payout.tenant_id,
+    p_deal: payout.deal_id,
+    p_actor: actor,
+    p_action: 'payout.cancel_requested_at_rail',
+    p_details: {
+      payout_id: payout.id,
+      provider_ref: payout.provider_ref,
+      rail,
+      result: result.detail,
+    },
+  })
+
+  return json(req, {
+    payout_id: payout.id,
+    cancelled: true,
+    detail: result.detail,
+    note:
+      'The rail was asked. The next dispatch pass will observe the result and ' +
+      'book it; nothing has been written to the ledger here.',
+  })
+}
+
+/**
  * Re-attempt one payout across tenants — the twin of `/payouts/:id/retry`,
  * with the scope column dropped. The refusal set is identical: a paid payout
  * is spent, a held one must go through review, a verification stop is the
@@ -476,6 +601,9 @@ Deno.serve(handler(async (req) => {
     }
     if (resource === 'payouts' && id && action === 'retry') {
       return await retryPayout(req, db, id, admin.actor)
+    }
+    if (resource === 'payouts' && id && action === 'cancel-at-rail') {
+      return await cancelAtRail(req, db, id, admin.actor)
     }
     if (resource === 'webhook-deliveries' && id && action === 'retry') {
       return await retryDelivery(req, db, id, admin.actor)

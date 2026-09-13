@@ -536,6 +536,12 @@ export interface Payout {
   fx_from_currency?: Currency | null
   fx_rate?: number | null
   fx_rate_source?: string | null
+  /**
+   * How many times this payout has been handed to a rail as a NEW transfer.
+   * Zero until one is genuinely re-sent, which keeps the original idempotency
+   * key unchanged for everything already in flight.
+   */
+  send_seq?: number
 }
 
 // ---------------------------------------------------------------------------

@@ -755,9 +755,14 @@ export class PayPalProvider implements PaymentProvider {
     const details = await this.call<{
       batch_header?: { batch_status?: string }
       items?: {
+        payout_item_id?: string
         transaction_status?: string
         payout_item_fee?: AmountShape
         payout_item?: { amount?: AmountShape }
+        // Per item, and this is where the actual reason lives. A batch can be
+        // SUCCESS with its one item stopped, and the word "UNCLAIMED" does not
+        // say why it is unclaimed — `errors.name` does.
+        errors?: { name?: string; message?: string }
       }[]
     }>(`/v1/payments/payouts/${encodeURIComponent(providerRef)}`, { method: 'GET' })
 
@@ -776,13 +781,30 @@ export class PayPalProvider implements PaymentProvider {
     const batch = (details.batch_header?.batch_status ?? '').toUpperCase()
     const txn = (item?.transaction_status ?? '').toUpperCase()
 
-    // PayPal's own two words, carried back untranslated. Both levels, because
-    // both decide above and a seller reading "batch SUCCESS" with no item
-    // status would think they had been paid.
+    // PayPal's own words, carried back untranslated. Both levels, because both
+    // decide above and a seller reading "batch SUCCESS" with no item status
+    // would think they had been paid.
+    //
+    // **And the item's error, which is the part that actually explains
+    // anything.** `batch SUCCESS, item UNCLAIMED` is what this reported on its
+    // first day in production, and it left everyone — the seller, the operator
+    // and me — guessing why. The answer was sitting one field away the whole
+    // time: `RECEIVER_UNREGISTERED — The recipient for this payout does not
+    // have an account. A link to sign up was sent... if the recipient does not
+    // claim this payout within 30 days, the funds will be returned`. A status
+    // word says where a transfer is; `errors` says what to do about it, and in
+    // production it is where every real reason will live.
+    //
+    // The item id rides along because it is what an operator needs to act on
+    // one — PayPal's cancel call is addressed to the item, not the batch.
+    const err = item?.errors
     const detail = [
       batch && `batch ${batch}`,
       txn && `item ${txn}`,
-    ].filter(Boolean).join(', ') || undefined
+      err?.name,
+      err?.message?.trim(),
+      item?.payout_item_id && `item id ${item.payout_item_id}`,
+    ].filter(Boolean).join(' · ') || undefined
     const confirmedWithDetail = { ...confirmed, detail }
 
     // The batch never reached the rails at all.
@@ -808,6 +830,51 @@ export class PayPalProvider implements PaymentProvider {
     }
 
     return { status: 'pending', ...confirmedWithDetail }
+  }
+
+  /**
+   * Cancel an unclaimed payout item and get the money back now.
+   *
+   * PayPal's cancel is addressed to the **item**, not the batch we hold a
+   * reference to, so the item id is read off the batch first rather than
+   * stored — one lookup, and no second identifier to keep in step with the
+   * first. `POST /v1/payments/payouts-item/:id/cancel`, documented on
+   * developer.paypal.com (read 2026-09-13).
+   *
+   * Only an `UNCLAIMED` item can be cancelled and PayPal refuses the rest, so
+   * the refusal is left to them rather than second-guessed here: their answer
+   * is authoritative about their own state and ours would be a guess a moment
+   * out of date. What this will not do is pretend: an item PayPal has already
+   * delivered stays delivered, and the caller hears why.
+   *
+   * Books nothing. The next `transferStatus` poll sees `RETURNED` and the
+   * ordinary failure path does the accounting.
+   */
+  async cancelTransfer(providerRef: string): Promise<{ detail: string }> {
+    const details = await this.call<{
+      items?: { payout_item_id?: string; transaction_status?: string }[]
+    }>(`/v1/payments/payouts/${encodeURIComponent(providerRef)}`, { method: 'GET' })
+
+    const item = details.items?.[0]
+    const itemId = item?.payout_item_id
+
+    if (!itemId) {
+      throw new PayHoldError(
+        'invalid_state',
+        `PayPal batch ${providerRef} has no item to cancel`,
+      )
+    }
+
+    const cancelled = await this.call<{ transaction_status?: string }>(
+      `/v1/payments/payouts-item/${encodeURIComponent(itemId)}/cancel`,
+      { method: 'POST' },
+    )
+
+    return {
+      detail: `item ${itemId} cancelled, now ${
+        cancelled.transaction_status ?? 'awaiting confirmation'
+      }`,
+    }
   }
 
   /**

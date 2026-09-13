@@ -1064,7 +1064,7 @@ Deno.test('a pending batch says where it actually is, in PayPal’s own words', 
     const got = await pp.transferStatus!('RM2Z57VLX2BJ8')
 
     assertEquals(got.status, 'pending')
-    assertEquals(got.detail, 'batch PENDING, item UNCLAIMED')
+    assertEquals(got.detail, 'batch PENDING · item UNCLAIMED')
   } finally {
     restore()
   }
@@ -1079,7 +1079,69 @@ Deno.test('both levels are reported even when the item alone decides', async () 
     const got = await pp.transferStatus!('RM2Z57VLX2BJ8')
 
     assertEquals(got.status, 'failed')
-    assertEquals(got.detail, 'batch SUCCESS, item RETURNED')
+    assertEquals(got.detail, 'batch SUCCESS · item RETURNED')
+  } finally {
+    restore()
+  }
+})
+
+Deno.test('an unclaimed item reports PayPal’s own reason, not just the word', async () => {
+  // The live case of 2026-09-12, verbatim from the sandbox response. "batch
+  // SUCCESS, item UNCLAIMED" told the seller, the operator and me nothing;
+  // `errors.name` was one field away the whole time and is the entire answer.
+  const { restore } = intercept([{
+    batch_header: { batch_status: 'SUCCESS' },
+    items: [{
+      payout_item_id: 'QWNNEWY5FJDUJ',
+      transaction_status: 'UNCLAIMED',
+      errors: {
+        name: 'RECEIVER_UNREGISTERED',
+        message:
+          'The recipient for this payout does not have an account. A link to sign up ' +
+          'for an account was sent to the recipient.',
+      },
+    }],
+  }])
+  try {
+    const pp = new PayPalProvider(CREDS, 'https://pay.example')
+    const got = await pp.transferStatus!('RM2Z57VLX2BJ8')
+
+    assertEquals(got.status, 'pending')
+    assertEquals(
+      got.detail,
+      'batch SUCCESS · item UNCLAIMED · RECEIVER_UNREGISTERED · The recipient for this ' +
+        'payout does not have an account. A link to sign up for an account was sent to ' +
+        'the recipient. · item id QWNNEWY5FJDUJ',
+    )
+  } finally {
+    restore()
+  }
+})
+
+Deno.test('an item with no error block reports what it always did', async () => {
+  const { restore } = intercept([batch('PENDING', 'PENDING')])
+  try {
+    const pp = new PayPalProvider(CREDS, 'https://pay.example')
+    assertEquals((await pp.transferStatus!('RM2Z57VLX2BJ8')).detail, 'batch PENDING · item PENDING')
+  } finally {
+    restore()
+  }
+})
+
+Deno.test('cancelling addresses the item, not the batch we hold', async () => {
+  // PayPal's cancel is per item and we store the batch reference, so the item
+  // id is read off the batch first rather than kept as a second identifier
+  // that could fall out of step with the first.
+  const { seen, restore } = intercept([
+    { items: [{ payout_item_id: 'QWNNEWY5FJDUJ', transaction_status: 'UNCLAIMED' }] },
+    { transaction_status: 'RETURNED' },
+  ])
+  try {
+    const pp = new PayPalProvider(CREDS, 'https://pay.example')
+    const got = await pp.cancelTransfer!('RM2Z57VLX2BJ8')
+
+    assertEquals(got.detail, 'item QWNNEWY5FJDUJ cancelled, now RETURNED')
+    assert(calls(seen).at(-1)!.url!.endsWith('/v1/payments/payouts-item/QWNNEWY5FJDUJ/cancel'))
   } finally {
     restore()
   }

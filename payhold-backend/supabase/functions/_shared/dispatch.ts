@@ -571,12 +571,19 @@ export async function dispatchPayout(
     // and sending is the one field this must not take on trust.
     const { data: ref } = await db
       .from('payouts')
-      .select('provider_ref')
+      .select('provider_ref, send_seq')
       .eq('id', payout.id)
       .maybeSingle()
 
-    const providerRef = (ref as { provider_ref?: string | null } | null)?.provider_ref ??
-      payout.provider_ref ?? null
+    const fresh = ref as { provider_ref?: string | null; send_seq?: number } | null
+
+    const providerRef = fresh?.provider_ref ?? payout.provider_ref ?? null
+
+    // Read here for the same reason, and it matters more: a caller's stale
+    // `send_seq` would build the idempotency key of a batch PayPal already
+    // holds, and the send would come back refused as a duplicate — which is
+    // the failure this whole mechanism exists to end.
+    const sendSeq = fresh?.send_seq ?? payout.send_seq ?? 0
 
     if (providerRef && !provider.transferStatus) {
       console.error('payout cannot be polled on this rail', {
@@ -625,9 +632,36 @@ export async function dispatchPayout(
       if (settled.status === 'failed') {
         const { error } = await db.rpc('fail_payout', {
           p_payout_id: payout.id,
-          p_reason: 'The rail reported this transfer as failed',
+          // The rail's own sentence when it gave one. "The rail reported this
+          // transfer as failed" is true of every failure and tells an operator
+          // nothing; `RECEIVER_UNREGISTERED — the recipient does not have an
+          // account` is the whole answer.
+          p_reason: settled.detail
+            ? `The rail reported this transfer as failed: ${settled.detail}`
+            : 'The rail reported this transfer as failed',
         })
         if (error) throw new Error(`fail_payout failed: ${error.message}`)
+
+        // The rail is finished with this transfer and the money is back, so the
+        // reference now points at something that no longer exists. Left in
+        // place it would make every future pass poll a dead transfer instead of
+        // sending a live one, and §13's ladder would climb to `blocked` without
+        // one further attempt ever being made. Clearing it also moves
+        // `send_seq`, which is what lets the next send carry an idempotency key
+        // PayPal has not already anchored a batch to.
+        const { error: clearError } = await db.rpc('clear_payout_rail_leg', {
+          p_payout_id: payout.id,
+          p_reason: settled.detail ?? 'the rail reported this transfer as failed',
+        })
+        if (clearError) {
+          // Not fatal: the failure is booked either way, and a payout that
+          // keeps a stale reference is stuck rather than double-sent. Loud,
+          // because stuck is what somebody has to come and fix.
+          console.error('could not clear the failed rail leg', {
+            payout_id: payout.id,
+            message: clearError.message,
+          })
+        }
         return 'failed'
       }
 
@@ -644,8 +678,17 @@ export async function dispatchPayout(
         beneficiary_token: destination.beneficiary_token,
         amount: payout.amount,
         currency: payout.currency,
-        // Stable across retries, which is what makes step 4 safe to repeat.
-        idempotency_key: `payout:${payout.id}`,
+        // Stable across retries of the SAME send, which is what makes step 4
+        // safe to repeat — and different for a genuine re-send, which is what
+        // makes a re-send possible at all. PayPal anchors its `sender_batch_id`
+        // on this and refuses a repeat outright, so a payout returned unclaimed
+        // could never be sent a second time under the old fixed key. `send_seq`
+        // only moves when a rail has reported the previous transfer terminally
+        // failed, and stays zero (leaving the key byte-identical to what it has
+        // always been) for every payout that has never been re-sent.
+        idempotency_key: sendSeq
+          ? `payout:${payout.id}:${sendSeq}`
+          : `payout:${payout.id}`,
         rail: destination.payout_provider,
         country: destination.country,
         beneficiary_name: (sellerRow as { name?: string } | null)?.name ?? undefined,

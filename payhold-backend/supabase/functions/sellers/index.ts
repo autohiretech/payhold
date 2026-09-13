@@ -1274,11 +1274,18 @@ async function connectStatus(
   }
 
   const accountId = seller.stripe_connect_pending_account_id
-  const { payoutsEnabled, country: accountCountry } = await provider.connectAccountStatus(
-    accountId,
-  )
+  const { payoutsEnabled, country: accountCountry, detail, currentlyDue } = await provider
+    .connectAccountStatus(accountId)
   if (!payoutsEnabled) {
-    return json(req, { status: 'pending', account_id: accountId })
+    // Not just "pending". A seller Stripe is waiting on one more document from
+    // and a seller whose account was rejected were the same word here, and the
+    // difference is the whole of what they should do next.
+    return json(req, {
+      status: 'pending',
+      account_id: accountId,
+      reason: detail,
+      currently_due: currentlyDue,
+    })
   }
 
   // A seller who had no country at all when onboarding started still has none

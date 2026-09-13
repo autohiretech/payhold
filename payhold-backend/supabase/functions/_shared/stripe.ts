@@ -266,9 +266,19 @@ export class StripeProvider implements PaymentProvider {
     if (!res.ok) {
       // Their message is about the request, not about our credentials, so it is
       // safe to surface.
+      //
+      // **With their machine-readable code, not only the prose.** `code` is
+      // what distinguishes the failure an operator can fix in a minute from the
+      // one they cannot — `balance_insufficient` means top the platform balance
+      // up and re-issue, and Stripe explicitly does not retry a transfer that
+      // failed for funds. The sentence alone reads like every other refusal.
+      // Same standard the PayPal adapter now holds: the provider's own words,
+      // including the name it gives the thing.
+      const err = body.error ?? {}
+      const named = [err.code, err.decline_code].filter(Boolean).join('/')
       throw new PayHoldError(
         res.status === 401 ? 'unauthorized' : 'policy_violation',
-        `Stripe: ${body.error?.message ?? res.statusText}`,
+        `Stripe: ${err.message ?? res.statusText}${named ? ` (${named})` : ''}`,
       )
     }
 
@@ -932,16 +942,52 @@ export class StripeProvider implements PaymentProvider {
    */
   async connectAccountStatus(
     accountId: string,
-  ): Promise<{ payoutsEnabled: boolean; detailsSubmitted: boolean; country: string | null }> {
+  ): Promise<{
+    payoutsEnabled: boolean
+    detailsSubmitted: boolean
+    country: string | null
+    /** Stripe's own account for why payouts are off, in Stripe's own words. */
+    detail: string | null
+    /** The field names Stripe is waiting on, so a client can ask for them. */
+    currentlyDue: string[]
+  }> {
     const account = await this.call<{
       payouts_enabled?: boolean
       details_submitted?: boolean
       country?: string
+      requirements?: {
+        currently_due?: string[]
+        past_due?: string[]
+        disabled_reason?: string | null
+        errors?: { requirement?: string; code?: string; reason?: string }[]
+      }
     }>(`/accounts/${encodeURIComponent(accountId)}`)
+
+    const req = account.requirements ?? {}
+    const currentlyDue = req.currently_due ?? []
+    const pastDue = req.past_due ?? []
+
+    // Why this account cannot be paid, said the way Stripe says it. "pending"
+    // on its own is the Stripe-shaped version of the bare "UNCLAIMED" that
+    // left a PayPal seller guessing for a day: a seller asked for one more
+    // document is in exactly the same state as one whose account was rejected,
+    // and only this distinguishes them. `errors` carries Stripe's own sentence
+    // where there is one; the due lists carry what to go and collect.
+    const detail = [
+      req.disabled_reason,
+      pastDue.length ? `past due: ${pastDue.join(', ')}` : null,
+      currentlyDue.length ? `currently due: ${currentlyDue.join(', ')}` : null,
+      ...(req.errors ?? []).map((e) =>
+        [e.requirement, e.code, e.reason].filter(Boolean).join(' — ')
+      ),
+    ].filter(Boolean).join(' · ') || null
+
     return {
       payoutsEnabled: !!account.payouts_enabled,
       detailsSubmitted: !!account.details_submitted,
       country: account.country ?? null,
+      detail,
+      currentlyDue,
     }
   }
 
