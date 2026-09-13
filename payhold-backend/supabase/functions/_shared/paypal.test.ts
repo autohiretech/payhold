@@ -1174,6 +1174,33 @@ Deno.test('the sign-in host follows the credentials, so live is live', async () 
   await Promise.resolve()
 })
 
+Deno.test('loginConfig publishes the client id and the environment, and nothing else', async () => {
+  // What lets a client run PayPal's own sign-in surface in its own page rather
+  // than sending a window to a URL we assembled — the same arrangement
+  // `wallet_approval` has always given the checkout.
+  const sandbox = new PayPalProvider(CREDS, 'https://pay.example')
+  assertEquals(sandbox.loginConfig(), {
+    client_id: 'client-test',
+    environment: 'sandbox',
+  })
+
+  // `environment` follows the credentials, because a button configured for the
+  // wrong PayPal fails the way a mismatched credential does — and a client
+  // deciding which PayPal this is by inspecting a client id would be exactly
+  // the provider knowledge clients must not hold.
+  const live = new PayPalProvider({ ...CREDS, mode: 'live' }, 'https://pay.example')
+  assertEquals(live.loginConfig().environment, 'live')
+
+  // **The secret never crosses this line.** The client id is publishable and
+  // already goes to browsers on every PayPal charge; the secret is what makes
+  // the code exchange in `identityFromCode` mean anything, and a config a
+  // browser reads must never carry it.
+  const serialised = JSON.stringify(sandbox.loginConfig())
+  assert(!serialised.includes('secret-test'), serialised)
+  assert(!serialised.includes('webhook'), serialised)
+  await Promise.resolve()
+})
+
 Deno.test('a live tenant refuses a sandbox cert URL', async () => {
   // The looseness that only exists in production. `(\.sandbox)?` in the host
   // check accepted a sandbox cert URL on live credentials — every sandbox test

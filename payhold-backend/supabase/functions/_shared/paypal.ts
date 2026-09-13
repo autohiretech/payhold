@@ -292,6 +292,35 @@ export class PayPalProvider implements PaymentProvider {
   }
 
   /**
+   * The same sign-in, for a client that would rather PayPal drew the button.
+   *
+   * `loginUrl` hands back a URL, and a client opening it is a seller watching
+   * their app hand them to paypal.com. PayPal's own login script renders a
+   * PayPal-branded button in the client's page and owns the window it opens —
+   * which is the arrangement `charge` has always reported as
+   * `wallet_approval`, so connecting an account can look exactly like paying,
+   * rather than like the one place the app gives up and redirects.
+   *
+   * **Nothing secret crosses this line.** `client_id` is the same publishable
+   * value `wallet_approval` already carries to a browser on every PayPal
+   * charge; the secret stays here, and the authorization code the button comes
+   * back with is still exchanged server-side in `identityFromCode`, against
+   * that secret. A button cannot mint a destination on its own, and this does
+   * not let it.
+   *
+   * `environment` rather than a host: the script takes `authend: "sandbox"`
+   * and picks its own hosts from it, and a client deciding which PayPal it is
+   * talking to by inspecting a client id would be exactly the provider
+   * knowledge clients are not supposed to hold.
+   */
+  loginConfig(): { client_id: string; environment: 'sandbox' | 'live' } {
+    return {
+      client_id: this.creds.client_id,
+      environment: this.creds.mode === 'live' ? 'live' : 'sandbox',
+    }
+  }
+
+  /**
    * Turn the code the seller came back with into who they are.
    *
    * Two calls, both PayPal's: the code becomes a token, the token reads the

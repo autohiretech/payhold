@@ -771,6 +771,31 @@ export interface PaymentProvider {
   ): Promise<{ payer_id: string; email: string | null; verified_account: boolean | null }>
 
   /**
+   * What a browser needs to run the rail's own sign-in button itself.
+   *
+   * `loginUrl` above is a URL for a client to send a window to, which works and
+   * looks like what it is: the seller leaves the app for a page we assembled.
+   * The rails that offer a sign-in also ship a script that renders their own
+   * button and owns the window it opens — the same arrangement `charge`
+   * already reports as `wallet_approval`, where the buyer approves in PayPal's
+   * popup over a checkout that never went anywhere.
+   *
+   * **`client_id` is publishable**, and this returns nothing that
+   * `wallet_approval` has not been handing browsers since PayPal's adapter
+   * landed. The secret half never leaves this process.
+   *
+   * `environment` is here because the script needs telling which PayPal it is
+   * talking to — sandbox and live are different hosts on this rail, so a
+   * button configured for the wrong one fails the way a mismatched credential
+   * does. Deriving it in a client from the shape of a client id is exactly the
+   * provider knowledge `/payment-options` exists to stop clients inventing.
+   *
+   * Optional for the same reason `loginUrl` is: most rails have nobody to sign
+   * in as. A caller without it falls back to the URL.
+   */
+  loginConfig?(): { client_id: string; environment: 'sandbox' | 'live' }
+
+  /**
    * What this rail will convert a corridor at, right now.
    *
    * Optional for the same reason `banks` is: it is a real capability of a rail
