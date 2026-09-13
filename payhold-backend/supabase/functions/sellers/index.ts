@@ -1033,6 +1033,154 @@ async function readAllWallets(
 }
 
 /**
+ * `POST /v1/sellers/:id/paypal/connect` — where to send a seller so they can
+ * hand us their own PayPal account instead of typing an address at us.
+ *
+ * **A typed email is not evidence, and that is the whole argument for this.**
+ * PayPal accepts a payout to an address whose account is unconfirmed, reports
+ * the batch a success, holds the item UNCLAIMED for thirty days and then
+ * returns the money — and nobody learns any of it until the month is up. On
+ * 2026-09-13 three payouts totalling USD 2,231.07 sat in exactly that state,
+ * against two different addresses, both typed in and both looking perfectly
+ * correct. Nothing in the destination form could have caught it.
+ *
+ * Signing in answers it at setup instead: PayPal returns the seller's
+ * `payer_id` — the identifier its own Payouts reference names — together with
+ * `verified_account`, which says whether a payout to them can land at all.
+ *
+ * Returns the URL and the `state` to check on the way back. The caller keeps
+ * `state` and must compare it, because a callback nobody checks is a callback
+ * that accepts a code from anywhere.
+ */
+async function startPayPalConnect(
+  req: Request,
+  db: SupabaseClient,
+  caller: Caller,
+  id: string,
+): Promise<Response> {
+  requireSellerWriter(caller)
+  await ownSeller(db, caller, id)
+
+  const body = await readJson<{ return_url: string }>(req)
+  required(body as unknown as Record<string, unknown>, 'return_url')
+
+  const { provider } = await loadProvider(db, caller.tenant_id, 'paypal')
+
+  if (!provider.loginUrl) {
+    throw new PayHoldError(
+      'policy_violation',
+      'This PayPal adapter cannot start a sign-in',
+    )
+  }
+
+  const state = crypto.randomUUID()
+
+  return json(req, { url: provider.loginUrl(body.return_url, state), state })
+}
+
+/**
+ * `POST /v1/sellers/:id/paypal/complete` — the seller came back; turn the code
+ * into a destination.
+ *
+ * The code is exchanged server-side against our own client secret, so the
+ * payer id stored is the one PayPal told this server and not one a redirect
+ * claimed. `return_url` has to match the one the sign-in was started with —
+ * PayPal checks it, and so it has to travel back here.
+ *
+ * **`verified_account` decides what happens next, and it is reported either
+ * way rather than acted on silently.** An unverified account still becomes the
+ * destination — it is genuinely theirs, and refusing to record it would leave
+ * the seller with no payout method at all — but it is left unverified, so the
+ * eligibility gate stops the payout before it is sent rather than PayPal
+ * stopping it for thirty days afterwards. The response says which happened so
+ * the client can tell them what to fix.
+ */
+async function completePayPalConnect(
+  req: Request,
+  db: SupabaseClient,
+  caller: Caller,
+  id: string,
+): Promise<Response> {
+  requireSellerWriter(caller)
+  await ownSeller(db, caller, id)
+
+  const { data: sellerData } = await db
+    .from('sellers')
+    .select('country, payout_currency')
+    .eq('id', id)
+    .eq('tenant_id', caller.tenant_id)
+    .maybeSingle()
+
+  const seller = (sellerData ?? {}) as { country?: string; payout_currency?: string }
+
+  const body = await readJson<{ code: string; return_url: string }>(req)
+  required(body as unknown as Record<string, unknown>, 'code', 'return_url')
+
+  const { provider } = await loadProvider(db, caller.tenant_id, 'paypal')
+
+  if (!provider.identityFromCode) {
+    throw new PayHoldError(
+      'policy_violation',
+      'This PayPal adapter cannot complete a sign-in',
+    )
+  }
+
+  const who = await provider.identityFromCode(body.code, body.return_url)
+
+  // The payer id is the destination. `tokenize` already accepts one — it is
+  // the shape `release` switches `recipient_type: PAYPAL_ID` on — so nothing
+  // downstream needs to know this arrived by sign-in rather than by typing.
+  const { data, error } = await db.rpc('add_seller_destination', {
+    p_seller: id,
+    p_tenant: caller.tenant_id,
+    p_country: seller.country ?? 'US',
+    p_currency: seller.payout_currency ?? 'USD',
+    p_provider: 'paypal',
+    p_token: who.payer_id,
+    // Shown to the seller, so it is the address they recognise rather than the
+    // id they have never seen. The id is what is stored and what is paid.
+    p_masked: who.email ?? `PayPal •••• ${who.payer_id.slice(-4)}`,
+    p_label: who.email ?? 'PayPal',
+    p_actor: caller.actor,
+  })
+
+  if (error) throw new Error(`add_seller_destination failed: ${error.message}`)
+
+  const destination = data as unknown as { id: string }
+
+  // PayPal has just told us, about their own account, that it can receive
+  // money. That is a better answer than any check this system could make, so
+  // it is what verification stands on — and when PayPal says otherwise, or
+  // will not say, nothing is verified and the seller is told why.
+  if (who.verified_account === true) {
+    const { error: verifyError } = await db.rpc('verify_seller_destination', {
+      p_destination: destination.id,
+      p_tenant: caller.tenant_id,
+      p_actor: caller.actor,
+    })
+    if (verifyError) {
+      console.error('paypal connect: could not verify the destination', {
+        destination_id: destination.id,
+        message: verifyError.message,
+      })
+    }
+  }
+
+  return json(req, {
+    destination_id: destination.id,
+    payer_id: who.payer_id,
+    email: who.email,
+    verified_account: who.verified_account,
+    // Said plainly, because this is the sentence the seller reads.
+    status: who.verified_account === true
+      ? 'ready'
+      : who.verified_account === false
+      ? 'unverified_paypal_account'
+      : 'unknown',
+  })
+}
+
+/**
  * Get the seller to the point of having an `acct_…` mid-onboarding, shared by
  * both ways of presenting Stripe's form.
  *
@@ -1470,6 +1618,17 @@ Deno.serve(handler(async (req) => {
   }
 
   // Ahead of nothing in particular, but grouped with `destinations` since
+  // PayPal's twin of Stripe's onboarding, and the reason it exists is not that
+  // the destination cannot be typed — it can — but that a typed one is not
+  // evidence. See `startPayPalConnect`.
+  if (req.method === 'POST' && id && action === 'paypal' && sub === 'connect') {
+    return await startPayPalConnect(req, db, caller, id)
+  }
+
+  if (req.method === 'POST' && id && action === 'paypal' && sub === 'complete') {
+    return await completePayPalConnect(req, db, caller, id)
+  }
+
   // `stripe_connect` is the one rail whose destination cannot be typed in —
   // it has to be minted by Stripe's own onboarding first.
   if (req.method === 'POST' && id && action === 'connect' && sub === 'onboard') {

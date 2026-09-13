@@ -496,10 +496,22 @@ describe('§29.17 — one live destination per seller', () => {
 
     test('only a finished onboarding writes a destination', () => {
       // Replace-at-add would archive a working destination for a half-finished
-      // onboarding if anything wrote one before Stripe says the account is
-      // payable. Two callers in the whole function, and the Connect one is
-      // behind `payoutsEnabled`.
-      expect(code.match(/rpc\('add_seller_destination'/g)).toHaveLength(2)
+      // onboarding if anything wrote one before the rail says the account is
+      // payable. Three callers in the whole function, and every one that is
+      // not the plain typed-destination route is behind a rail's own answer:
+      // Stripe's behind `payoutsEnabled`, PayPal's behind the code exchange.
+      expect(code.match(/rpc\('add_seller_destination'/g)).toHaveLength(3)
+
+      // PayPal's, specifically: the destination is written from what came back
+      // from `identityFromCode`, never from what the browser arrived carrying.
+      // A redirect can claim any payer id; only the exchange proves one.
+      const paypal = code.slice(
+        code.indexOf('async function completePayPalConnect('),
+        code.indexOf('async function connectAccountFor('),
+      )
+      expect(paypal).toContain('identityFromCode')
+      expect(paypal.indexOf("rpc('add_seller_destination'"))
+        .toBeGreaterThan(paypal.indexOf('identityFromCode'))
 
       const status = code.slice(
         code.indexOf('async function connectStatus('),

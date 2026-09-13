@@ -752,6 +752,25 @@ export interface PaymentProvider {
   cancelTransfer?(providerRef: string): Promise<{ detail: string }>
 
   /**
+   * Where to send a seller so they can hand over their own account, and what
+   * came back when they did.
+   *
+   * Optional because most rails have no such thing: a mobile-money number is
+   * a number, and there is nobody to sign in as. PayPal is the case that does
+   * — and the reason to use it is not convenience but evidence. A typed PayPal
+   * address is accepted by the API, reported as a successful batch, and then
+   * held unclaimed for thirty days if the account behind it is unconfirmed.
+   * Signing in returns `verified_account` alongside the payer id, which turns
+   * that from a discovery made a month later into a question answered at
+   * setup.
+   */
+  loginUrl?(returnUrl: string, state: string): string
+  identityFromCode?(
+    code: string,
+    returnUrl: string,
+  ): Promise<{ payer_id: string; email: string | null; verified_account: boolean | null }>
+
+  /**
    * What this rail will convert a corridor at, right now.
    *
    * Optional for the same reason `banks` is: it is a real capability of a rail

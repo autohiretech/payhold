@@ -74,6 +74,38 @@ const LIVE = 'https://api-m.paypal.com'
 const SANDBOX = 'https://api-m.sandbox.paypal.com'
 
 /**
+ * Where a person signs in, which is not where the API lives.
+ *
+ * `api-m.*` answers machines; the consent screen a seller actually sees is on
+ * `www.*`. Sending a browser to the API host gets a JSON error, which is a
+ * confusing thing to show somebody who was told to connect their account.
+ */
+const LIVE_WWW = 'https://www.paypal.com'
+const SANDBOX_WWW = 'https://www.sandbox.paypal.com'
+
+/**
+ * The scopes that make this worth doing.
+ *
+ * `openid` alone authenticates and tells us nothing. The PayPal-attributes
+ * scope is what returns `payer_id` — which PayPal's own reference describes as
+ * "the user's unique PayPal account ID used in PayPal APIs such as the Payouts
+ * API", i.e. exactly the identifier a payout wants — and `verified_account`,
+ * which says whether this person can actually receive one.
+ *
+ * That second field is the whole reason to prefer connecting over asking. A
+ * typed email is not evidence of anything: PayPal accepts a payout to an
+ * unconfirmed address, holds it UNCLAIMED for thirty days and then gives it
+ * back, and nobody finds out until the money has been in the air for a month.
+ * On 2026-09-13 that happened to three payouts at once. `verified_account`
+ * turns that into a question answered at setup, in front of the seller.
+ */
+const LOGIN_SCOPES = [
+  'openid',
+  'email',
+  'https://uri.paypal.com/services/paypalattributes',
+].join(' ')
+
+/**
  * Currencies PayPal quotes without decimals.
  *
  * Their list is not ours: HUF and TWD are decimal currencies that PayPal
@@ -214,6 +246,111 @@ export class PayPalProvider implements PaymentProvider {
 
   private get api(): string {
     return this.creds.mode === 'live' ? LIVE : SANDBOX
+  }
+
+  private get www(): string {
+    return this.creds.mode === 'live' ? LIVE_WWW : SANDBOX_WWW
+  }
+
+  // -------------------------------------------------------------------------
+  // Connecting an account, rather than being told an address
+  // -------------------------------------------------------------------------
+
+  /**
+   * Where to send a seller so they can hand us their own PayPal account.
+   *
+   * Log in with PayPal is ordinary OpenID Connect, and deliberately not the
+   * Partner Referrals onboarding: this platform does not need the seller to
+   * grant it payment-processing rights, only to say who they are well enough
+   * that a payout can reach them. One consent screen, no partner approval.
+   *
+   * `state` is the caller's to generate and to check on the way back. It is
+   * not decoration — without it the callback accepts a code from anywhere.
+   */
+  loginUrl(returnUrl: string, state: string): string {
+    const params = new URLSearchParams({
+      client_id: this.creds.client_id,
+      response_type: 'code',
+      scope: LOGIN_SCOPES,
+      redirect_uri: returnUrl,
+      state,
+    })
+    return `${this.www}/connect?flowEntry=static&${params.toString()}`
+  }
+
+  /**
+   * Turn the code the seller came back with into who they are.
+   *
+   * Two calls, both PayPal's: the code becomes a token, the token reads the
+   * profile. `verified_account` arrives as a string on some responses and a
+   * boolean on others, so it is normalised here rather than at every reader.
+   *
+   * **Nothing here is taken on trust from the browser.** The code is exchanged
+   * server-side against our own client secret; the payer id we store is the
+   * one PayPal told this server, not one a redirect claimed.
+   */
+  async identityFromCode(
+    code: string,
+    returnUrl: string,
+  ): Promise<{ payer_id: string; email: string | null; verified_account: boolean | null }> {
+    const basic = btoa(`${this.creds.client_id}:${this.creds.client_secret}`)
+
+    const tokenRes = await fetch(`${this.api}/v1/oauth2/token`, {
+      method: 'POST',
+      headers: {
+        authorization: `Basic ${basic}`,
+        'content-type': 'application/x-www-form-urlencoded',
+      },
+      body: new URLSearchParams({
+        grant_type: 'authorization_code',
+        code,
+        redirect_uri: returnUrl,
+      }),
+    })
+
+    const token = await tokenRes.json().catch(() => ({}))
+
+    if (!tokenRes.ok || !token.access_token) {
+      throw new PayHoldError(
+        'policy_violation',
+        `PayPal refused the sign-in code${
+          token.error_description ? ` (${token.error_description})` : ''
+        }`,
+      )
+    }
+
+    const infoRes = await fetch(
+      `${this.api}/v1/identity/oauth2/userinfo?schema=paypalv1.1`,
+      { headers: { authorization: `Bearer ${token.access_token}` } },
+    )
+    const info = await infoRes.json().catch(() => ({}))
+
+    if (!infoRes.ok) {
+      throw new PayHoldError(
+        'policy_violation',
+        `PayPal would not say who signed in${
+          info.error_description ? ` (${info.error_description})` : ''
+        }`,
+      )
+    }
+
+    const payerId = info.payer_id ?? info.user_id?.split('/').pop()
+
+    if (!payerId) {
+      throw new PayHoldError(
+        'policy_violation',
+        'PayPal returned no payer id — check the app has the PayPal-attributes scope',
+      )
+    }
+
+    const verified = info.verified_account
+    return {
+      payer_id: String(payerId),
+      email: info.email ?? null,
+      verified_account: verified === undefined || verified === null
+        ? null
+        : String(verified).toLowerCase() === 'true',
+    }
   }
 
   // -------------------------------------------------------------------------

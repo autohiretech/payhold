@@ -226,6 +226,19 @@ async function pullBack(
   caller: Caller,
   id: string,
 ): Promise<Response> {
+  // A signed-in person, for `hold`'s reason rather than `retry`'s. Retry is
+  // mechanical — nothing judged the payout and sending it again is just
+  // sending it again — but this reaches into a rail and takes back money that
+  // is already in flight. Whether that is the right thing to do to a transfer
+  // somebody may be waiting on is a judgement, and a judgement wants somebody
+  // who can be asked why. It also keeps a seller-facing app from offering it:
+  // pulling a transfer out of a rail is an operator's move, not a host's.
+  if (caller.kind !== 'dashboard') {
+    throw new PayHoldError(
+      'unauthorized',
+      'A transfer can only be pulled back by a signed-in person, not by an API key',
+    )
+  }
   requireRole(caller, 'owner', 'staff')
 
   const payout = await getPayout(db, caller, id)
