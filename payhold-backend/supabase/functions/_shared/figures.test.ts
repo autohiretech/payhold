@@ -5,7 +5,7 @@
  * Postgres, because they need FX and settings that only exist there.
  */
 
-import { assertEquals } from 'jsr:@std/assert@1'
+import { assertEquals, assertRejects } from 'jsr:@std/assert@1'
 import { clampOverage, overageFor, releaseFigures } from './figures.ts'
 import type { Deal } from './types.ts'
 
@@ -100,10 +100,26 @@ Deno.test('clampOverage: a non-numeric value (bad metadata) is ignored, not thro
 // table, the two could differ by anything at all, and the difference lands in
 // `fees_retained`, which reconciliation checks against a real provider balance.
 
-/** Enough of a Supabase client for the one seller lookup this makes. */
-function dbWithSellerCurrency(currency: string | null) {
+/**
+ * Enough of a Supabase client for the two reads `releaseFigures` makes: the
+ * seller's payout currency, and the deal's refunds.
+ *
+ * The refunds read exists because the pool is what is left after money already
+ * sent back, and `release_deal` subtracts the identical set under its row lock
+ * — two figures describing the same money have to be built from the same facts.
+ */
+function dbWithSellerCurrency(currency: string | null, refunds: { amount: number }[] = []) {
   return {
-    from() {
+    from(table: string) {
+      if (table === 'refunds') {
+        return {
+          select: () => ({
+            eq: () => ({
+              neq: () => Promise.resolve({ data: refunds, error: null }),
+            }),
+          }),
+        }
+      }
       return {
         select() {
           return {
@@ -121,17 +137,30 @@ function dbWithSellerCurrency(currency: string | null) {
   } as any
 }
 
-/** An RWF deal presented in USD, funded at a rate locked well away from the table. */
-function crossCurrencyDeal(fxRate: number | null): Deal {
+/**
+ * An RWF deal presented in USD, funded at a rate locked well away from the
+ * table.
+ *
+ * The three money fields are mutually consistent, which they were not before
+ * 2026-09-13: `presentment_amount` said 35,000 minor USD for 500,000 RWF at
+ * 0.00007, which is ten times the 3,500 that rate gives. Nothing read it, so
+ * nothing caught it. Now the payout is computed from the presentment side and
+ * an inconsistent fixture would prove whatever it was written to prove.
+ */
+function crossCurrencyDeal(fxRate: number | null, extra: Partial<Deal> = {}): Deal {
   return {
+    id: 'deal-1',
     seller_id: 'seller-1',
     amount: 500_000,
     currency: 'RWF',
     presentment_currency: 'USD',
-    // 500,000 RWF at this rate. The table's own guess is ~1400 RWF/USD.
-    presentment_amount: 35_000,
+    // 500,000 RWF major-unit × 0.00007 = 35.00 USD = 3,500 minor units.
+    presentment_amount: 3_500,
     fee_amount: 50_000,
+    provider_fee_amount: 0,
+    tax_amount: 0,
     fx_rate: fxRate,
+    ...extra,
   } as Deal
 }
 
@@ -149,11 +178,10 @@ Deno.test('releaseFigures: the fee uses the deal\'s locked rate, not today\'s ta
 })
 
 Deno.test('releaseFigures: a deal with no locked rate had no conversion to undo', async () => {
-  const d = {
-    ...crossCurrencyDeal(null),
+  const d = crossCurrencyDeal(null, {
     presentment_currency: 'RWF',
     presentment_amount: 500_000,
-  } as Deal
+  })
 
   const figures = await releaseFigures(dbWithSellerCurrency('RWF'), d)
   // Passed through rather than run past a rate table that would invent one.
@@ -174,8 +202,34 @@ Deno.test('releaseFigures: a seller banking in what the buyer paid uses the lock
   const figures = await releaseFigures(dbWithSellerCurrency('USD'), d)
 
   assertEquals(figures.p_payout_currency, 'USD')
-  // 450,000 RWF × 0.00007 = 31.50 USD = 3150 minor units.
+  // The pool is 3,500 - 350 = 3,150 minor USD, and the seller banks in USD, so
+  // it is handed over exactly as it stands with no rate applied at all.
   assertEquals(figures.p_payout_amount, 3150)
+})
+
+Deno.test('releaseFigures: the provider\'s fee comes out of the seller\'s payout', async () => {
+  // The bug of 2026-09-12, in miniature. The payout used to be
+  // `amount - fee_amount` — the platform's fee only — while the ledger pool
+  // also struck off what the rail charged. On a live Kigali deal the two came
+  // out RWF 19,273 apart and the difference left our own provider balance.
+  const d = crossCurrencyDeal(0.00007, { provider_fee_amount: 100, tax_amount: 50 })
+  const figures = await releaseFigures(dbWithSellerCurrency('USD'), d)
+
+  // 3,500 - 350 fee - 100 rail - 50 tax = 3,000 minor USD.
+  assertEquals(figures.p_payout_amount, 3_000)
+})
+
+Deno.test('releaseFigures: money already refunded is not paid out again', async () => {
+  const d = crossCurrencyDeal(0.00007)
+  const figures = await releaseFigures(dbWithSellerCurrency('USD', [{ amount: 500 }]), d)
+
+  // 3,500 - 500 refunded - 350 fee = 2,650 minor USD.
+  assertEquals(figures.p_payout_amount, 2_650)
+})
+
+Deno.test('releaseFigures: a deal with nothing left for the seller is refused, not paid zero', async () => {
+  const d = crossCurrencyDeal(0.00007, { provider_fee_amount: 3_200 })
+  await assertRejects(() => releaseFigures(dbWithSellerCurrency('USD'), d))
 })
 
 Deno.test('releaseFigures: no conversion when the seller banks in the settlement currency', async () => {

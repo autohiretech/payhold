@@ -22,15 +22,30 @@ export interface ReleaseFigures {
 /**
  * What the seller is actually sent, in their own payout currency.
  *
+ * **The input is the presentment pool, not a settlement net**, and that is the
+ * correction of 2026-09-13. This used to be handed `deal.amount -
+ * deal.fee_amount` — settlement money, with only the platform's fee taken out
+ * — while `rail_balances` gave the seller `held - fee - provider_fee - tax -
+ * reserve` in presentment. On a Kigali deal charged RWF 471,800 those are RWF
+ * 424,620 and RWF 405,347: PayHold promised the seller RWF 19,273 more than
+ * the pool it would take the money from, and the difference came silently out
+ * of the platform's own provider balance on every single payout.
+ *
+ * Doing the arithmetic on the presentment side is what makes that impossible
+ * rather than merely fixed. Every deduction is denominated there already, so
+ * nothing is converted twice and nothing rounds twice — converting the
+ * provider's fee into settlement to subtract it, then converting the result
+ * back, was five francs out on the very first deal I tried it on.
+ *
  * Three cases, and the ordering is the point — each one is exact where it can
  * be, and only the last needs a rate at all:
  *
- *   1. **The seller banks in the currency the deal settles in.** Nothing to
- *      convert; this is every AutoHire host with a listing priced in their own
- *      market, which is nearly all of them.
- *   2. **The seller banks in what the buyer was charged.** Then this is the
- *      corridor the deal already locked at funding, so the locked rate applies
- *      exactly and no rate is fetched. Same reasoning as the fee below.
+ *   1. **The seller banks in what the buyer was charged.** The pool is already
+ *      in that currency: no conversion, no rate, no rounding. This is every
+ *      Rwandan host with a Rwandan renter.
+ *   2. **The seller banks in the currency the deal settles in.** That corridor
+ *      is the one the deal locked at funding, so the locked rate applies
+ *      exactly and no rate is fetched.
  *   3. **A third currency**, reached when a host prices a listing in a currency
  *      that is neither their own nor the buyer's. Nothing was ever locked for
  *      that corridor, so it is the only case that needs a rate from anywhere.
@@ -45,22 +60,22 @@ export interface ReleaseFigures {
  */
 function payoutAmount(
   deal: Deal,
-  net: Money,
+  poolPresentment: Money,
   payoutCurrency: string,
 ): Money {
-  if (payoutCurrency === deal.currency) return net
+  if (payoutCurrency === deal.presentment_currency) return poolPresentment
 
-  if (payoutCurrency === deal.presentment_currency && deal.fx_rate !== null) {
+  if (payoutCurrency === deal.currency && deal.fx_rate !== null) {
     return atLockedRate(
-      net,
+      poolPresentment,
       deal.fx_rate,
       deal.currency,
       deal.presentment_currency,
-      'settlement_to_presentment',
+      'presentment_to_settlement',
     )
   }
 
-  return convertOrThrow(net, deal.currency, payoutCurrency).amount
+  return convertOrThrow(poolPresentment, deal.presentment_currency, payoutCurrency).amount
 }
 
 /**
@@ -79,11 +94,62 @@ export async function releaseFigures(
     .maybeSingle()
 
   const payoutCurrency = seller?.payout_currency ?? deal.currency
-  const net = deal.amount - deal.fee_amount
+
+  // The fee, in what was collected — computed before the pool because the pool
+  // is what is left after it.
+  const feePresentment = deal.fx_rate === null
+    ? deal.fee_amount
+    : atLockedRate(
+      deal.fee_amount,
+      deal.fx_rate,
+      deal.currency,
+      deal.presentment_currency,
+      'settlement_to_presentment',
+    )
+
+  // Anything already sent back. A failed refund never left, so it does not
+  // reduce what there is to release — the same predicate `release_deal` uses,
+  // because the two figures have to describe the same money.
+  const { data: refunds, error: refundError } = await db
+    .from('refunds')
+    .select('amount, status')
+    .eq('deal_id', deal.id)
+    .neq('status', 'failed')
+
+  if (refundError) throw new Error(`refund read failed: ${refundError.message}`)
+
+  const refunded = (refunds ?? []).reduce(
+    (sum, r) => sum + ((r as { amount?: number }).amount ?? 0),
+    0,
+  )
+
+  /**
+   * The seller's share, in the currency the buyer was charged.
+   *
+   * **This list must match `rail_balances`' `clearing` expression, and
+   * `release_deal`'s `v_pool`.** It is the same list `amountLeaving` keeps for
+   * the other end of the same journey, and for the same reason: a deduction in
+   * one and missing from the other is money promised to a seller that the pool
+   * it is paid from does not contain.
+   *
+   * The reserve is the one deduction not here. It is decided inside
+   * `release_deal` from settings this side would have to re-derive, so that
+   * function subtracts it from the figure below rather than this one guessing
+   * — see the clamp there.
+   */
+  const poolPresentment = deal.presentment_amount - refunded - feePresentment -
+    (deal.provider_fee_amount ?? 0) - (deal.tax_amount ?? 0)
+
+  if (poolPresentment <= 0) {
+    throw new PayHoldError(
+      'invalid_state',
+      `Deal ${deal.id} has nothing left for the seller once fees and refunds are taken out`,
+    )
+  }
 
   return {
-    // The seller is owed the settlement currency, whatever the buyer paid in.
-    p_payout_amount: payoutAmount(deal, net, payoutCurrency),
+    // What the seller is owed, converted once from the pool it comes out of.
+    p_payout_amount: payoutAmount(deal, poolPresentment, payoutCurrency),
     p_payout_currency: payoutCurrency,
     // The fee leaves the balance we actually hold, so it is expressed in what
     // was collected.
@@ -100,15 +166,7 @@ export async function releaseFigures(
     // against a real provider balance, so a stale rate here reads as drift and
     // drift freezes payouts. A null rate means no conversion happened, so there
     // is nothing to apply.
-    p_fee_presentment: deal.fx_rate === null
-      ? deal.fee_amount
-      : atLockedRate(
-        deal.fee_amount,
-        deal.fx_rate,
-        deal.currency,
-        deal.presentment_currency,
-        'settlement_to_presentment',
-      ),
+    p_fee_presentment: feePresentment,
   }
 }
 
