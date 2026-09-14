@@ -110,7 +110,13 @@ export function AuditPage() {
  * the table apart, and nothing is ever silently dropped.
  */
 function DetailsCell({ details }: { details: Record<string, unknown> }) {
-  const entries = Object.entries(details)
+  // Object order is write order, and a run's details are written run-id first
+  // — so the fold hid `provider`, the one pair that says which rail the row is
+  // about. The pairs a reader scans for come first; everything else keeps the
+  // order it was written in.
+  const FIRST = ['provider', 'rail', 'currency', 'amount', 'status', 'reason', 'action', 'seller_id', 'deal_id']
+  const rank = (k: string) => { const i = FIRST.indexOf(k); return i === -1 ? FIRST.length : i }
+  const entries = Object.entries(details).sort(([a], [b]) => rank(a) - rank(b))
   if (entries.length === 0) return <span className="text-fg-subtle">—</span>
   const shown = entries.slice(0, 4)
   const rest = entries.slice(4)

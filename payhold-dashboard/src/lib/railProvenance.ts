@@ -363,7 +363,7 @@ const paypalPayoutDoc = (tier: string) => (c: Country) => ({
   state: 'documented' as const,
   source: PAYPAL_COUNTRIES,
   checked: DP,
-  note: `Listed as “${tier}” on PayPal’s Payouts country table, so a recipient here can receive and withdraw. The rail itself stays disabled until a payout agreement is signed — §16.${PAYPAL_FOOTNOTE[c] ?? ''}`,
+  note: `Listed as “${tier}” on PayPal’s Payouts country table, so a recipient here can receive and withdraw. The rail itself stays disabled until a payout agreement is signed.${PAYPAL_FOOTNOTE[c] ?? ''}`,
 })
 const paypalPayoutUnsupported = {
   state: 'unsupported' as const,
