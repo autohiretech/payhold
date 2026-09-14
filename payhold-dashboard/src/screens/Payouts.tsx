@@ -85,9 +85,25 @@ export function PayoutsPage() {
         }
       />
 
+      {/* The old text stopped at "pending a reconciliation review" — true, and
+          the one thing a host actually needs next (which currency, how much,
+          who owes whom) was a click nobody was offered. Overview's balance
+          cards now carry exactly that per rail, built from the same freeze;
+          this banner's job is to send a reader there rather than repeat it,
+          so the two can never drift into two different explanations of one
+          freeze. */}
       {tenant.data?.status === 'payouts_frozen' && (
-        <div className="mb-4">
-          <ErrorNote message="Payouts are frozen for this account pending a reconciliation review. Scheduled transfers will not send." />
+        <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-xl bg-danger-soft px-4 py-3 text-sm font-medium text-danger ring-1 ring-danger/20 ring-inset">
+          <span className="flex gap-2.5">
+            <svg viewBox="0 0 24 24" className="mt-0.5 size-4 shrink-0" fill="none" stroke="currentColor" strokeWidth="2">
+              <circle cx="12" cy="12" r="9" />
+              <path d="M12 8v5M12 16.5v.01" strokeLinecap="round" />
+            </svg>
+            Payouts are frozen for this account pending a reconciliation review. Scheduled transfers will not send.
+          </span>
+          <Link to="/" className="shrink-0 font-semibold underline decoration-danger/40 underline-offset-2 hover:decoration-danger">
+            See which rail, and why →
+          </Link>
         </div>
       )}
 
