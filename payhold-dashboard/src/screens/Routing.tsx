@@ -133,7 +133,7 @@ export function RoutingPage() {
       <Card className="mb-8">
         <CardHeader
           title="Payouts that are not moving"
-          subtitle="The decision behind each one, kept because §5.1 requires a routing choice be auditable after the fact — not re-derived now, which would answer a different question."
+          subtitle="The decision behind each one, as it was recorded at the time — not re-derived now, which would answer a different question."
         />
         {payouts.isPending ? (
           <div className="space-y-2 p-6">
@@ -167,7 +167,7 @@ export function RoutingPage() {
       <Card className="mb-8">
         <CardHeader
           title="The routing table"
-          subtitle="Data, not code — §12 requires a country or a rail to be switchable without a redeploy. Read-only here: a client that could switch its own corridors on has turned the country-launch checklist into a field it sets."
+          subtitle="Data, not code — a country or a rail can be switched off without a redeploy. Read-only here: a client that could switch its own corridors on has turned the country-launch checklist into a field it sets."
         />
         {routes.isPending ? (
           <div className="space-y-2 p-6">

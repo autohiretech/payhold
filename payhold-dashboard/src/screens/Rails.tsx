@@ -46,7 +46,30 @@ import {
  * hardcoded: a company that has connected nothing genuinely cannot charge
  * anybody, and saying otherwise would be a lie about where their money is.
  */
-function providerState(status: RailStatus | undefined): StatusMeta {
+/**
+ * Three answers the query can give before it says anything about a rail, and
+ * only the last of them is "no account". While `/provider-accounts` is still
+ * out — it takes 1.7–2.8s on this project — every card read "Not connected",
+ * which is a definite negative rendered for a question nobody had answered yet;
+ * the same badge covered an errored call. A screenshot of the page mid-load
+ * showed three connected sandbox rails as absent. Pending and error say what
+ * they are, in the neutral tone, so a reader never acts on a state that is not
+ * a fact about the rail.
+ */
+function providerState(
+  status: RailStatus | undefined,
+  query: { isPending: boolean; isError: boolean },
+): StatusMeta {
+  if (query.isPending) {
+    return { label: 'Checking…', tone: 'neutral', hint: 'Asking PayHold which rails this account has connected.' }
+  }
+  if (query.isError) {
+    return {
+      label: 'Could not check',
+      tone: 'pending',
+      hint: 'PayHold could not read this account\'s rails just now. Not the same as no rail being connected — reload to ask again.',
+    }
+  }
   if (!status?.connected) {
     return {
       label: 'Not connected',
@@ -153,7 +176,7 @@ export function RailsPage() {
           const rows =
             railBalances.data?.filter((b) => b.provider === provider) ?? []
           const status = statusFor(provider)
-          const state = providerState(status)
+          const state = providerState(status, railStatus)
           const requirement = requirements.data?.find((r) => r.provider === provider)
 
           return (

@@ -86,11 +86,7 @@ export function AuditPage() {
                     )}
                   </Td>
                   <Td>
-                    <Mono>
-                      {Object.keys(e.details).length
-                        ? JSON.stringify(e.details)
-                        : '—'}
-                    </Mono>
+                    <DetailsCell details={e.details} />
                   </Td>
                 </tr>
               ))}
@@ -99,5 +95,50 @@ export function AuditPage() {
         )}
       </Card>
     </>
+  )
+}
+
+
+/**
+ * The audit row's details, as pairs a person can read rather than one JSON
+ * string a table cell cut off. A reconciliation run's row used to read
+ * `{"run_id":"ef9f5eb…","matched":0,"missing":0,"skipped":0,"provider":"stri`
+ * and stop — the cell width decided what the reader was allowed to know, and
+ * nothing offered the rest. Ids and references keep the mono face because
+ * they are compared by eye against another screen; everything else is text.
+ * Past four pairs the rest fold behind a toggle, so a busy row does not push
+ * the table apart, and nothing is ever silently dropped.
+ */
+function DetailsCell({ details }: { details: Record<string, unknown> }) {
+  const entries = Object.entries(details)
+  if (entries.length === 0) return <span className="text-fg-subtle">—</span>
+  const shown = entries.slice(0, 4)
+  const rest = entries.slice(4)
+  const render = (v: unknown): string =>
+    v === null || v === undefined ? '—' : typeof v === 'object' ? JSON.stringify(v) : String(v)
+  const isRef = (k: string, v: unknown) =>
+    typeof v === 'string' && (/(_id|_ref|^id$|^run$)/.test(k) || /^[0-9a-f-]{20,}$/.test(v))
+  const pair = ([k, v]: [string, unknown]) => (
+    <div key={k} className="flex gap-1.5 whitespace-nowrap">
+      <span className="text-fg-subtle">{k.replace(/_/g, ' ')}</span>
+      {isRef(k, v) ? (
+        <Mono>{render(v)}</Mono>
+      ) : (
+        <span className="text-fg">{render(v)}</span>
+      )}
+    </div>
+  )
+  return (
+    <div className="flex flex-col gap-0.5 text-xs">
+      {shown.map(pair)}
+      {rest.length > 0 && (
+        <details className="mt-0.5">
+          <summary className="cursor-pointer text-[11px] font-medium text-brand hover:underline">
+            {rest.length} more
+          </summary>
+          <div className="mt-1 flex flex-col gap-0.5">{rest.map(pair)}</div>
+        </details>
+      )}
+    </div>
   )
 }

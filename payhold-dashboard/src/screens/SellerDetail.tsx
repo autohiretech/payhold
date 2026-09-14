@@ -543,7 +543,7 @@ function Onboarding({ seller, now }: { seller: Seller; now: Date }) {
     <Card className="mb-8">
       <CardHeader
         title="Onboarding"
-        subtitle="§12: a seller must not be paid because a payment webhook said “success”. Somebody has to say the checks came back."
+        subtitle="A seller is never paid just because a payment webhook said “success”. Somebody has to say the checks came back."
         action={<Badge meta={KYC_STATUS_META[seller.kyc_status]} />}
       />
 
@@ -566,7 +566,7 @@ function Onboarding({ seller, now }: { seller: Seller; now: Date }) {
                   ? formatRelative(seller.destination_changed_at, now)
                   : 'Never moved'
               }
-              hint="§5.1's change protection: a destination that just moved holds the next payout, so a stolen session cannot redirect money and have it leave before anyone notices."
+              hint="Change protection: a destination that just moved holds the next payout, so a stolen session cannot redirect money and have it leave before anyone notices."
             />
           </dl>
         </div>

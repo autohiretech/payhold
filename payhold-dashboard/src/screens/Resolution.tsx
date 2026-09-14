@@ -342,8 +342,8 @@ function OpenRequest({
 
       <p className="text-xs text-fg-muted">
         Recorded against you as the {other}’s answer. Answering makes you
-        somebody who acted for a party, and §8 will not let the same person
-        decide this dispute afterwards.
+        somebody who acted for a party, and the same person cannot then
+        decide this dispute.
       </p>
 
       <div className="flex flex-wrap gap-2">
@@ -565,8 +565,8 @@ function MakeRequest({
 
       <p className="text-xs text-fg-muted">
         Recorded as {actor || 'nobody — you are not signed in'}. Whoever records
-        a request has acted for a party, and §8 will not let them decide this
-        dispute afterwards.
+        a request has acted for a party, and cannot then decide this
+        dispute.
       </p>
 
       <Button
