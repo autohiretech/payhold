@@ -1,22 +1,28 @@
 import { type ReactNode, useState } from 'react'
-import type { Balance, Currency, Money, RailLiveBalance } from '@/api'
+import type { Balance, Currency, Money, Provider, RailBalance, RailLiveBalance } from '@/api'
 import { Badge, Card, Dot, cx } from '@/components/ui'
-import { formatDateTime, formatMoney, formatPercent, type Tone } from '@/lib/format'
+import { formatDateTime, formatMoney, type Tone } from '@/lib/format'
 import { PROVIDER_LABEL } from '@/lib/rails'
 
 /**
- * One row's worth of input: a currency, PayHold's own ledger balance for it
- * (or `null` — most rail currencies have no ledger row at all), and every
- * `atRail` entry that named this currency (zero, one, or more than one —
- * USD here is both PayPal and Stripe at once).
- *
- * `Overview.tsx` decides the currency list, the sort, and which currencies
- * carry no activity at all; this component only renders what it is handed.
+ * One currency's worth of input, decided by `Overview.tsx` and only rendered
+ * here: PayHold's own ledger balance for it (or `null` — most rail currencies
+ * have no ledger row at all), the same books split per rail, every `atRail`
+ * entry that named this currency (zero, one, or several — USD is Stripe and
+ * PayPal at once), and what has actually been paid to sellers in it.
  */
 export interface CurrencyBalanceData {
   currency: Currency
   balance: Balance | null
   rows: RailLiveBalance[]
+  /**
+   * PayHold's books for this currency split by rail. Empty until loaded, and
+   * empty for a currency PayHold has no ledger row on at all. The card checks
+   * the rails *individually* off this — see `moneyFor`.
+   */
+  railLedger: RailBalance[]
+  /** Delivered payouts in this currency. `null` while the payouts query is out. */
+  paidPayouts: { count: number; total: Money } | null
   /**
    * No rail money and no ledger activity, on a currency where every rail
    * that reports it actually answered. Never true for a currency any rail
@@ -27,51 +33,46 @@ export interface CurrencyBalanceData {
 }
 
 /**
- * The primary balances view: one row per currency, sorted by size, with the
- * 29-or-so zero-balance currencies collapsed behind a single control rather
- * than scattered through the page. See the file-level comments on each cell
- * function below for why each caveat renders where it does — every one of
- * them exists because the screen would otherwise show a number that isn't
- * true, or hide one that is.
+ * The balances view: one card per currency, the zero-balance currencies
+ * collapsed behind a single control.
+ *
+ * **What a card says, in order.** How much is at the rail; whose it is, as one
+ * bar that visibly adds up to that number; whether PayHold's books agree; and
+ * what that means and what to do, in sentences. The seven ledger buckets are
+ * still the source of every figure, but they are grouped into four kinds of
+ * money a person recognises — buyers', sellers', yours, unexplained — and the
+ * bucket names never reach the screen.
+ *
+ * Every caveat the old table drew is kept, because each stops the screen
+ * stating something untrue: a rail that did not answer never renders as zero,
+ * a rail that reports no figure says so rather than contributing a silent
+ * zero, and no books-versus-rail difference is shown while any rail failed to
+ * answer.
  */
 export function BalancesTable({
   items,
-  serviceFeeRate,
   railStatus,
 }: {
   items: CurrencyBalanceData[]
-  serviceFeeRate: number | undefined
   /**
    * Whether `GET /balance?live=1` has answered at all. A currency with no
    * `atRail` rows means two different things depending on this: "checked,
    * and no rail reports it" once the call has succeeded, versus "not
-   * checked yet" or "could not check" while it hasn't — and only the first
-   * of those is safe to word as "not held at any connected rail".
+   * checked yet" or "could not check" while it hasn't.
    */
   railStatus: 'pending' | 'error' | 'success'
 }) {
   const [showEmpty, setShowEmpty] = useState(false)
-  const [expandOverride, setExpandOverride] = useState<Record<string, boolean>>({})
 
   const active = items.filter((i) => !i.isEmpty)
   const empty = items.filter((i) => i.isEmpty)
 
   return (
-    <div className="space-y-3">
+    <div className="space-y-4">
+      <Summary items={active} />
+
       {active.map((item) => (
-        <CurrencyCard
-          key={item.currency}
-          item={item}
-          serviceFeeRate={serviceFeeRate}
-          railStatus={railStatus}
-          expanded={expandOverride[item.currency] ?? false}
-          onToggle={() =>
-            setExpandOverride((prev) => ({
-              ...prev,
-              [item.currency]: !(prev[item.currency] ?? false),
-            }))
-          }
-        />
+        <CurrencyCard key={item.currency} item={item} railStatus={railStatus} />
       ))}
 
       {empty.length > 0 && (
@@ -89,22 +90,7 @@ export function BalancesTable({
       )}
 
       {showEmpty &&
-        empty.map((item) => (
-          <CurrencyCard
-            key={item.currency}
-            item={item}
-            serviceFeeRate={serviceFeeRate}
-            railStatus={railStatus}
-            expanded={expandOverride[item.currency] ?? false}
-            onToggle={() =>
-              setExpandOverride((prev) => ({
-                ...prev,
-                [item.currency]: !(prev[item.currency] ?? false),
-              }))
-            }
-            faint
-          />
-        ))}
+        empty.map((item) => <CurrencyCard key={item.currency} item={item} railStatus={railStatus} faint />)}
     </div>
   )
 }
@@ -117,13 +103,17 @@ function notReported(rail: string): ReactNode {
   return <span className="font-normal text-fg-subtle">not reported by {rail}</span>
 }
 
-function notReportedBy(rails: string[]): ReactNode {
-  if (rails.length === 0) return null
-  return notReported(rails.join(', '))
+function railLabel(r: { provider: Provider }): string {
+  return PROVIDER_LABEL[r.provider] ?? r.provider
+}
+
+function joinNames(names: string[]): string {
+  if (names.length <= 1) return names[0] ?? ''
+  return `${names.slice(0, -1).join(', ')} and ${names.at(-1)}`
 }
 
 // ---------------------------------------------------------------------------
-// Per-currency summary — the arithmetic every cell in the row reads from
+// Per-currency summary of what the rails reported
 // ---------------------------------------------------------------------------
 
 interface RailSummary {
@@ -162,59 +152,23 @@ function summarize(rows: RailLiveBalance[]): RailSummary {
   }
 }
 
-function railLabel(r: RailLiveBalance): string {
-  return PROVIDER_LABEL[r.provider] ?? r.provider
-}
-
 /**
- * The two money figures mean a different thing per rail, and Flutterwave's
- * were named wrongly here until 2026-09-12 — on a money screen, which is the
- * worst place for a wrong noun.
- *
- * What Flutterwave actually publishes is a **total and a subset of it**, not
- * two wallets that add up. `ledger_balance` — our `amount` — is the total, and
- * is what its dashboard labels *Collection balance*. `available_balance` — our
- * `available` — is the withdrawable part of that same money, its *Payout
- * balance*. On this account today: 59,664.57 total, 59,564.57 withdrawable.
- *
- * So the remainder our `pending` field carries is `total − withdrawable`, here
- * NGN 100.00, and it **has no name at Flutterwave at all**. Calling it the
- * "collection wallet" told the owner his collection balance was one hundred
- * naira when Flutterwave was calling nearly sixty thousand by that name. It is
- * described by what is true of it and nothing more: not withdrawable yet.
- * Nothing there is "clearing" either — it does not settle on a timer.
- *
- * Stripe and PayPal keep their own genuine words: Stripe's `pending` really
- * is awaiting settlement, with `available_on` a real date from its schedule.
- * PayPal's is a **withheld** reserve — also not a clearing process, and also
- * not a Flutterwave-style wallet split.
- *
- * A single header cannot be truthful for all three at once, so the table
- * headers stay neutral ("Available" / "Not yet available") and every cell
- * that renders one of these numbers names the rail's own word alongside it —
- * `Overview.tsx`'s brief was explicit that the rail's own vocabulary must
- * reach the reader, not just a color-coded amount.
+ * The rail's own word for each half of its balance. Flutterwave publishes a
+ * total and the withdrawable subset of it; the remainder has no name at
+ * Flutterwave at all, so it is described by what is true of it. Stripe's
+ * pending really is awaiting settlement; PayPal's is a withheld reserve.
  */
-function availableTerm(provider: RailLiveBalance['provider']): string {
+function availableTerm(provider: Provider): string {
   return provider === 'flutterwave' ? 'payout wallet' : 'available'
 }
 
-function pendingTerm(provider: RailLiveBalance['provider']): string {
+function pendingTerm(provider: Provider): string {
   if (provider === 'flutterwave') return 'not withdrawable yet'
   if (provider === 'paypal') return 'withheld'
   return 'pending'
 }
 
-/**
- * Per-rail schedule handling — the reason `available_on` is null differs by
- * rail, and only one of those reasons is a gap.
- *
- * Flutterwave never reports a clearing date, and correctly so: moving money
- * the part of a balance that is not withdrawable yet becomes withdrawable when
- * Flutterwave settles it, not when a clock fires. `null` there is the right
- * answer, not a missing one, and must never read as "not reported" — that
- * phrase implies the rail withheld something it actually has.
- */
+/** When the not-yet part clears — a date, none (moves on request), or unreported. */
 type ScheduleDescriptor = { kind: 'date'; date: string } | { kind: 'none' } | { kind: 'unreported' }
 
 function describeScheduleRow(r: RailLiveBalance): ScheduleDescriptor {
@@ -222,25 +176,15 @@ function describeScheduleRow(r: RailLiveBalance): ScheduleDescriptor {
   return r.provider === 'flutterwave' ? { kind: 'none' } : { kind: 'unreported' }
 }
 
-/** Neutral, and true for every rail: money moving on request, not on a timer. */
-function NoScheduleNote() {
-  return (
-    <span
-      className="text-fg-subtle"
-      title="Flutterwave doesn't report a clearing date here because there isn't one — the part of your balance that is not withdrawable yet becomes withdrawable when Flutterwave settles it or you ask, not on a published timer."
-    >
-      No schedule — moves on request
-    </span>
-  )
-}
+// ---------------------------------------------------------------------------
+// The four kinds of money — the arithmetic every part of the card reads from
+// ---------------------------------------------------------------------------
 
 /**
- * What `reconcile` expects a provider to be holding for this currency —
- * every bucket except `paid_out`, which already left the rail. `null` means
- * PayHold has no ledger balance here at all, which is a different fact from
- * a diff of zero: there is nothing on the other side to compare against.
+ * What `reconcile` expects a rail to be holding: every bucket except
+ * `paid_out`, which already left. `null` when there are no books at all.
  */
-function ledgerExpected(balance: Balance | null): Money | null {
+function ledgerExpected(balance: Balance | RailBalance | null): Money | null {
   if (!balance) return null
   return (
     balance.held +
@@ -252,167 +196,308 @@ function ledgerExpected(balance: Balance | null): Money | null {
   )
 }
 
+interface RailMoney {
+  provider: Provider
+  label: string
+  holds: Money
+  expected: Money
+  /** `holds − expected`: what this rail has that the books don't explain. */
+  diff: Money
+  /** Money collected here and paid out from another rail — yours, sitting here. */
+  parked: Money
+  /** Money this rail paid out beyond what was collected on it — owed to it. */
+  owed: Money
+}
+
+interface CurrencyMoney {
+  buyers: Money
+  sellers: Money
+  reserved: Money
+  fees: Money
+  parked: Money
+  /** Positive: at the rails and explained by nothing. Negative: the rails are short. */
+  unexplained: Money
+  owed: Money
+  booksSay: Money
+  /** The backend's own figure: rails held − Σ expected. Nets debts, so it can differ from `unexplained`. */
+  officialDiff: Money
+  perRail: RailMoney[]
+}
+
+/**
+ * Seven ledger buckets, grouped into four kinds of money, checked rail by rail.
+ *
+ * The grouping: `held` is buyers' money on open deals. `pending_clearance`,
+ * `available` and `reserved` are all the seller's — the reserve is carved out
+ * so it cannot be paid yet, but it is still theirs. `fees_retained` is yours,
+ * and so is a positive `tenant_funds`: money collected on this rail whose
+ * seller was paid from another rail, so it never left. A *negative*
+ * `tenant_funds` is the other side of that same event — a rail that paid a
+ * seller for money it never collected — and it is not a segment of the bar,
+ * because there is no money there to draw. It is a debt you owe that rail,
+ * and it is said as one.
+ *
+ * "Unexplained" is what is physically at the rails beyond everything above.
+ * It is computed from the bar's own terms so the bar always adds up to the
+ * headline, and it is **not** the backend's drift figure: `reconcile` nets
+ * each rail's debt into its expectation, so on a currency where one rail is
+ * owed money the official difference is larger than what is actually
+ * unexplained. Both are shown, because both are true, and the old card's
+ * single netted number is exactly what made "to top up $282.37" stand in for
+ * a $4,763.34 top-up and a $4,480.97 transfer.
+ *
+ * Per rail, because reconciliation is per rail: a shortfall on one rail hidden
+ * by a surplus on another must never read as "agrees".
+ */
+function moneyFor(s: RailSummary, railLedger: RailBalance[]): CurrencyMoney {
+  const perRail: RailMoney[] = s.reachable.map((r) => {
+    const l = railLedger.find((x) => x.provider === r.provider)
+    const expected = l ? (ledgerExpected(l) ?? 0) : 0
+    const holds = r.amount as Money
+    return {
+      provider: r.provider,
+      label: railLabel(r),
+      holds,
+      expected,
+      diff: holds - expected,
+      parked: Math.max(0, l?.tenant_funds ?? 0),
+      owed: Math.max(0, -(l?.tenant_funds ?? 0)),
+    }
+  })
+  // Books can exist for a rail nobody could reach just now; its buckets still
+  // belong to the currency's totals, only its `holds` is unknown.
+  const ledgers = railLedger
+  const sum = (f: (l: RailBalance) => Money) => ledgers.reduce((a, l) => a + f(l), 0)
+  const buyers = sum((l) => l.held)
+  const reserved = sum((l) => l.reserved)
+  const sellers = sum((l) => l.pending_clearance + l.available) + reserved
+  const fees = sum((l) => l.fees_retained)
+  const parked = sum((l) => Math.max(0, l.tenant_funds))
+  const owed = sum((l) => Math.max(0, -l.tenant_funds))
+  const booksSay = sum((l) => ledgerExpected(l) ?? 0)
+  return {
+    buyers,
+    sellers,
+    reserved,
+    fees,
+    parked,
+    owed,
+    booksSay,
+    unexplained: s.railSum - (buyers + sellers + fees + parked),
+    officialDiff: s.railSum - booksSay,
+    perRail,
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Across all currencies
+// ---------------------------------------------------------------------------
+
+function Summary({ items }: { items: CurrencyBalanceData[] }) {
+  if (items.length === 0) return null
+  let agree = 0
+  let cases = 0
+  let moves = 0
+  let unchecked = 0
+  for (const item of items) {
+    const s = summarize(item.rows)
+    if (s.unreachable.length > 0 || item.railLedger.length === 0) {
+      unchecked += 1
+      continue
+    }
+    const m = moneyFor(s, item.railLedger)
+    if (m.perRail.every((r) => r.diff === 0)) agree += 1
+    cases += m.perRail.filter((r) => r.diff !== 0).length
+    if (m.owed > 0) moves += 1
+  }
+  const tile = (k: string, v: ReactNode, small?: string) => (
+    <div className="rounded-lg border border-line bg-surface px-4 py-3">
+      <div className="text-[11px] font-semibold tracking-[0.06em] text-fg-subtle uppercase">{k}</div>
+      <div className="mt-0.5 text-lg font-semibold text-fg">
+        {v}
+        {small && <span className="ml-1.5 text-[13px] font-medium text-fg-muted">{small}</span>}
+      </div>
+    </div>
+  )
+  return (
+    <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+      {tile('Currencies with money', items.length, items.map((i) => i.currency).join(' · '))}
+      {tile(
+        'Books agree',
+        `${agree} of ${items.length}`,
+        unchecked ? `${unchecked} not fully checked` : undefined,
+      )}
+      {tile('Open cases to write up', cases)}
+      {tile('Things to do', moves, moves ? 'move money between rails' : undefined)}
+    </div>
+  )
+}
+
 // ---------------------------------------------------------------------------
 // The card
 // ---------------------------------------------------------------------------
 
-/**
- * One currency, as a card rather than a row in a seven-column table.
- *
- * The table this replaces asked the reader to hold seven headers in their head
- * — every one of which wrapped onto two lines — and then hid the answer to the
- * only question the screen exists for. "PayHold's allocation" showed
- * `available` and `clearing` and never `held`, so an account holding
- * NGN 59,664.57 against an open deal read as "NGN 0.00 avail · NGN 0.00
- * clearing", and the money PayHold is actually accounting for appeared only
- * after expanding the row.
- *
- * So the card states three things in the order they are asked:
- *
- *   1. **How much is at the rail**, which is the observable fact, with the
- *      rail's own word for each part of it.
- *   2. **Whether PayHold's books agree** — one line, because that is the whole
- *      question reconciliation answers, and a disagreement is the only thing on
- *      this screen that means something is wrong.
- *   3. **What PayHold says the money is for** — held, clearing, available,
- *      earned. Surfaced, not folded away.
- *
- * Every distinction the table drew is kept, because each exists to stop the
- * screen stating something untrue: a rail that did not answer never renders as
- * zero, a rail that reports no figure is "not reported by" rather than a dash,
- * Flutterwave's absent schedule says it moves on request rather than that
- * something is missing, and no ledger-versus-rail difference is shown while any
- * rail failed to answer.
- */
 function CurrencyCard({
   item,
-  serviceFeeRate,
   railStatus,
-  expanded,
-  onToggle,
   faint,
 }: {
   item: CurrencyBalanceData
-  serviceFeeRate: number | undefined
   railStatus: 'pending' | 'error' | 'success'
-  expanded: boolean
-  onToggle: () => void
   faint?: boolean
 }) {
-  const { currency, balance, rows } = item
+  const { currency, balance, rows, railLedger, paidPayouts } = item
   const s = summarize(rows)
-  const expected = ledgerExpected(balance)
-  // Never computed while any rail for this currency failed to answer — a gap
+  // No comparison while any rail for this currency failed to answer — a gap
   // against a figure nobody could ask the rail for is not the ledger's to
-  // explain.
-  const diff = s.unreachable.length === 0 && expected !== null ? s.railSum - expected : null
+  // explain. And none while PayHold has no books here at all.
+  const checkable = rows.length > 0 && s.unreachable.length === 0 && balance !== null
+  const m = checkable ? moneyFor(s, railLedger) : null
+  const allAgree = !!m && m.perRail.every((r) => r.diff === 0)
+  const openCases = m ? m.perRail.filter((r) => r.diff !== 0).length : 0
+  const short = !!m && m.unexplained < 0
 
-  // Green means "checked, and it agrees" — so a currency with no books to
-  // compare against is neutral rather than green. Reading a rail-only balance
-  // as reconciled is the same mistake as reading an unreachable rail as zero.
   const tone: Tone = s.allUnreachable
     ? 'danger'
     : s.unreachable.length > 0
       ? 'pending'
-      : diff === null
+      : !m
         ? 'neutral'
-        : diff === 0
+        : allAgree
           ? 'released'
           : 'danger'
 
+  const railNames = Array.from(new Set(s.reachable.map(railLabel)))
+
   return (
     <Card className={cx('overflow-hidden', faint && 'opacity-70')}>
-      <div className="flex flex-wrap items-baseline justify-between gap-x-6 gap-y-2 px-5 pt-4">
-        <div className="flex items-center gap-2">
+      {/* ---- header: what currency, what state, when ---- */}
+      <div className="flex flex-wrap items-center justify-between gap-x-6 gap-y-2 px-5 pt-4">
+        <div className="flex flex-wrap items-center gap-2">
           <Dot tone={tone} />
-          <span className="text-sm font-semibold tracking-wide text-fg">{currency}</span>
+          <span className="text-[15px] font-semibold tracking-wide text-fg">{currency}</span>
           {s.sandbox && (
-            <span
-              className="text-[11px] font-medium text-pending"
-              title="Every rail holding this currency is connected in test mode. None of it is real money."
-            >
-              Sandbox
-            </span>
+            <Badge
+              meta={{
+                label: 'Sandbox',
+                tone: 'neutral',
+                hint: 'Every rail holding this currency is connected in test mode. None of it is real money.',
+              }}
+            />
           )}
           {s.stale && (
-            <span
-              className="text-[11px] font-medium text-fg-subtle"
-              title="A rail could not be reached just now, so this is the last figure PayHold read from it."
-            >
-              last known
-            </span>
+            <Badge
+              meta={{
+                label: 'Last known',
+                tone: 'pending',
+                hint: 'A rail could not be reached just now, so this is the last figure PayHold read from it.',
+              }}
+            />
           )}
+          {m && allAgree && <Pill tone="released">Books agree</Pill>}
+          {m && !allAgree && !short && (
+            <Pill tone="danger">{openCases === 1 ? 'Needs a write-up' : `${openCases} open cases`}</Pill>
+          )}
+          {short && <Pill tone="danger">Rails are short — payouts frozen</Pill>}
+          {m && m.owed > 0 && <Pill tone="pending">Move money between rails</Pill>}
         </div>
-        {s.latestAsOf && s.unreachable.length === 0 && (
-          <span className="text-[11px] text-fg-subtle">as of {formatDateTime(s.latestAsOf)}</span>
-        )}
+        <span className="text-[11px] text-fg-subtle">
+          {railNames.length > 0 && `${railNames.join(' · ')}`}
+          {s.latestAsOf && s.unreachable.length === 0 && ` · as of ${formatDateTime(s.latestAsOf)}`}
+        </span>
       </div>
 
-      {/* The rail's account of the money and PayHold's sit side by side on a
-          wide screen and stack on a narrow one — they are two answers to the
-          same question, and reading them level with each other is the point of
-          the card. Stacked, the second one starts below the fold on a laptop,
-          which is how "PayHold's allocation" went unread in the table. */}
-      <div className="grid lg:grid-cols-[minmax(0,1fr)_minmax(0,1.15fr)]">
-        {/* 1 — what the rail holds, in the rail's own words */}
-        <div className="px-5 pb-4 pt-2">
-          <RailHeadline rows={rows} s={s} railStatus={railStatus} />
-          <RailParts s={s} currency={currency} />
-        </div>
-
-        {/* 2 and 3 — whether the books agree, and what the money is for */}
-        <div className="border-t border-line bg-surface-2/40 px-5 py-4 lg:border-t-0 lg:border-l">
-          <LedgerSide
-            balance={balance}
-            currency={currency}
-            diff={diff}
-            s={s}
-            rows={rows}
-            serviceFeeRate={serviceFeeRate}
-          />
-        </div>
+      {/* ---- hero: how much, and where ---- */}
+      <div className="px-5 pt-2">
+        <Headline rows={rows} s={s} railStatus={railStatus} currency={currency} />
       </div>
 
-      {/* A single reachable rail's split is already on the card above, so the
-          toggle would open a card restating it. It earns its place once there
-          is more than one rail, or a rail whose own state needs explaining. */}
+      {/* ---- whose it is: one bar that adds up to the headline ---- */}
+      {m && s.railSum > 0 && (
+        <div className="px-5 pt-4">
+          <MoneyBar m={m} currency={currency} />
+          <Legend m={m} currency={currency} sandbox={s.sandbox} />
+        </div>
+      )}
+
+      {/* ---- do the books agree ---- */}
+      <div className="mt-4 border-t border-line px-5 py-3.5">
+        <BooksCheck m={m} s={s} rows={rows} balance={balance} currency={currency} />
+      </div>
+
+      {/* ---- in words ---- */}
+      {m && (
+        <div className="border-t border-line px-5 py-4">
+          <PlainWords m={m} s={s} currency={currency} />
+        </div>
+      )}
+
+      {/* ---- rail by rail, when there is more than one or one needs explaining ---- */}
       {(rows.length > 1 || s.unreachable.length > 0 || s.stale) && (
-        <div className="border-t border-line px-5 py-2.5">
-          <button
-            type="button"
-            onClick={onToggle}
-            className="text-xs font-semibold text-brand hover:underline"
-          >
-            {expanded ? 'Hide per-rail detail' : `Per-rail detail (${rows.length})`}
-          </button>
-          {expanded && (
-            <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-              {rows.map((r) => (
-                <RailSplitCard key={r.provider} row={r} />
-              ))}
-            </div>
-          )}
+        <div className="border-t border-line px-5 pb-4 pt-3">
+          <RailTable rows={rows} railLedger={railLedger} currency={currency} />
+        </div>
+      )}
+
+      {/* ---- footer: what the rail lets you move, and what has been paid ---- */}
+      {rows.length > 0 && (
+        <div className="flex flex-wrap gap-x-7 gap-y-1.5 border-t border-line bg-surface-2/40 px-5 py-3 text-[13px] text-fg-muted">
+          <MoveLine s={s} currency={currency} />
+          <span>
+            Paid to sellers so far:{' '}
+            {balance ? (
+              <>
+                <b className="tabular font-mono font-semibold text-fg">{formatMoney(balance.paid_out, currency)}</b>
+                {paidPayouts === null ? (
+                  <span className="text-fg-subtle"> · counting payouts…</span>
+                ) : paidPayouts.count > 0 ? (
+                  <span className="text-fg-subtle">
+                    {' '}
+                    ({paidPayouts.count} {paidPayouts.count === 1 ? 'payout' : 'payouts'}, delivered)
+                  </span>
+                ) : null}
+              </>
+            ) : (
+              <b className="tabular font-mono font-semibold text-fg">{formatMoney(0, currency)}</b>
+            )}
+          </span>
         </div>
       )}
     </Card>
   )
 }
 
+function Pill({ tone, children }: { tone: 'released' | 'danger' | 'pending'; children: ReactNode }) {
+  const cls =
+    tone === 'released'
+      ? 'bg-released-soft text-released'
+      : tone === 'danger'
+        ? 'bg-danger-soft text-danger'
+        : 'bg-pending-soft text-pending'
+  return (
+    <span className={cx('inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-semibold', cls)}>
+      <span className="h-1.5 w-1.5 rounded-full bg-current" aria-hidden />
+      {children}
+    </span>
+  )
+}
+
 /**
- * THE HEADLINE for one currency — summed from every rail that answered.
- * **A rail that did not answer never renders as 0.00** — the single most
- * important rule on the screen. Fully unreachable renders as the word itself,
- * in danger red; partially unreachable keeps the partial sum but says so, so
- * the total is never mistaken for the whole truth.
+ * THE HEADLINE — summed from every rail that answered. **A rail that did not
+ * answer never renders as 0.00.** Fully unreachable renders as the word
+ * itself; partially unreachable keeps the partial sum but says so, so the
+ * total is never mistaken for the whole truth.
  */
-function RailHeadline({
+function Headline({
   rows,
   s,
   railStatus,
+  currency,
 }: {
   rows: RailLiveBalance[]
   s: RailSummary
   railStatus: 'pending' | 'error' | 'success'
+  currency: Currency
 }) {
   if (rows.length === 0) {
     return (
@@ -427,390 +512,424 @@ function RailHeadline({
   }
   if (s.allUnreachable) {
     return (
-      <p
-        className="text-2xl font-semibold text-danger"
-        title="No rail holding this currency answered. This is not the same as a zero balance."
-      >
+      <p className="text-2xl font-semibold text-danger" title="No rail holding this currency answered. This is not the same as a zero balance.">
         Unreachable
       </p>
     )
   }
-
-  const railNames = Array.from(new Set(s.reachable.map(railLabel)))
+  const named = s.reachable.map((r) => `${railLabel(r)} ${formatMoney(r.amount!, currency)}`)
   return (
-    <div>
-      <span className="tabular text-2xl font-semibold text-fg">
-        {formatMoney(s.railSum, rows[0]!.currency)}
+    <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+      <span className="tabular font-mono text-[30px] font-semibold leading-none tracking-tight text-fg">
+        {formatMoney(s.railSum, currency)}
       </span>
-      <span className="ml-2 text-xs text-fg-muted">
-        at {railNames.length === 1 ? railNames[0] : `${railNames.length} rails`}
+      <span className="text-[13px] text-fg-muted">
+        {s.reachable.length === 1
+          ? `at ${railLabel(s.reachable[0]!)}`
+          : `across ${s.reachable.length} rails — ${named.join(' · ')}`}
       </span>
       {s.unreachable.length > 0 && (
-        <p className="mt-1 text-[11px] font-medium text-danger">
+        <span className="text-[11px] font-medium text-danger">
           {s.unreachable.length} of {rows.length} rails did not answer — this total understates the truth
-        </p>
+        </span>
       )}
     </div>
   )
 }
 
 /**
- * The rail's own split of that headline, on one line, in the rail's own
- * vocabulary — Flutterwave's withdrawable payout balance against the part of
- * the total that is not withdrawable yet, Stripe's available against pending,
- * PayPal's available against withheld.
- *
- * They are summed across rails but never blended into one word: three rails
- * hold money back for three different reasons, so each figure carries the name
- * of the rail and the term that rail uses. A rail reporting no figure says so
- * rather than contributing a silent zero.
+ * One bar, four kinds of money, adding up to the headline. Segments carry a
+ * 2px gap so adjacent fills never merge; "unexplained" is hatched as well as
+ * coloured, so it reads without colour. A shortfall cannot be drawn — there is
+ * no money there to draw — so the bar shows what is explained and the check
+ * below says the rest.
  */
-function RailParts({ s, currency }: { s: RailSummary; currency: Currency }) {
-  if (s.reachable.length === 0) return null
-
-  const availTerms = Array.from(
-    new Set(s.availKnown.map((r) => `${railLabel(r)}: ${availableTerm(r.provider)}`)),
-  )
-  const pendingTerms = Array.from(
-    new Set(s.pendingKnown.map((r) => `${railLabel(r)}: ${pendingTerm(r.provider)}`)),
-  )
-  const availMissing = s.reachable.filter((r) => r.available === null).map(railLabel)
-  const pendingMissing = s.reachable.filter((r) => r.pending === null).map(railLabel)
-
+function MoneyBar({ m, currency }: { m: CurrencyMoney; currency: Currency }) {
+  const segs: { key: string; cls: string; amount: Money; tip: string; hatched?: boolean }[] = [
+    { key: 'buyers', cls: 'bg-money-buyers', amount: m.buyers, tip: "Buyers' money on open deals" },
+    { key: 'sellers', cls: 'bg-money-sellers', amount: m.sellers, tip: 'Waiting to go to sellers' },
+    { key: 'yours', cls: 'bg-money-yours', amount: m.fees + m.parked, tip: 'Yours' },
+    {
+      key: 'unexplained',
+      cls: 'bg-money-unexplained',
+      amount: Math.max(0, m.unexplained),
+      tip: 'Not explained by any deal',
+      hatched: true,
+    },
+  ].filter((x) => x.amount > 0)
   return (
-    <div className="mt-3 flex flex-wrap gap-x-8 gap-y-3">
-      <Part
-        label="Ready to move"
-        value={s.availKnown.length > 0 ? formatMoney(s.availSum, currency) : null}
-        terms={availTerms}
-        missing={availMissing}
-      />
-      <Part
-        label="Not yet"
-        value={s.pendingKnown.length > 0 ? formatMoney(s.pendingSum, currency) : null}
-        terms={pendingTerms}
-        missing={pendingMissing}
-      />
-      <div className="min-w-[9rem]">
-        <div className="text-[11px] font-medium tracking-[0.02em] text-fg-subtle uppercase">Schedule</div>
-        <div className="mt-1 text-xs">
-          <ScheduleLine s={s} />
-        </div>
-      </div>
+    <div className="flex h-5 gap-0.5 overflow-hidden rounded bg-canvas" role="img" aria-label={segs.map((x) => `${x.tip}: ${formatMoney(x.amount, currency)}`).join('; ')}>
+      {segs.map((x) => (
+        <div
+          key={x.key}
+          className={cx('relative min-w-[3px]', x.cls)}
+          style={{
+            flex: x.amount,
+            backgroundImage: x.hatched
+              ? 'repeating-linear-gradient(135deg, var(--money-hatch) 0 3px, transparent 3px 8px)'
+              : undefined,
+          }}
+          title={`${x.tip} · ${formatMoney(x.amount, currency)}`}
+        />
+      ))}
     </div>
   )
 }
 
-function Part({
-  label,
-  value,
-  terms,
-  missing,
-}: {
-  label: string
-  value: string | null
-  terms: string[]
-  missing: string[]
-}) {
-  return (
-    <div className="min-w-[9rem]">
-      <div className="text-[11px] font-medium tracking-[0.02em] text-fg-subtle uppercase">{label}</div>
-      <div className="tabular mt-1 text-sm font-semibold text-fg">
-        {value ?? notReportedBy(missing.length ? missing : ['this rail'])}
-      </div>
-      {value !== null && terms.length > 0 && (
-        <div className="mt-0.5 text-[11px] text-fg-subtle">{terms.join(' · ')}</div>
-      )}
-      {value !== null && missing.length > 0 && (
-        <div className="mt-0.5 text-[11px]">{notReportedBy(missing)}</div>
-      )}
-    </div>
+function Legend({ m, currency, sandbox }: { m: CurrencyMoney; currency: Currency; sandbox: boolean }) {
+  const parkedAt = m.perRail.filter((r) => r.parked > 0)
+  const unexplained = Math.max(0, m.unexplained)
+  const row = (
+    key: string,
+    swatch: ReactNode,
+    label: string,
+    amount: Money,
+    sub?: ReactNode,
+  ) => (
+    <li key={key} className="grid grid-cols-[12px_minmax(0,1fr)_auto] items-baseline gap-x-2.5">
+      {swatch}
+      <span className="text-[13px] text-fg">
+        {label}
+        {sub && <span className="block text-[11px] text-fg-subtle">{sub}</span>}
+      </span>
+      <span className={cx('tabular font-mono text-[13px]', amount === 0 ? 'font-medium text-fg-subtle' : 'font-semibold text-fg')}>
+        {formatMoney(amount, currency)}
+      </span>
+    </li>
   )
-}
-
-function ScheduleLine({ s }: { s: RailSummary }) {
-  if (s.reachable.length === 0) return <span className="text-fg-subtle">—</span>
-  const kinds = s.reachable.map(describeScheduleRow)
-  const dates = Array.from(new Set(kinds.filter((k) => k.kind === 'date').map((k) => k.date)))
-  const allNone = kinds.every((k) => k.kind === 'none')
-
-  if (allNone) return <NoScheduleNote />
-  if (dates.length === 1 && kinds.every((k) => k.kind === 'date')) {
-    return <span className="text-fg-muted">{formatDateTime(dates[0]!)}</span>
-  }
-  if (dates.length === 0) {
-    return notReportedBy(Array.from(new Set(s.reachable.map(railLabel))))
-  }
-  return (
+  const sw = (cls: string, hatched?: boolean) => (
     <span
-      className="cursor-help border-b border-dotted border-fg-subtle/50 text-fg-muted"
-      title="Each rail here handles timing differently — one has a schedule, one doesn't, or their dates differ. Open the per-rail detail."
-    >
-      Varies by rail
-    </span>
+      className={cx('mt-0.5 h-3 w-3 rounded-[3px]', cls)}
+      style={hatched ? { backgroundImage: 'repeating-linear-gradient(135deg, var(--money-hatch) 0 2px, transparent 2px 5px)' } : undefined}
+      aria-hidden
+    />
+  )
+  return (
+    <ul className="mt-3 grid gap-x-8 gap-y-1.5 md:grid-cols-2">
+      {row('buyers', sw('bg-money-buyers'), "Buyers' money, still on open deals", m.buyers,
+        m.buyers > 0 ? 'held until both sides confirm — nobody has been paid from it yet' : undefined)}
+      {row('sellers', sw('bg-money-sellers'), 'Waiting to go to sellers', m.sellers,
+        m.reserved > 0 ? `including ${formatMoney(m.reserved, currency)} held back as a new-seller reserve` : undefined)}
+      {row('yours', sw('bg-money-yours'), 'Yours', m.fees + m.parked,
+        m.fees + m.parked > 0 ? (
+          <>
+            {m.fees > 0 && `${formatMoney(m.fees, currency)} your fees`}
+            {m.fees > 0 && m.parked > 0 && ' · '}
+            {m.parked > 0 &&
+              `${formatMoney(m.parked, currency)} collected ${parkedAt.length === 1 ? `at ${parkedAt[0]!.label}` : 'here'} but the seller was paid from another rail`}
+          </>
+        ) : undefined)}
+      {row('unexplained', sw('bg-money-unexplained', true), 'Not explained by any deal', unexplained,
+        unexplained > 0
+          ? sandbox
+            ? 'an open case — in sandbox this is usually test float'
+            : 'an open case for PayHold to check'
+          : undefined)}
+    </ul>
   )
 }
 
-/**
- * PayHold's own side of the card: whether the books agree with the rail, and
- * then what the books say the money is for.
- *
- * The agreement line comes first and is the only thing here that can be wrong.
- * A currency PayHold has no ledger for says exactly that, once, instead of
- * rendering a row of zeroes that would read as "PayHold holds nothing of
- * yours" rather than "PayHold has never booked anything in this currency".
- */
-function LedgerSide({
-  balance,
-  currency,
-  diff,
+function BooksCheck({
+  m,
   s,
   rows,
-  serviceFeeRate,
+  balance,
+  currency,
 }: {
-  balance: Balance | null
-  currency: Currency
-  diff: Money | null
+  m: CurrencyMoney | null
   s: RailSummary
   rows: RailLiveBalance[]
-  serviceFeeRate: number | undefined
+  balance: Balance | null
+  currency: Currency
 }) {
+  if (rows.length === 0) return null
   if (!balance) {
     return (
       <p className="text-xs text-fg-muted">
-        <span className="font-semibold text-fg">No PayHold ledger in {currency}.</span> No deal has ever been
+        <span className="font-semibold text-fg">No PayHold books in {currency}.</span> No deal has ever been
         booked in this currency, so everything above is the rail's own report and none of it is allocated to a
         buyer, a seller or to you.
       </p>
     )
   }
-
-  return (
-    <div className="space-y-3">
-      <p className="text-xs">
-        {diff === null ? (
-          <span className="text-fg-muted">
-            {s.unreachable.length > 0
-              ? `${s.unreachable.length} of ${rows.length} rail${rows.length > 1 ? 's' : ''} did not answer, so PayHold's books are not compared against the rail here — a gap against a figure nobody could ask for is not the ledger's to explain.`
-              : "PayHold's books, not yet compared against the rail."}
-          </span>
-        ) : diff === 0 ? (
-          <span className="font-medium text-released">
-            PayHold's books agree with the rail, to the {currency === 'JPY' ? 'yen' : 'penny'}.
-          </span>
-        ) : (
-          <span className="font-semibold text-danger">
-            {formatMoney(Math.abs(diff), currency)} {diff > 0 ? 'more' : 'less'} at the rail than PayHold's
-            books account for — not corrected here.
-          </span>
-        )}
+  if (!m) {
+    return (
+      <p className="text-xs text-fg-muted">
+        {s.unreachable.length} of {rows.length} rail{rows.length > 1 ? 's' : ''} did not answer, so PayHold's
+        books are not compared against the rail here — a gap against a figure nobody could ask for is not the
+        books' to explain.
       </p>
-      <LedgerBuckets balance={balance} currency={currency} serviceFeeRate={serviceFeeRate} />
-    </div>
+    )
+  }
+  const owedTo = m.perRail.filter((r) => r.owed > 0)
+  const diffCls = m.officialDiff === 0 ? 'text-released' : 'text-danger'
+  const k = (t: string) => (
+    <div className="text-[11px] font-semibold tracking-[0.06em] text-fg-subtle uppercase">{t}</div>
   )
-}
-
-// ---------------------------------------------------------------------------
-// Per-rail detail
-// ---------------------------------------------------------------------------
-
-function RailSplitCard({ row }: { row: RailLiveBalance }) {
-  const unreachable = row.amount === null || row.error != null
-  const label = railLabel(row)
-  const isFlutterwave = row.provider === 'flutterwave'
-  const isPaypal = row.provider === 'paypal'
-
-  const availableLabel = isFlutterwave ? 'Payout wallet' : 'Available'
-  const availableHint = isFlutterwave
-    ? `${label} calls this the payout balance — money loaded and ready to disburse.`
-    : `What ${label} itself says can be paid out today.`
-
-  const pendingLabel = isFlutterwave ? 'Not withdrawable yet' : isPaypal ? 'Withheld' : 'Pending'
-  const pendingHint = isFlutterwave
-    ? `${label} publishes a total and the withdrawable part of it, not two wallets — its dashboard calls the total the collection balance and the withdrawable part the payout balance. This is the difference between them, which ${label} does not name at all. Not a clearing process: nothing here moves on a timer.`
-    : isPaypal
-      ? `Money ${label} is withholding as a reserve — not the same as a clearing process, and not on a published timer.`
-      : `What ${label} is holding back from the figure above, still clearing. Never clamped — a real figure can be negative.`
-
-  const schedule = describeScheduleRow(row)
-
   return (
-    <Card className="p-3.5">
-      <div className="flex items-center justify-between gap-2">
-        <span className="text-xs font-semibold tracking-[0.04em] text-fg">{label}</span>
-        <div className="flex gap-1">
-          {row.mode === 'test' && (
-            <Badge meta={{ label: 'Sandbox', tone: 'pending', hint: `${label} is connected in test mode.` }} />
-          )}
-          {row.stale && (
-            <Badge
-              meta={{
-                label: 'Stale',
-                tone: 'pending',
-                hint: 'The last stored reconciliation figure, not a call made just now.',
-              }}
-            />
-          )}
+    <div className="grid gap-x-6 gap-y-3 sm:grid-cols-3">
+      <div>
+        {k('Books say')}
+        <div className="tabular mt-0.5 font-mono text-lg font-semibold text-fg">{formatMoney(m.booksSay, currency)}</div>
+        {owedTo.length > 0 && (
+          <div className="mt-0.5 text-[11px] text-fg-muted">
+            = {formatMoney(m.buyers + m.sellers + m.fees + m.parked, currency)} at the rails −{' '}
+            {owedTo.map((r) => `${formatMoney(r.owed, currency)} you owe ${r.label}`).join(' − ')}
+          </div>
+        )}
+      </div>
+      <div>
+        {k(s.reachable.length === 1 ? `${railLabel(s.reachable[0]!)} holds` : 'The rails hold')}
+        <div className="tabular mt-0.5 font-mono text-lg font-semibold text-fg">{formatMoney(s.railSum, currency)}</div>
+      </div>
+      <div>
+        {k('Difference')}
+        <div className={cx('tabular mt-0.5 font-mono text-lg font-semibold', diffCls)}>
+          {m.officialDiff > 0 ? '+' : ''}
+          {formatMoney(m.officialDiff, currency)}
+        </div>
+        <div className="mt-0.5 text-[11px] text-fg-muted">
+          {m.officialDiff === 0
+            ? `to the ${currency === 'JPY' ? 'yen' : 'penny'}`
+            : m.perRail.length > 1
+              ? m.perRail
+                  .filter((r) => r.diff !== 0)
+                  .map((r) => `${r.label} ${r.diff > 0 ? '+' : ''}${formatMoney(r.diff, currency)}`)
+                  .join(' · ')
+              : m.officialDiff > 0
+                ? 'more at the rail than any deal explains'
+                : 'less at the rail than the books say — payouts are frozen'}
         </div>
       </div>
-
-      {unreachable ? (
-        <p className="mt-2 text-xs font-medium text-danger">
-          Could not be reached{row.error ? ` (${row.error})` : ''} — no split to show. Not the same as a zero
-          balance.
-        </p>
-      ) : (
-        <>
-          <div className="mt-1.5 tabular text-sm font-semibold text-fg">
-            {formatMoney(row.amount!, row.currency)}
-          </div>
-          <div className="mt-2 grid grid-cols-3 gap-2 text-xs">
-            <MiniFigure
-              label={availableLabel}
-              value={row.available === null ? notReported(label) : formatMoney(row.available, row.currency)}
-              hint={availableHint}
-            />
-            <MiniFigure
-              label={pendingLabel}
-              value={row.pending === null ? notReported(label) : formatMoney(row.pending, row.currency)}
-              hint={pendingHint}
-              faint={row.pending === null}
-            />
-            <MiniFigure
-              label="Schedule"
-              value={
-                schedule.kind === 'date' ? (
-                  formatDateTime(schedule.date)
-                ) : schedule.kind === 'none' ? (
-                  <NoScheduleNote />
-                ) : (
-                  notReported(label)
-                )
-              }
-              hint={
-                schedule.kind === 'none'
-                  ? `${label} doesn't report a clearing date here because there isn't one — this becomes withdrawable when ${label} settles it, not on a published timer.`
-                  : 'When the amount above becomes available, exactly as the rail itself reports it — never a computed estimate.'
-              }
-              faint={schedule.kind !== 'date'}
-            />
-          </div>
-          <div className="mt-2 text-[11px] text-fg-subtle">as of {formatDateTime(row.as_of)}</div>
-        </>
-      )}
-    </Card>
+    </div>
   )
 }
 
 /**
- * PayHold's seven ledger buckets for one currency — folded out of the row
- * rather than a second card, per §-level convention: the rail's figure
- * answers "how much money do I have", this answers "who is it owed to".
+ * The card in sentences, built from the figures and nothing else. Every
+ * sentence names a fact and, where there is one, the thing you can do about it.
  */
-function LedgerBuckets({
-  balance,
-  currency,
-  serviceFeeRate,
-}: {
-  balance: Balance
-  currency: Currency
-  serviceFeeRate: number | undefined
-}) {
-  const sellersNet = balance.pending_clearance + balance.available + balance.paid_out
+function PlainWords({ m, s, currency }: { m: CurrencyMoney; s: RailSummary; currency: Currency }) {
+  const f = (x: Money) => formatMoney(x, currency)
+  const means: ReactNode[] = []
+  const todo: ReactNode[] = []
+
+  if (m.buyers > 0) {
+    means.push(
+      `${f(m.buyers)} is buyers' money on open deals — held until both sides confirm. Your fee comes out when it's released, which is why "Yours" can be 0 while money is held.`,
+    )
+  }
+  if (m.sellers > 0) {
+    means.push(
+      `${f(m.sellers)} has cleared and is waiting to go to sellers${m.reserved > 0 ? `, of which ${f(m.reserved)} is held back a little longer as a new-seller reserve` : ''}.`,
+    )
+  }
+  if (m.fees > 0) {
+    means.push(`You've earned ${f(m.fees)} in fees. It stays at the rail until you move it — PayHold never sweeps it.`)
+  }
+  for (const r of m.perRail.filter((x) => x.parked > 0)) {
+    means.push(
+      `${f(r.parked)} was collected at ${r.label} but the seller was paid from another rail, so it is still sitting at ${r.label} and it's yours.`,
+    )
+  }
+  for (const r of m.perRail.filter((x) => x.owed > 0)) {
+    means.push(`${r.label} is ${f(r.owed)} down: it paid sellers for money that was collected elsewhere.`)
+  }
+  if (m.unexplained > 0) {
+    means.push(
+      `${f(m.unexplained)} at the rail${m.perRail.length > 1 ? 's' : ''} is not explained by any deal.${
+        s.sandbox ? " In sandbox that's usually the rail's test float." : ''
+      } PayHold can't know why, so it opened a case.`,
+    )
+  }
+  if (m.unexplained < 0) {
+    means.push(
+      `The rail${m.perRail.length > 1 ? 's hold' : ' holds'} ${f(-m.unexplained)} less than the books say ${m.perRail.length > 1 ? 'they' : 'it'} should. PayHold has frozen payouts until a person explains it.`,
+    )
+  }
+  if (means.length === 0) means.push('Nothing is booked against this money yet.')
+
+  // What to do, in the order it matters: money first, paperwork second.
+  const owedTo = m.perRail.filter((r) => r.owed > 0)
+  const parkedAt = m.perRail.filter((r) => r.parked > 0)
+  if (owedTo.length > 0) {
+    const totalOwed = owedTo.reduce((a, r) => a + r.owed, 0)
+    const parkedTotal = parkedAt.reduce((a, r) => a + r.parked, 0)
+    const from = parkedAt.length > 0 ? `from ${joinNames(parkedAt.map((r) => r.label))}` : 'from your bank'
+    const to = joinNames(owedTo.map((r) => r.label))
+    todo.push(
+      <>
+        Move <b className="tabular font-mono text-fg">{f(Math.min(totalOwed, parkedTotal) || totalOwed)}</b> {from} to {to}
+        {parkedTotal > 0 && parkedTotal < totalOwed && (
+          <>
+            {' '}— that's your own money and it covers most of it; the remaining{' '}
+            <b className="tabular font-mono text-fg">{f(totalOwed - parkedTotal)}</b> was collected in another currency
+          </>
+        )}
+        . PayHold cannot move it for you.
+      </>,
+    )
+  }
+  if (m.unexplained < 0) {
+    todo.push('Find out why the rail is short. Payouts stay frozen until a person resolves the case and lifts the freeze.')
+  } else if (m.perRail.some((r) => r.diff !== 0)) {
+    const n = m.perRail.filter((r) => r.diff !== 0).length
+    todo.push(
+      `Write up the ${n === 1 ? 'open case' : `${n} open cases`}${
+        s.sandbox ? ' — say the unexplained money is sandbox float' : ''
+      }. Cases don't close on their own; a person has to say why the number is what it is.`,
+    )
+  }
+  const nothing = todo.length === 0
 
   return (
-    <div className="flex flex-wrap gap-x-6 gap-y-3">
-      <MiniFigure
-        label="Held"
-        value={formatMoney(balance.held, currency)}
-        zero={balance.held === 0}
-        hint="Buyer money in the vault against open deals."
-      />
-      <MiniFigure
-        label="Clearing"
-        value={formatMoney(balance.pending_clearance, currency)}
-        zero={balance.pending_clearance === 0}
-        hint="Released, waiting out the clearance window."
-      />
-      <MiniFigure
-        label="Available"
-        value={formatMoney(balance.available, currency)}
-        zero={balance.available === 0}
-        hint="Cleared and payable to sellers now."
-      />
-      <MiniFigure
-        label="Paid out"
-        value={formatMoney(balance.paid_out, currency)}
-        zero={balance.paid_out === 0}
-        hint="Lifetime total sent to sellers."
-      />
-      <MiniFigure
-        label="Your revenue"
-        value={formatMoney(balance.fees_retained, currency)}
-        zero={balance.fees_retained === 0}
-        hint={`${
-          serviceFeeRate !== undefined
-            ? `${formatPercent(serviceFeeRate)} service fee, plus any tax collected`
-            : 'Service fee plus any tax collected'
-        }, bundled together. Still at the provider, not swept out anywhere. Not profit, and not netted against the rail's own cut.`}
-      />
-      {balance.tenant_funds !== 0 && (
-        <MiniFigure
-          label={balance.tenant_funds > 0 ? 'Yours to move' : 'To top up'}
-          value={formatMoney(Math.abs(balance.tenant_funds), currency)}
-          hint={
-            balance.tenant_funds > 0
-              ? 'Collected here but paid out from another rail — no seller is owed it.'
-              : 'Paid out of this currency beyond what you have funded it with.'
-          }
-        />
-      )}
-      <MiniFigure
-        label="Rail's cut"
-        value={<span className="text-fg-subtle">not shown here</span>}
-        hint="The rail's own number — leaves this balance the instant the rail takes it, so there is no account-wide total to read. Open a deal's Money card for the figure on that one payment."
-        faint
-      />
-      <MiniFigure
-        label="Sellers' net"
-        value={formatMoney(sellersNet, currency)}
-        zero={sellersNet === 0}
-        hint="Clearing + available + paid out, none of them gross — every deduction, including the rail's own cut, is already out of these three."
-      />
+    <div className="grid gap-4 md:grid-cols-2">
+      <div>
+        <h3 className="text-[11px] font-semibold tracking-[0.06em] text-fg-subtle uppercase">What this means</h3>
+        <div className="mt-1 max-w-[62ch] space-y-1.5 text-[13px] text-fg">
+          {means.map((t, i) => (
+            <p key={i}>{t}</p>
+          ))}
+        </div>
+      </div>
+      <div>
+        <h3 className="text-[11px] font-semibold tracking-[0.06em] text-fg-subtle uppercase">What to do</h3>
+        <div className="mt-1 max-w-[62ch] space-y-1.5 text-[13px] text-fg">
+          {nothing ? (
+            <p className="border-l-[3px] border-released pl-3">Nothing. The books agree with the rail.</p>
+          ) : (
+            todo.map((t, i) => (
+              <p key={i} className="border-l-[3px] border-pending pl-3">
+                {t}
+              </p>
+            ))
+          )}
+        </div>
+      </div>
     </div>
   )
 }
 
-function MiniFigure({
-  label,
-  value,
-  hint,
-  faint,
-  zero,
-}: {
-  label: string
-  value: ReactNode
-  hint: string
-  faint?: boolean
-  /** A bucket at zero recedes, so the eye lands on the ones holding money. */
-  zero?: boolean
-}) {
+/**
+ * Rail by rail. Reconciliation is per rail — you cannot ask two providers
+ * about one number — so this is where the check is actually made, and a
+ * currency on several rails is only "agrees" when every row here is.
+ */
+function RailTable({ rows, railLedger, currency }: { rows: RailLiveBalance[]; railLedger: RailBalance[]; currency: Currency }) {
+  const th = 'pb-1.5 pr-3 text-left text-[11px] font-semibold tracking-[0.06em] text-fg-subtle uppercase'
+  const td = 'border-t border-line py-2 pr-3 align-top text-[13px]'
   return (
-    <div className="min-w-[6.5rem]">
-      <div
-        className="cursor-help border-b border-dotted border-fg-subtle/50 text-[11px] font-medium tracking-[0.02em] text-fg-subtle uppercase"
-        title={hint}
-      >
-        {label}
-      </div>
-      <div
-        className={cx(
-          'tabular mt-1 text-sm font-semibold',
-          faint || zero ? 'font-normal text-fg-subtle' : 'text-fg',
-        )}
-      >
-        {value}
-      </div>
+    <div className="overflow-x-auto">
+      <table className="w-full border-collapse">
+        <thead>
+          <tr>
+            <th className={th}>Rail</th>
+            <th className={cx(th, 'text-right')}>Holds</th>
+            <th className={cx(th, 'text-right')}>Books say</th>
+            <th className={cx(th, 'text-right')}>Difference</th>
+            <th className={th}>You can move today</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r) => {
+            const label = railLabel(r)
+            const unreachable = r.amount === null || r.error != null
+            const l = railLedger.find((x) => x.provider === r.provider)
+            const expected = l ? (ledgerExpected(l) ?? 0) : 0
+            const diff = unreachable ? null : (r.amount as Money) - expected
+            const schedule = describeScheduleRow(r)
+            return (
+              <tr key={r.provider}>
+                <td className={cx(td, 'font-medium text-fg')}>
+                  {label}
+                  {r.mode === 'test' && <span className="ml-1.5 text-[11px] font-medium text-fg-subtle">sandbox</span>}
+                  {r.stale && <span className="ml-1.5 text-[11px] font-medium text-pending">last known</span>}
+                </td>
+                {unreachable ? (
+                  <td className={cx(td, 'text-danger')} colSpan={4}>
+                    Could not be reached{r.error ? ` (${r.error})` : ''}. Not the same as a zero balance.
+                  </td>
+                ) : (
+                  <>
+                    <td className={cx(td, 'tabular text-right font-mono text-fg')}>{formatMoney(r.amount!, currency)}</td>
+                    <td className={cx(td, 'tabular text-right font-mono text-fg')}>
+                      {expected < 0 ? (
+                        <>
+                          {formatMoney(expected, currency)}
+                          <span className="block font-sans text-[11px] text-fg-subtle">you owe it this for payouts it sent</span>
+                        </>
+                      ) : (
+                        formatMoney(expected, currency)
+                      )}
+                    </td>
+                    <td className={cx(td, 'tabular text-right font-mono font-semibold', diff === 0 ? 'text-released' : 'text-danger')}>
+                      {diff! > 0 ? '+' : ''}
+                      {formatMoney(diff!, currency)}
+                    </td>
+                    <td className={td}>
+                      <span className="tabular font-mono text-fg">
+                        {r.available === null ? notReported(label) : formatMoney(r.available, currency)}
+                      </span>
+                      <span className="block text-[11px] text-fg-subtle">
+                        {r.pending === null
+                          ? `${pendingTerm(r.provider)}: ${'not reported'}`
+                          : `${formatMoney(r.pending, currency)} ${pendingTerm(r.provider)}`}
+                        {schedule.kind === 'date' && ` — clears ${formatDateTime(schedule.date)}`}
+                        {schedule.kind === 'none' && ' — moves on request'}
+                      </span>
+                    </td>
+                  </>
+                )}
+              </tr>
+            )
+          })}
+        </tbody>
+      </table>
     </div>
+  )
+}
+
+/** What the rails let you move now, in their own words, summed but never blended. */
+function MoveLine({ s, currency }: { s: RailSummary; currency: Currency }) {
+  if (s.reachable.length === 0) return null
+  const availMissing = s.reachable.filter((r) => r.available === null).map(railLabel)
+  const pendingMissing = s.reachable.filter((r) => r.pending === null).map(railLabel)
+  const dates = Array.from(
+    new Set(s.reachable.map(describeScheduleRow).filter((k) => k.kind === 'date').map((k) => (k as { date: string }).date)),
+  )
+  return (
+    <>
+      <span>
+        You can move{' '}
+        {s.availKnown.length > 0 ? (
+          <b className="tabular font-mono font-semibold text-fg">{formatMoney(s.availSum, currency)}</b>
+        ) : (
+          notReported(availMissing.join(', '))
+        )}{' '}
+        today
+        {s.availKnown.length > 0 && (
+          <span className="text-fg-subtle">
+            {' — '}
+            {Array.from(new Set(s.availKnown.map((r) => `${railLabel(r)}: ${availableTerm(r.provider)}`))).join(' · ')}
+          </span>
+        )}
+        {s.availKnown.length > 0 && availMissing.length > 0 && <> ({notReported(availMissing.join(', '))})</>}
+      </span>
+      <span>
+        {s.pendingKnown.length > 0 ? (
+          <b className="tabular font-mono font-semibold text-fg">{formatMoney(s.pendingSum, currency)}</b>
+        ) : (
+          notReported(pendingMissing.join(', '))
+        )}{' '}
+        not yet
+        {s.pendingKnown.length > 0 && (
+          <>
+            {' — '}
+            {Array.from(new Set(s.pendingKnown.map((r) => `${railLabel(r)}: ${pendingTerm(r.provider)}`))).join(' · ')}
+            {dates.length === 1 && `, clears ${formatDateTime(dates[0]!)}`}
+          </>
+        )}
+      </span>
+    </>
   )
 }

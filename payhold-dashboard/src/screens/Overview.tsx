@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
-import { api, type Balance, type Currency } from '@/api'
+import { api, type Balance, type Currency, type Money, type RailBalance } from '@/api'
 import { BalancesTable, type CurrencyBalanceData } from '@/components/BalancesTable'
 import {
   Badge,
@@ -21,7 +21,6 @@ import {
   useDeals,
   useDisputes,
   usePayouts,
-  useSettings,
 } from '@/lib/queries'
 
 export function OverviewPage() {
@@ -29,7 +28,6 @@ export function OverviewPage() {
   const deals = useDeals({ limit: 8 })
   const payouts = usePayouts()
   const disputes = useDisputes()
-  const settings = useSettings()
 
   // What each rail itself says it is holding right now, alongside the
   // ledger's own derived figures above. A separate query and a separate
@@ -41,6 +39,16 @@ export function OverviewPage() {
     queryKey: ['balance', 'live'],
     queryFn: () => api.getBalanceWithRail(),
   })
+  // PayHold's books split by rail — the same seven buckets `balance` returns
+  // per currency, but per provider. The card needs this to say something true
+  // about a currency held on more than one rail: reconciliation is per rail
+  // (you cannot ask two providers about one number), and a headline computed
+  // from the per-currency total would read "agrees, to the penny" while one
+  // rail was short and another over by the same amount.
+  const byRail = useQuery({
+    queryKey: ['balance', 'rails'],
+    queryFn: () => api.getRailBalances(),
+  })
 
   const now = new Date()
   const openDisputes = disputes.data?.filter((d) => d.status === 'open') ?? []
@@ -51,6 +59,21 @@ export function OverviewPage() {
     ledgerBalances.map((b) => [b.currency, b]),
   )
   const railRows = atRail.data?.atRail ?? []
+  const railLedger: RailBalance[] = byRail.data ?? []
+
+  // "Paid to sellers so far" is read off the payout rows, not off a ledger
+  // bucket: the bucket says how much left, the rows say in how many payments
+  // and that each one was actually delivered. `null` until the payouts query
+  // has answered, so the card can say "loading" rather than a zero that is
+  // not yet true.
+  const paidByCurrency = new Map<Currency, { count: number; total: Money }>()
+  for (const p of payouts.data ?? []) {
+    if (p.status !== 'paid') continue
+    const at = paidByCurrency.get(p.currency) ?? { count: 0, total: 0 }
+    at.count += 1
+    at.total += p.amount
+    paidByCurrency.set(p.currency, at)
+  }
 
   /**
    * The currency list is the union of PayHold's own ledger and whatever each
@@ -126,6 +149,8 @@ export function OverviewPage() {
       currency,
       balance: ledgerByCurrency.get(currency) ?? null,
       rows,
+      railLedger: railLedger.filter((l) => l.currency === currency),
+      paidPayouts: payouts.data ? (paidByCurrency.get(currency) ?? { count: 0, total: 0 }) : null,
       isEmpty: railStatus === 'success' && activityWeight(currency) === 0 && !anyUnreachable,
     }
   })
@@ -160,7 +185,6 @@ export function OverviewPage() {
           ) : (
             <BalancesTable
               items={balanceItems}
-              serviceFeeRate={settings.data?.service_fee_rate}
               railStatus={railStatus}
             />
           )}

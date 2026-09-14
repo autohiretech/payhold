@@ -12,6 +12,10 @@
    If you retune a value, re-check it — a lighter brand looked better and
    silently failed `text-brand` on `brand-soft`. */
 
+/* Money-bar tokens (Overview): checked with the dataviz palette validator on
+   #FFFFFF — buyers #3F4EB5 7.8:1, sellers #1E7A4E 5.6:1, yours #8E3A78 6.5:1,
+   all ≥3:1 for a fill; unexplained #B8BDC7 is a fill only and is hatched, never
+   text. Adjacent-pair CVD ΔE ≥ 8.0 as a set. Text never wears these colours. */
 @theme inline {
   --color-canvas: var(--canvas);
   --color-surface: var(--surface);
@@ -40,6 +44,17 @@
   --color-pending-soft: var(--pending-soft);
   --color-danger: var(--danger);
   --color-danger-soft: var(--danger-soft);
+
+  /* The four kinds of money on the Overview bar. Named for what the money IS
+     (whose it is), not for a colour, so a status hue can never be mistaken for
+     one of them: `danger` is reserved for a difference nobody can explain.
+     The three chromatic values passed a colour-vision-deficiency separation
+     check as a set; "unexplained" is a status and is also hatched, so it
+     reads without colour at all. */
+  --color-money-buyers: var(--money-buyers);
+  --color-money-sellers: var(--money-sellers);
+  --color-money-yours: var(--money-yours);
+  --color-money-unexplained: var(--money-unexplained);
 
   --font-sans:
     'Inter Variable', 'Inter', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto,
@@ -88,6 +103,12 @@
   --pending-soft: oklch(0.958 0.045 78);
   --danger: oklch(0.505 0.19 26);
   --danger-soft: oklch(0.957 0.028 26);
+
+  --money-buyers: #3F4EB5;
+  --money-sellers: #1E7A4E;
+  --money-yours: #8E3A78;
+  --money-unexplained: #B8BDC7;
+  --money-hatch: rgba(35, 38, 46, 0.35);
 }
 
 html {
