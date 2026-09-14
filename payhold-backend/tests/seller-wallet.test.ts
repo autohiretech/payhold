@@ -67,6 +67,7 @@ async function seedFundedDeal(
   tenant: string,
   seller: string,
   amount = 100_000,
+  providerFee = 0,
 ): Promise<string> {
   const { rows: [deal] } = await h.db.query<Tenant>(
     `insert into deals (tenant_id, buyer_ref, seller_id, description, amount, currency,
@@ -79,8 +80,8 @@ async function seedFundedDeal(
   )
 
   await h.db.query(
-    `select * from fund_deal($1, 'flutterwave', $2, 'mobile_money', 'MTN', $3, 'RWF', null, 3)`,
-    [deal.id, `FLW-${crypto.randomUUID()}`, amount],
+    `select * from fund_deal($1, 'flutterwave', $2, 'mobile_money', 'MTN', $3, 'RWF', null, 3, $4)`,
+    [deal.id, `FLW-${crypto.randomUUID()}`, amount, providerFee],
   )
 
   return deal.id
@@ -153,6 +154,40 @@ describe('the wallet is derived from the same ledger the tenant balance is', () 
     expect(row.available).toBe('0')
   })
 
+  /**
+   * The rail's cut comes off the hold, not off the clearing pool — the same
+   * rule `20260912000003` applied to `rail_balances`, and the case this file
+   * never exercised. Without it the Sellers screen read a funded NGN deal as
+   * `In progress NGN 61K · Clearing −NGN 847.17` while the Overview read the
+   * same money as `held 59,664.57`: gross in one bucket, the fee as a negative
+   * debt to a seller who is owed nothing in the other.
+   */
+  test('a held deal shows the rail fee taken off the hold, and owes nothing in clearing', async () => {
+    const tenant = await seedTenant()
+    const seller = await seedSeller(tenant)
+    await seedFundedDeal(tenant, seller, 100_000, 3_000)
+
+    const [row] = await wallet(seller)
+
+    expect(row.held).toBe('97000')
+    expect(row.pending_clearance).toBe('0')
+    expect(row.available).toBe('0')
+  })
+
+  test('after release the rail fee sits in the pool, once, and the hold is empty', async () => {
+    const tenant = await seedTenant()
+    const seller = await seedSeller(tenant)
+    const deal = await seedFundedDeal(tenant, seller, 100_000, 3_000)
+    await release(deal)
+
+    const [row] = await wallet(seller)
+
+    expect(row.held).toBe('0')
+    // 100,000 less our 10,000 and less the rail's 3,000 — counted here and
+    // not also in held, or it would be struck twice.
+    expect(row.pending_clearance).toBe('87000')
+  })
+
   test('release moves it to pending_clearance, net of the fee', async () => {
     const tenant = await seedTenant()
     const seller = await seedSeller(tenant)
@@ -190,9 +225,11 @@ describe('the wallet is derived from the same ledger the tenant balance is', () 
     const one = await seedSeller(tenant, 'Alice')
     const two = await seedSeller(tenant, 'Bereket')
 
-    const held = await seedFundedDeal(tenant, one, 40_000)
+    // A rail fee on the held deal and on a released one: the two buckets the
+    // fee can land in, both present, so the sums below cannot agree by luck.
+    const held = await seedFundedDeal(tenant, one, 40_000, 1_200)
     const cleared = await seedFundedDeal(tenant, two, 100_000)
-    const clearing = await seedFundedDeal(tenant, one, 60_000)
+    const clearing = await seedFundedDeal(tenant, one, 60_000, 1_800)
 
     await release(cleared, 100_000)
     await mature(cleared)
