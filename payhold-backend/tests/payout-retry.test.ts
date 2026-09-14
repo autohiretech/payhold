@@ -79,12 +79,13 @@ interface PayoutRow {
   status: string
   attempts: number
   failure_reason: string | null
+  reason_code: string | null
   next_attempt_at: Date | null
 }
 
 const payoutRow = async (id: string): Promise<PayoutRow> => {
   const { rows: [p] } = await h.db.query<PayoutRow>(
-    `select status::text, attempts, failure_reason, next_attempt_at
+    `select status::text, attempts, failure_reason, reason_code, next_attempt_at
        from payouts where id = $1`,
     [id],
   )
@@ -121,6 +122,8 @@ describe('the backoff ladder', () => {
 
     expect(waits).toEqual([1, 5, 30, 120, 120])
     expect((await payoutRow(s.payout)).status).toBe('failed')
+    // A plain `failed` retry is not exhaustion — no code until the budget is spent.
+    expect((await payoutRow(s.payout)).reason_code).toBeNull()
   })
 
   test('a failed payout keeps its clock and stays retryable', async () => {
@@ -167,6 +170,10 @@ describe('when the budget is spent', () => {
     expect(p.attempts).toBe(5)
     expect(p.next_attempt_at).toBeNull()
     expect(p.failure_reason).toMatch(/no further automatic attempts after 5 tries/)
+    // Distinguishes "a provider refused us" from routing's own blocked
+    // reasons and from `rail_balance_short` — three different next actions
+    // wearing one status.
+    expect(p.reason_code).toBe('retries_exhausted')
   })
 
   test('it says so in the audit log, separately from the failure', async () => {

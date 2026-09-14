@@ -496,6 +496,16 @@ export interface Payout {
    * triage.
    */
   failure_reason: string | null
+  /**
+   * The same fact as `failure_reason`, as a code a client can switch on
+   * instead of parsing English: `rail_balance_short`,
+   * `no_eligible_verified_destination`, `destination_not_verified`,
+   * `destination_in_security_hold`, a `route_evaluation` reason code, or
+   * `retries_exhausted`. Set only alongside a `blocked` status (or the
+   * `fail_payout` exhaustion case, which is also `blocked`); null otherwise,
+   * and null for a blocked payout written before this column existed.
+   */
+  reason_code?: string | null
   attempts: number
   /**
    * When a machine may next attempt this payout — §13's capped backoff.

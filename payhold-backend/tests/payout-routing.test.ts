@@ -165,9 +165,14 @@ async function route(payout: string): Promise<Decision> {
   return r
 }
 
-async function statusOf(payout: string): Promise<{ status: string; why: string | null }> {
-  const { rows: [p] } = await h.db.query<{ status: string; why: string | null }>(
-    `select status::text, failure_reason as why from payouts where id = $1`,
+async function statusOf(
+  payout: string,
+): Promise<{ status: string; why: string | null; reasonCode: string | null }> {
+  const { rows: [p] } = await h.db.query<
+    { status: string; why: string | null; reasonCode: string | null }
+  >(
+    `select status::text, failure_reason as why, reason_code as "reasonCode"
+       from payouts where id = $1`,
     [payout],
   )
   return p
@@ -206,6 +211,10 @@ describe('§5.2 — payout routing acceptance tests', () => {
     // either way, different next action for us.
     expect((await route(domestic)).reason_code).toBe('provider_disabled')
     expect((await statusOf(domestic)).why).toBe('Venmo payouts are not available yet.')
+    // The row itself carries the same code the decision does, not just the
+    // sentence — a client tells this apart from `rail_balance_short` without
+    // parsing English.
+    expect((await statusOf(domestic)).reasonCode).toBe('provider_disabled')
 
     // §5.2's case is about the border, so switch the rail on for one tenant to
     // reach it. (Hypothetical: `route_needs_an_adapter` will not let a
@@ -220,6 +229,11 @@ describe('§5.2 — payout routing acceptance tests', () => {
     )
 
     expect((await route(domestic)).reason_code).toBe('routed')
+    // Restored: the stale sentence must not survive next to a payout that is
+    // about to go, and neither must the stale code.
+    const restored = await statusOf(domestic)
+    expect(restored.why).toBeNull()
+    expect(restored.reasonCode).toBeNull()
 
     const abroad = await newSeller({ country: 'AE', currency: 'AED', rail: 'venmo' })
     const overseas = await payoutFor(abroad, { amount: 5_000, currency: 'AED' })
@@ -264,8 +278,9 @@ describe('§5.2 — payout routing acceptance tests', () => {
     expect(decision.reason_code).toBe('destination_not_verified')
     expect(decision.route_id).toBeNull()
 
-    const { status } = await statusOf(payout)
+    const { status, reasonCode } = await statusOf(payout)
     expect(status).toBe('blocked')
+    expect(reasonCode).toBe('destination_not_verified')
   })
 
   test('5. a failed primary does not lose funds, and nothing reroutes it', async () => {

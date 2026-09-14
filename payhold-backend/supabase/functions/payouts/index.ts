@@ -30,7 +30,7 @@ import { PayHoldError, type Payout, type Provider } from '../_shared/types.ts'
 
 const PAYOUT_COLUMNS =
   'id, tenant_id, deal_id, seller_id, amount, currency, status, scheduled_for, ' +
-  'paid_at, failure_reason, attempts, next_attempt_at, provider_ref, destination_id, review_held_at, ' +
+  'paid_at, failure_reason, reason_code, attempts, next_attempt_at, provider_ref, destination_id, review_held_at, ' +
   'review_held_by, review_hold_reason, review_approved_by, review_approved_at, created_at, ' +
   // Where the rail says this transfer is, and when it last said so. A hand-
   // maintained column list is how `provider_ref` went missing from two

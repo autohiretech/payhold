@@ -76,11 +76,12 @@ const payoutRow = async (id: string) => {
   const { rows: [p] } = await h.db.query<{
     status: string
     failure_reason: string | null
+    reason_code: string | null
     next_attempt_at: string | null
     attempts: number
     review_held_by: string | null
   }>(
-    `select status, failure_reason, next_attempt_at, attempts, review_held_by
+    `select status, failure_reason, reason_code, next_attempt_at, attempts, review_held_by
        from payouts where id = $1`,
     [id],
   )
@@ -107,6 +108,10 @@ describe('a payout the rail cannot fund', () => {
     const p = await payoutRow(s.payout)
     expect(p.status).toBe('blocked')
     expect(p.failure_reason).toBe(REASON)
+    // A client reads this to tell "still clearing at the provider" apart
+    // from the routing engine's own `blocked` reasons, without parsing the
+    // sentence above — see `hold_payout_unfunded`'s docblock.
+    expect(p.reason_code).toBe('rail_balance_short')
   })
 
   test('does not spend the retry budget', async () => {
