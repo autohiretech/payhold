@@ -1477,18 +1477,17 @@ export class FlutterwaveProvider implements PaymentProvider {
     >('/balances')
     return data.map((b) => ({
       currency: b.currency,
-      // Everything still with Flutterwave for this currency, not only what
-      // sits in one of the two wallets — the Collection wallet
-      // (`ledger_balance`) and the Payout wallet (`available_balance`) are
-      // independent pools, so this has to be their sum rather than either one
-      // alone or a fallback between them. A currency that only ever reports
-      // one of the two (the other field simply absent from the rail's
-      // response) still gets exactly that figure, via the `?? 0` on the other
-      // term — this changes nothing for a currency that has never held a
-      // Payout balance, and only stops under-reporting once one does.
+      // Everything still with Flutterwave for this currency.
       // `ledger_balance` is the TOTAL this rail holds in the currency, and
       // `available_balance` is the withdrawable SUBSET of it — not a second
-      // wallet to add on top.
+      // wallet to add on top. The fallback to `available_balance` is only for
+      // a response that omits `ledger_balance` altogether; it is never added.
+      //
+      // (An earlier paragraph here argued the two were "independent pools"
+      // that "have to be their sum". That was the reasoning behind the bug
+      // below, and it sat above the corrected code for a while, contradicting
+      // it — a reader taking the comment at its word would have put the sum
+      // back. Removed so the comment and the code say the same thing.)
       //
       // This was briefly summed, on the reading that Flutterwave's dashboard
       // "Collection balance" and "Payout balance" were two independent pots.
